@@ -70,15 +70,19 @@ def migrate(strapi_db_path: str, target_db_path: str = "acceldocs.db") -> None:
         );
     """)
 
-    # Migrate documents
+    # Migrate documents — Strapi v5 uses link tables for relationships
     docs = strapi.execute("""
-        SELECT d.*, p.name as project_name, p.slug as project_slug,
+        SELECT d.*,
+               p.name as project_name, p.slug as project_slug,
                v.name as version_name, v.slug as version_slug,
                t.name as topic_name
         FROM documents d
-        LEFT JOIN projects p ON d.project_id = p.id
-        LEFT JOIN project_versions v ON d.project_version_id = v.id
-        LEFT JOIN topics t ON d.topic_id = t.id
+        LEFT JOIN documents_project_lnk dpl ON d.id = dpl.document_id
+        LEFT JOIN projects p ON dpl.project_id = p.id
+        LEFT JOIN documents_project_version_lnk dvl ON d.id = dvl.document_id
+        LEFT JOIN project_versions v ON dvl.project_version_id = v.id
+        LEFT JOIN documents_topic_lnk dtl ON d.id = dtl.document_id
+        LEFT JOIN topics t ON dtl.topic_id = t.id
     """).fetchall()
 
     now = datetime.now(timezone.utc).isoformat()
@@ -108,8 +112,8 @@ def migrate(strapi_db_path: str, target_db_path: str = "acceldocs.db") -> None:
                     doc["topic_name"],
                     doc["visibility"] or "public",
                     status,
-                    doc["google_modified_at"],
-                    doc["last_synced_at"],
+                    doc["google_modified_at"] if "google_modified_at" in doc.keys() else None,
+                    doc["last_synced_at"] if "last_synced_at" in doc.keys() else None,
                     now,
                     now,
                 ),
