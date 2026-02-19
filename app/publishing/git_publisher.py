@@ -13,7 +13,7 @@ from pathlib import Path
 import git
 
 from app.config import settings
-from app.publishing.mkdocs_gen import write_zensical_toml
+from app.publishing.mkdocs_gen import write_mkdocs_yml
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +72,11 @@ def publish_document(
         full_path = repo_path / rel_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(markdown_content, encoding="utf-8")
+        index_paths = _ensure_parent_indexes(repo_path, full_path)
 
-        cfg_path = write_zensical_toml(repo_path)
+        cfg_path = write_mkdocs_yml(repo_path)
 
-        repo.index.add([rel_path, str(cfg_path.relative_to(repo_path))])
+        repo.index.add([rel_path, str(cfg_path.relative_to(repo_path)), *index_paths])
 
         if not repo.is_dirty(untracked_files=True):
             logger.info("No changes to commit for %s", rel_path)
@@ -120,7 +121,7 @@ def unpublish_from_production(
         if full_path.exists():
             full_path.unlink()
 
-        cfg_path = write_zensical_toml(repo_path)
+        cfg_path = write_mkdocs_yml(repo_path)
         repo.index.add([str(cfg_path.relative_to(repo_path))])
         if full_path.exists():
             repo.index.add([rel_path])
@@ -172,7 +173,9 @@ def _safe_path(name: str) -> str:
 
 
 def _document_rel_path(project: str, version: str, section: str | None, slug: str) -> str:
-    rel_parts = ["docs", _safe_path(project), _safe_path(version)]
+    rel_parts = ["docs", _safe_path(project)]
+    if version:
+        rel_parts.append(_safe_path(version))
     if section:
         for part in section.split("/"):
             if part.strip():
@@ -205,6 +208,26 @@ def _restore_branch(repo: git.Repo | None, branch_name: str | None) -> None:
         logger.warning("Failed to restore branch after publish operation")
 
 
+def _ensure_parent_indexes(repo_path: Path, full_doc_path: Path) -> list[str]:
+    """Create index.md files for parent folders (project/version/sections)."""
+    created: list[str] = []
+    docs_root = repo_path / "docs"
+    current = full_doc_path.parent
+
+    while current != docs_root and docs_root in current.parents:
+        index_md = current / "index.md"
+        if not index_md.exists():
+            title = current.name.replace("-", " ").replace("_", " ").title()
+            index_md.write_text(
+                f"# {title}\n\nAuto-generated index page for {title}.\n",
+                encoding="utf-8",
+            )
+            created.append(str(index_md.relative_to(repo_path)))
+        current = current.parent
+
+    return created
+
+
 def _ensure_seed_commit(repo: git.Repo, repo_path: Path) -> None:
     """Ensure repository has at least one commit and starter docs."""
     try:
@@ -218,6 +241,6 @@ def _ensure_seed_commit(repo: git.Repo, repo_path: Path) -> None:
     index_md = docs_dir / "index.md"
     if not index_md.exists():
         index_md.write_text("# AccelDocs\n\nWelcome to the documentation.\n")
-    cfg_path = write_zensical_toml(repo_path)
+    cfg_path = write_mkdocs_yml(repo_path)
     repo.index.add(["docs/index.md", str(cfg_path.relative_to(repo_path))])
     repo.index.commit("Initial docs structure")

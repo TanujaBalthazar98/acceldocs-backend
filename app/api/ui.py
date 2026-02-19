@@ -138,7 +138,7 @@ async def sync_page(request: Request, db: Session = Depends(get_db)):
         .all()
     )
 
-    sync_logs = [
+    raw_logs = [
         {
             "doc_title": title,
             "action": log.action,
@@ -146,9 +146,41 @@ async def sync_page(request: Request, db: Session = Depends(get_db)):
             "commit_sha": log.commit_sha or "",
             "error": log.error,
             "created_at": str(log.created_at) if log.created_at else "—",
+            "created_at_obj": log.created_at,
         }
         for log, title in logs_raw
     ]
+
+    # Collapse noisy pairs from one operation:
+    # sync -> (publish|unpublish) for the same doc within the same moment.
+    sync_logs = []
+    skip_next = False
+    for i, row in enumerate(raw_logs):
+        if skip_next:
+            skip_next = False
+            continue
+
+        sync_logs.append(row)
+
+        if row["action"] not in {"publish", "publish_preview", "unpublish"}:
+            continue
+        if i + 1 >= len(raw_logs):
+            continue
+
+        next_row = raw_logs[i + 1]
+        if next_row["action"] != "sync":
+            continue
+        if next_row["doc_title"] != row["doc_title"]:
+            continue
+
+        t1 = row["created_at_obj"]
+        t2 = next_row["created_at_obj"]
+        if t1 and t2 and abs((t1 - t2).total_seconds()) <= 2:
+            skip_next = True
+
+    # template doesn't need raw datetime object
+    for row in sync_logs:
+        row.pop("created_at_obj", None)
 
     return templates.TemplateResponse(
         "sync.html",

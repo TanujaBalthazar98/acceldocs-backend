@@ -10,6 +10,7 @@ Pipeline:
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +37,14 @@ from app.publishing.git_publisher import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Pattern to strip leading numeric prefixes like "2 ", "07 ", "12. " from Drive doc names
+_NUMERIC_PREFIX_RE = re.compile(r"^\d+[\.\s]+")
+
+
+def _clean_title(raw_name: str) -> str:
+    """Remove leading numeric sort-order prefixes from Google Drive doc names."""
+    return _NUMERIC_PREFIX_RE.sub("", raw_name).strip()
 
 
 def run_full_sync(db: Session) -> dict:
@@ -86,7 +95,7 @@ def run_full_sync(db: Session) -> dict:
                 service=service,
                 doc_file=doc_file,
                 project=project,
-                version=classification["version"] or "v1.0",
+                version=classification["version"],
                 visibility=(classification["visibility"] or "public").lower(),
                 section=classification["section"],
             )
@@ -125,7 +134,7 @@ def _sync_one_doc(
     service,
     doc_file: DriveFile,
     project: str,
-    version: str,
+    version: str | None,
     visibility: str,
     section: str | None,
 ) -> tuple[str, str | None]:
@@ -147,7 +156,10 @@ def _sync_one_doc(
     if status not in {"draft", "review", "approved", "rejected"}:
         status = "draft"
 
-    doc_slug = meta.get("slug") or slugify(doc_file.name)
+    clean_name = _clean_title(doc_file.name)
+    # Prefer auto-generated slug from the (cleaned) title. Frontmatter slugs from
+    # the old CMS are often wrong (e.g. "release-notes-440" for "Version 4.6.0").
+    doc_slug = slugify(clean_name)
     description = meta.get("description")
     tags = meta.get("tags")
 
@@ -168,10 +180,10 @@ def _sync_one_doc(
     now = datetime.now(timezone.utc).isoformat()
 
     if existing:
-        existing.title = doc_file.name
+        existing.title = clean_name
         existing.slug = doc_slug
         existing.project = project
-        existing.version = version
+        existing.version = version or ""
         existing.section = section
         existing.visibility = visibility
         existing.status = status
@@ -186,10 +198,10 @@ def _sync_one_doc(
     else:
         doc = Document(
             google_doc_id=doc_file.id,
-            title=doc_file.name,
+            title=clean_name,
             slug=doc_slug,
             project=project,
-            version=version,
+            version=version or "",
             section=section,
             visibility=visibility,
             status=status,
@@ -204,8 +216,9 @@ def _sync_one_doc(
         result = "created"
 
     publish_result: str | None = None
+    ver = version or ""
     if status == "review":
-        commit_sha = publish_to_preview(project, version, section, doc_slug, markdown)
+        commit_sha = publish_to_preview(project, ver, section, doc_slug, markdown)
         if commit_sha:
             db.add(
                 SyncLog(
@@ -217,7 +230,7 @@ def _sync_one_doc(
             )
             publish_result = "preview"
     elif status == "approved":
-        commit_sha = publish_to_production(project, version, section, doc_slug, markdown)
+        commit_sha = publish_to_production(project, ver, section, doc_slug, markdown)
         if commit_sha:
             doc.last_published_at = now
             db.add(
@@ -230,7 +243,7 @@ def _sync_one_doc(
             )
             publish_result = "production"
     elif status in {"draft", "rejected"}:
-        commit_sha = unpublish_from_production(project, version, section, doc_slug)
+        commit_sha = unpublish_from_production(project, ver, section, doc_slug)
         if commit_sha:
             doc.last_published_at = None
             db.add(
