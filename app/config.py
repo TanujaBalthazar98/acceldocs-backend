@@ -15,15 +15,16 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./acceldocs.db"
 
-    # Google OAuth
+    # Google OAuth (interactive/user auth)
     google_client_id: str = ""
     google_client_secret: str = ""
+    google_oauth_token_file: str = "oauth-token.json"
 
-    # Google Drive service account
+    # Google Drive service account (optional, if org policy allows keys)
     google_service_account_file: str = "service-account.json"
     google_drive_root_folder_id: str = ""
 
-    # MkDocs site repo
+    # Zensical docs site repo
     docs_repo_path: str = "./docs-site"
     docs_repo_url: str = ""
 
@@ -48,6 +49,10 @@ class Settings(BaseSettings):
     @property
     def service_account_path(self) -> Path:
         return Path(self.google_service_account_file)
+
+    @property
+    def oauth_token_path(self) -> Path:
+        return Path(self.google_oauth_token_file)
 
 
 settings = Settings()

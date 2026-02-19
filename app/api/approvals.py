@@ -1,11 +1,16 @@
 """Approval workflow API routes."""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.conversion.html_to_md import convert_html_to_markdown
 from app.database import get_db
-from app.models import Approval, Document
+from app.ingestion.drive import _get_service, export_doc_as_html
+from app.models import Approval, Document, User
+from app.publishing.git_publisher import publish_to_production, unpublish_from_production
 
 router = APIRouter()
 
@@ -49,12 +54,27 @@ async def list_pending(db: Session = Depends(get_db)):
     ]
 
 
+def _get_system_user(db: Session) -> User:
+    user = db.query(User).filter(User.google_id == "system").first()
+    if user:
+        return user
+    user = User(
+        google_id="system",
+        email="system@local",
+        name="System",
+        role="owner",
+    )
+    db.add(user)
+    db.flush()
+    return user
+
+
 @router.post("/action")
 async def perform_action(body: ApprovalAction, db: Session = Depends(get_db)):
     """Approve or reject a document.
 
-    Phase 7 will implement the actual git-based publishing.
-    For now, updates status in the database.
+    - approve: publishes markdown to production branch
+    - reject: moves back to draft
     """
     doc = db.get(Document, body.document_id)
     if not doc:
@@ -63,16 +83,49 @@ async def perform_action(body: ApprovalAction, db: Session = Depends(get_db)):
     if body.action not in ("approve", "reject"):
         raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
 
+    actor = _get_system_user(db)
+
     if body.action == "approve":
-        doc.status = "approved"
+        try:
+            service = _get_service()
+            html = export_doc_as_html(service, doc.google_doc_id)
+            markdown = convert_html_to_markdown(html)
+            commit_sha = publish_to_production(
+                project=doc.project,
+                version=doc.version,
+                section=doc.section,
+                slug=doc.slug,
+                markdown=markdown,
+            )
+
+            doc.status = "approved"
+            doc.last_published_at = datetime.now(timezone.utc).isoformat()
+            if commit_sha:
+                db.add(
+                    Approval(
+                        document_id=body.document_id,
+                        user_id=actor.id,
+                        action="publish",
+                        comment=f"Published commit {commit_sha[:8]}",
+                    )
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Publish failed: {exc}") from exc
     else:
         doc.status = "draft"
+        unpublish_from_production(
+            project=doc.project,
+            version=doc.version,
+            section=doc.section,
+            slug=doc.slug,
+        )
+        doc.last_published_at = None
 
-    # TODO: Phase 7 — also commit to git branch here
-    # TODO: Phase 8 — use authenticated user_id instead of hardcoded 0
     approval = Approval(
         document_id=body.document_id,
-        user_id=0,
+        user_id=actor.id,
         action=body.action,
         comment=body.comment,
     )

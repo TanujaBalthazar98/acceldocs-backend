@@ -2,10 +2,13 @@
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [project]
 name = "acceldocs-backend"
 version = "0.1.0"
-description = "AccelDocs backend — Google Docs → MkDocs publishing pipeline"
+description = "AccelDocs backend — Google Docs → Zensical publishing pipeline"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
@@ -25,7 +28,11 @@ dependencies = [
     "bleach>=6.1.0",
     "python-multipart>=0.0.7",
     "jinja2>=3.1.0",
-    "mkdocs-material>=9.5.0",
+    "zensical>=0.1.0",
+    "markdown>=3.6",
+    "pyyaml>=6.0.0",
+    "requests>=2.32.0",
+    "PyJWT>=2.8.0",
 ]
 
 [project.optional-dependencies]

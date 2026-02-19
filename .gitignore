@@ -35,8 +35,10 @@ htmlcov/
 
 # Service account key
 service-account.json
+oauth-token.json
 
-# MkDocs build output
+# Generated docs repo / build output
+docs-site/
 site/
 
 # OS
