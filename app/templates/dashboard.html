@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — AccelDocs{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+<p class="subtitle">Overview of your documentation pipeline.</p>
+
+<div class="stats">
+  <div class="stat">
+    <div class="label">Total Documents</div>
+    <div class="value brand">{{ total_docs }}</div>
+  </div>
+  <div class="stat">
+    <div class="label">Approved</div>
+    <div class="value success">{{ approved_count }}</div>
+  </div>
+  <div class="stat">
+    <div class="label">Pending Review</div>
+    <div class="value warning">{{ review_count }}</div>
+  </div>
+  <div class="stat">
+    <div class="label">Drafts</div>
+    <div class="value">{{ draft_count }}</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Quick Actions</h2>
+  </div>
+  <div class="flex gap-4">
+    <button class="btn btn-primary" onclick="runSync()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Run Sync
+    </button>
+    <a href="/approvals" class="btn">Review Pending ({{ review_count }})</a>
+    <a href="/documents" class="btn">Manage Documents</a>
+  </div>
+  <pre id="syncOut" class="mt-4" style="display:none"></pre>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Recent Documents</h2>
+    <a href="/documents" class="btn btn-sm">View All</a>
+  </div>
+  <table>
+    <tr><th>Title</th><th>Project</th><th>Version</th><th>Status</th><th>Last Synced</th></tr>
+    {% for doc in recent_docs %}
+    <tr>
+      <td>{{ doc.title }}</td>
+      <td class="mono">{{ doc.project }}</td>
+      <td class="mono">{{ doc.version }}</td>
+      <td><span class="pill pill-{{ doc.status }}">{{ doc.status }}</span></td>
+      <td class="text-sm text-muted">{{ doc.last_synced_at or '—' }}</td>
+    </tr>
+    {% else %}
+    <tr class="empty-row"><td colspan="5">No documents yet. Run a sync to get started.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function runSync() {
+  const out = document.getElementById('syncOut');
+  out.style.display = 'block';
+  out.textContent = 'Syncing from Google Drive...';
+  try {
+    const data = await apiFetch('/api/sync/trigger', { method: 'POST' });
+    out.textContent = JSON.stringify(data, null, 2);
+    showAlert(`Sync complete: ${data.synced || 0} documents synced`);
+    setTimeout(() => location.reload(), 1500);
+  } catch (e) {
+    out.textContent = 'Error: ' + e.message;
+    showAlert('Sync failed: ' + e.message, 'error');
+  }
+}
+</script>
+{% endblock %}

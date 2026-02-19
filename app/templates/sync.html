@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Sync — AccelDocs{% endblock %}
+
+{% block content %}
+<h1>Sync</h1>
+<p class="subtitle">Scan Google Drive and sync documents to the pipeline.</p>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Drive Sync</h2>
+    <button id="syncBtn" class="btn btn-primary" onclick="runSync()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Run Full Sync
+    </button>
+  </div>
+  <p class="text-sm text-muted mb-4">Scans your Google Drive folder, exports new/changed Google Docs as HTML, converts to Markdown, and publishes based on document status.</p>
+  <pre id="syncOut">Ready to sync. Click "Run Full Sync" to start.</pre>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Recent Sync Activity</h2>
+  </div>
+  <table>
+    <tr><th>Document</th><th>Action</th><th>Branch</th><th>Commit</th><th>Date</th></tr>
+    {% for log in sync_logs %}
+    <tr>
+      <td>{{ log.doc_title }}</td>
+      <td>
+        {% if 'publish' in log.action %}
+        <span class="pill pill-approved">{{ log.action }}</span>
+        {% else %}
+        <span class="pill pill-draft">{{ log.action }}</span>
+        {% endif %}
+      </td>
+      <td class="mono">{{ log.branch or '—' }}</td>
+      <td class="mono">{{ log.commit_sha[:8] if log.commit_sha else '—' }}</td>
+      <td class="text-sm text-muted">{{ log.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr class="empty-row"><td colspan="5">No sync activity yet. Run a sync to get started.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function runSync() {
+  const out = document.getElementById('syncOut');
+  const btn = document.getElementById('syncBtn');
+  btn.disabled = true;
+  btn.textContent = 'Syncing...';
+  out.textContent = 'Scanning Google Drive...\n';
+
+  try {
+    const data = await apiFetch('/api/sync/trigger', { method: 'POST' });
+    out.textContent += '\n' + JSON.stringify(data, null, 2);
+    showAlert(`Sync complete: ${data.synced || 0} documents synced, ${data.errors || 0} errors`);
+    setTimeout(() => location.reload(), 2000);
+  } catch (e) {
+    out.textContent += '\nError: ' + e.message;
+    showAlert('Sync failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Run Full Sync';
+  }
+}
+</script>
+{% endblock %}

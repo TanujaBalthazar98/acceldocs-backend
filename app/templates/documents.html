@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Documents — AccelDocs{% endblock %}
+
+{% block content %}
+<h1>Documents</h1>
+<p class="subtitle">All documents synced from Google Drive.</p>
+
+<div class="card mb-4">
+  <div class="flex justify-between">
+    <div class="flex gap-2">
+      <select id="filterStatus" class="btn" onchange="applyFilters()">
+        <option value="">All Statuses</option>
+        <option value="draft" {% if filter_status == 'draft' %}selected{% endif %}>Draft</option>
+        <option value="review" {% if filter_status == 'review' %}selected{% endif %}>Review</option>
+        <option value="approved" {% if filter_status == 'approved' %}selected{% endif %}>Approved</option>
+        <option value="rejected" {% if filter_status == 'rejected' %}selected{% endif %}>Rejected</option>
+      </select>
+      <select id="filterProject" class="btn" onchange="applyFilters()">
+        <option value="">All Projects</option>
+        {% for p in projects %}
+        <option value="{{ p }}" {% if filter_project == p %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button class="btn btn-primary" onclick="runSync()">Sync from Drive</button>
+  </div>
+</div>
+
+<div class="card">
+  <table>
+    <tr>
+      <th>Title</th>
+      <th>Project</th>
+      <th>Version</th>
+      <th>Section</th>
+      <th>Status</th>
+      <th>Visibility</th>
+      <th>Actions</th>
+    </tr>
+    {% for doc in documents %}
+    <tr id="row-{{ doc.id }}">
+      <td>
+        <div>{{ doc.title }}</div>
+        <div class="mono text-muted">{{ doc.slug }}</div>
+      </td>
+      <td class="mono">{{ doc.project }}</td>
+      <td class="mono">{{ doc.version }}</td>
+      <td class="text-sm">{{ doc.section or '—' }}</td>
+      <td><span class="pill pill-{{ doc.status }}">{{ doc.status }}</span></td>
+      <td class="text-sm">{{ doc.visibility }}</td>
+      <td>
+        <div class="btn-group">
+          {% if doc.status == 'draft' %}
+          <button class="btn btn-sm" onclick="setStatus({{ doc.id }}, 'review')">Send to Review</button>
+          {% elif doc.status == 'review' %}
+          <button class="btn btn-sm btn-success" onclick="approveDoc({{ doc.id }})">Approve</button>
+          <button class="btn btn-sm btn-danger" onclick="rejectDoc({{ doc.id }})">Reject</button>
+          {% elif doc.status == 'approved' %}
+          <button class="btn btn-sm btn-danger" onclick="setStatus({{ doc.id }}, 'draft')">Unpublish</button>
+          {% elif doc.status == 'rejected' %}
+          <button class="btn btn-sm" onclick="setStatus({{ doc.id }}, 'draft')">Back to Draft</button>
+          {% endif %}
+        </div>
+      </td>
+    </tr>
+    {% else %}
+    <tr class="empty-row"><td colspan="7">No documents found. Run a sync to import from Google Drive.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+<pre id="syncOut" class="mt-4" style="display:none"></pre>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function applyFilters() {
+  const status = document.getElementById('filterStatus').value;
+  const project = document.getElementById('filterProject').value;
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  if (project) params.set('project', project);
+  window.location.href = '/documents' + (params.toString() ? '?' + params : '');
+}
+
+async function setStatus(id, status) {
+  try {
+    await apiFetch(`/api/documents/${id}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    showAlert(`Document moved to ${status}`);
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    showAlert('Failed: ' + e.message, 'error');
+  }
+}
+
+async function approveDoc(id) {
+  try {
+    await apiFetch('/api/approvals/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ document_id: id, action: 'approve' }),
+    });
+    showAlert('Document approved and published');
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    showAlert('Approve failed: ' + e.message, 'error');
+  }
+}
+
+async function rejectDoc(id) {
+  try {
+    await apiFetch('/api/approvals/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ document_id: id, action: 'reject' }),
+    });
+    showAlert('Document rejected');
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    showAlert('Reject failed: ' + e.message, 'error');
+  }
+}
+
+async function runSync() {
+  const out = document.getElementById('syncOut');
+  out.style.display = 'block';
+  out.textContent = 'Syncing...';
+  try {
+    const data = await apiFetch('/api/sync/trigger', { method: 'POST' });
+    out.textContent = JSON.stringify(data, null, 2);
+    showAlert(`Sync complete: ${data.synced || 0} synced`);
+    setTimeout(() => location.reload(), 1500);
+  } catch (e) {
+    out.textContent = 'Error: ' + e.message;
+    showAlert('Sync failed: ' + e.message, 'error');
+  }
+}
+</script>
+{% endblock %}

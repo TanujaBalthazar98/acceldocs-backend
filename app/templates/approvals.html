@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Approvals — AccelDocs{% endblock %}
+
+{% block content %}
+<h1>Approvals</h1>
+<p class="subtitle">Review and approve documents for publication.</p>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Pending Review ({{ pending | length }})</h2>
+  </div>
+  <table>
+    <tr><th>Title</th><th>Project</th><th>Version</th><th>Slug</th><th>Updated</th><th>Actions</th></tr>
+    {% for doc in pending %}
+    <tr id="pending-{{ doc.id }}">
+      <td>{{ doc.title }}</td>
+      <td class="mono">{{ doc.project }}</td>
+      <td class="mono">{{ doc.version }}</td>
+      <td class="mono text-muted">{{ doc.slug }}</td>
+      <td class="text-sm text-muted">{{ doc.updated_at or '—' }}</td>
+      <td>
+        <div class="btn-group">
+          <button class="btn btn-sm btn-success" onclick="approve({{ doc.id }})">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+            Approve
+          </button>
+          <button class="btn btn-sm btn-danger" onclick="reject({{ doc.id }})">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            Reject
+          </button>
+        </div>
+      </td>
+    </tr>
+    {% else %}
+    <tr class="empty-row"><td colspan="6">No documents pending review. All clear!</td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Recent Decisions</h2>
+  </div>
+  <table>
+    <tr><th>Document</th><th>Action</th><th>By</th><th>Comment</th><th>Date</th></tr>
+    {% for a in recent_approvals %}
+    <tr>
+      <td>{{ a.doc_title }}</td>
+      <td>
+        {% if a.action == 'approve' %}
+        <span class="pill pill-approved">approved</span>
+        {% elif a.action == 'reject' %}
+        <span class="pill pill-rejected">rejected</span>
+        {% else %}
+        <span class="pill pill-draft">{{ a.action }}</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">{{ a.user_name or 'System' }}</td>
+      <td class="text-sm text-muted">{{ a.comment or '—' }}</td>
+      <td class="text-sm text-muted">{{ a.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr class="empty-row"><td colspan="5">No approval history yet.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function approve(id) {
+  try {
+    await apiFetch('/api/approvals/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ document_id: id, action: 'approve' }),
+    });
+    showAlert('Document approved and published to production');
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    showAlert('Approve failed: ' + e.message, 'error');
+  }
+}
+
+async function reject(id) {
+  try {
+    await apiFetch('/api/approvals/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ document_id: id, action: 'reject' }),
+    });
+    showAlert('Document rejected and moved back to draft');
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    showAlert('Reject failed: ' + e.message, 'error');
+  }
+}
+</script>
+{% endblock %}
