@@ -191,3 +191,22 @@ async def sync_page(request: Request, db: Session = Depends(get_db)):
             "sync_logs": sync_logs,
         },
     )
+
+
+@router.get("/users", response_class=HTMLResponse)
+async def users_page(request: Request, db: Session = Depends(get_db)):
+    users = db.query(User).order_by(User.email).all()
+
+    # TODO: Get current user from session/JWT
+    current_user_id = users[0].id if users else None
+
+    return templates.TemplateResponse(
+        "users.html",
+        {
+            "request": request,
+            "active": "users",
+            "pending_count": _pending_count(db),
+            "users": users,
+            "current_user_id": current_user_id,
+        },
+    )

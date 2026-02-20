@@ -73,6 +73,13 @@
     .pill-approved { color: #067647; background: #ecfdf3; }
     .pill-rejected { color: #b42318; background: #fef3f2; }
 
+    .badge { display: inline-block; padding: 3px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; }
+    .badge-primary { background: #dbeafe; color: #1e40af; }
+    .badge-success { background: #d1fae5; color: #065f46; }
+    .badge-info { background: #e0e7ff; color: #3730a3; }
+    .badge-warning { background: #fed7aa; color: #92400e; }
+    .badge-secondary { background: #f1f5f9; color: #475569; }
+
     /* Alerts */
     .alert { padding: 12px 16px; border-radius: 8px; font-size: 14px; margin-bottom: 16px; display: none; }
     .alert-success { background: #ecfdf3; color: #067647; border: 1px solid #abefc6; }
@@ -81,6 +88,10 @@
 
     /* Pre / code */
     pre { background: #1e293b; color: #e2e8f0; padding: 16px; border-radius: 8px; font-size: 13px; overflow-x: auto; white-space: pre-wrap; }
+
+    /* Form inputs */
+    .form-input { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; transition: border-color .15s; }
+    .form-input:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
 
     /* Utilities */
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
@@ -129,6 +140,11 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           Sync
         </a>
+        <div class="section-label">Administration</div>
+        <a href="/users" class="{% if active == 'users' %}active{% endif %}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          Users
+        </a>
       </nav>
     </aside>
 
@@ -146,14 +162,11 @@
       setTimeout(() => el.classList.remove('show'), 5000);
     }
     async function apiFetch(url, opts={}) {
-      const r = await fetch(url, opts);
-      let data = {};
-      try { data = await r.json(); } catch {}
-      if (!r.ok) {
-        const detail = data?.detail || data?.error || data?.message || 'Request failed';
-        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      // Add JSON content-type header if body is provided
+      if (opts.body && !(opts.headers && opts.headers['Content-Type'])) {
+        opts.headers = { ...opts.headers, 'Content-Type': 'application/json' };
       }
-      return data;
+      return await fetch(url, opts);
     }
   </script>
   {% block scripts %}{% endblock %}

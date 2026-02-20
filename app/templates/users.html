@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+
+{% block title %}Users - AccelDocs{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 2rem;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <div>
+            <h1 style="margin: 0 0 0.5rem 0; font-size: 2rem; font-weight: 600;">Users</h1>
+            <p style="margin: 0; color: #666;">Manage user access and roles.</p>
+        </div>
+        <button onclick="showInviteModal()" class="btn btn-primary">
+            Invite User
+        </button>
+    </div>
+
+    <div class="card">
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr>
+                    <th style="text-align: left; padding: 0.75rem; border-bottom: 2px solid #ddd; font-weight: 600; color: #444; font-size: 0.875rem; text-transform: uppercase;">Email</th>
+                    <th style="text-align: left; padding: 0.75rem; border-bottom: 2px solid #ddd; font-weight: 600; color: #444; font-size: 0.875rem; text-transform: uppercase;">Name</th>
+                    <th style="text-align: left; padding: 0.75rem; border-bottom: 2px solid #ddd; font-weight: 600; color: #444; font-size: 0.875rem; text-transform: uppercase;">Role</th>
+                    <th style="text-align: left; padding: 0.75rem; border-bottom: 2px solid #ddd; font-weight: 600; color: #444; font-size: 0.875rem; text-transform: uppercase;">Joined</th>
+                    <th style="text-align: left; padding: 0.75rem; border-bottom: 2px solid #ddd; font-weight: 600; color: #444; font-size: 0.875rem; text-transform: uppercase;">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr style="border-bottom: 1px solid #eee;">
+                    <td style="padding: 1rem 0.75rem;">
+                        <span style="font-weight: 500;">{{ user.email }}</span>
+                        {% if user.google_id.startswith('pending-') %}
+                        <span class="badge" style="background: #fbbf24; color: #78350f; margin-left: 0.5rem;">Pending</span>
+                        {% endif %}
+                    </td>
+                    <td style="padding: 1rem 0.75rem;">
+                        {{ user.name or '—' }}
+                    </td>
+                    <td style="padding: 1rem 0.75rem;">
+                        <span class="badge {% if user.role == 'owner' %}badge-primary{% elif user.role == 'admin' %}badge-success{% elif user.role == 'editor' %}badge-info{% elif user.role == 'reviewer' %}badge-warning{% else %}badge-secondary{% endif %}">
+                            {{ user.role|title }}
+                        </span>
+                    </td>
+                    <td style="padding: 1rem 0.75rem; color: #666; font-size: 0.875rem;">
+                        {{ user.created_at[:10] }}
+                    </td>
+                    <td style="padding: 1rem 0.75rem;">
+                        <div style="display: flex; gap: 0.5rem;">
+                            <button onclick="editUser({{ user.id }}, '{{ user.name }}', '{{ user.role }}')" class="btn btn-sm" style="background: #e5e7eb; color: #374151;">
+                                Edit
+                            </button>
+                            {% if user.id != current_user_id %}
+                            <button onclick="deleteUser({{ user.id }}, '{{ user.email }}')" class="btn btn-sm" style="background: #fee2e2; color: #991b1b;">
+                                Delete
+                            </button>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not users %}
+                <tr>
+                    <td colspan="5" style="padding: 3rem; text-align: center; color: #999;">
+                        No users found.
+                    </td>
+                </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Invite Modal -->
+<div id="inviteModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; padding: 2rem;">
+    <div class="card" style="max-width: 500px; margin: 2rem auto;">
+        <div style="padding: 1.5rem; border-bottom: 1px solid #eee;">
+            <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Invite User</h2>
+        </div>
+        <form id="inviteForm" onsubmit="inviteUser(event)" style="padding: 1.5rem;">
+            <div style="margin-bottom: 1rem;">
+                <label style="display: block; font-weight: 500; margin-bottom: 0.5rem; font-size: 0.875rem;">Email</label>
+                <input type="email" name="email" required class="form-input" placeholder="user@example.com">
+            </div>
+            <div style="margin-bottom: 1rem;">
+                <label style="display: block; font-weight: 500; margin-bottom: 0.5rem; font-size: 0.875rem;">Name</label>
+                <input type="text" name="name" required class="form-input" placeholder="Full name">
+            </div>
+            <div style="margin-bottom: 1.5rem;">
+                <label style="display: block; font-weight: 500; margin-bottom: 0.5rem; font-size: 0.875rem;">Role</label>
+                <select name="role" required class="form-input">
+                    <option value="">Select role...</option>
+                    <option value="viewer">Viewer (Read-only)</option>
+                    <option value="reviewer">Reviewer (Can comment)</option>
+                    <option value="editor">Editor (Can edit & publish)</option>
+                    <option value="admin">Admin (Full access)</option>
+                </select>
+            </div>
+            <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
+                <button type="button" onclick="hideInviteModal()" class="btn">Cancel</button>
+                <button type="submit" class="btn btn-primary">Send Invitation</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Edit Modal -->
+<div id="editModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; padding: 2rem;">
+    <div class="card" style="max-width: 500px; margin: 2rem auto;">
+        <div style="padding: 1.5rem; border-bottom: 1px solid #eee;">
+            <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Edit User</h2>
+        </div>
+        <form id="editForm" onsubmit="updateUser(event)" style="padding: 1.5rem;">
+            <input type="hidden" name="user_id" id="edit_user_id">
+            <div style="margin-bottom: 1rem;">
+                <label style="display: block; font-weight: 500; margin-bottom: 0.5rem; font-size: 0.875rem;">Name</label>
+                <input type="text" name="name" id="edit_name" required class="form-input">
+            </div>
+            <div style="margin-bottom: 1.5rem;">
+                <label style="display: block; font-weight: 500; margin-bottom: 0.5rem; font-size: 0.875rem;">Role</label>
+                <select name="role" id="edit_role" required class="form-input">
+                    <option value="viewer">Viewer (Read-only)</option>
+                    <option value="reviewer">Reviewer (Can comment)</option>
+                    <option value="editor">Editor (Can edit & publish)</option>
+                    <option value="admin">Admin (Full access)</option>
+                </select>
+            </div>
+            <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
+                <button type="button" onclick="hideEditModal()" class="btn">Cancel</button>
+                <button type="submit" class="btn btn-primary">Update User</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function showInviteModal() {
+    document.getElementById('inviteModal').style.display = 'block';
+}
+
+function hideInviteModal() {
+    document.getElementById('inviteModal').style.display = 'none';
+    document.getElementById('inviteForm').reset();
+}
+
+function showEditModal() {
+    document.getElementById('editModal').style.display = 'block';
+}
+
+function hideEditModal() {
+    document.getElementById('editModal').style.display = 'none';
+    document.getElementById('editForm').reset();
+}
+
+function editUser(id, name, role) {
+    document.getElementById('edit_user_id').value = id;
+    document.getElementById('edit_name').value = name;
+    document.getElementById('edit_role').value = role;
+    showEditModal();
+}
+
+async function inviteUser(e) {
+    e.preventDefault();
+    const form = e.target;
+    const data = {
+        email: form.email.value,
+        name: form.name.value,
+        role: form.role.value,
+    };
+
+    try {
+        const response = await apiFetch('/api/users', {
+            method: 'POST',
+            body: JSON.stringify(data),
+        });
+
+        if (response.ok) {
+            showAlert('User invited successfully', 'success');
+            hideInviteModal();
+            setTimeout(() => window.location.reload(), 1000);
+        } else {
+            const error = await response.json();
+            showAlert(error.detail || 'Failed to invite user', 'error');
+        }
+    } catch (err) {
+        showAlert('Network error: ' + err.message, 'error');
+    }
+}
+
+async function updateUser(e) {
+    e.preventDefault();
+    const form = e.target;
+    const userId = form.user_id.value;
+    const data = {
+        name: form.name.value,
+        role: form.role.value,
+    };
+
+    try {
+        const response = await apiFetch(`/api/users/${userId}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        });
+
+        if (response.ok) {
+            showAlert('User updated successfully', 'success');
+            hideEditModal();
+            setTimeout(() => window.location.reload(), 1000);
+        } else {
+            const error = await response.json();
+            showAlert(error.detail || 'Failed to update user', 'error');
+        }
+    } catch (err) {
+        showAlert('Network error: ' + err.message, 'error');
+    }
+}
+
+async function deleteUser(id, email) {
+    if (!confirm(`Delete user ${email}? This action cannot be undone.`)) {
+        return;
+    }
+
+    try {
+        const response = await apiFetch(`/api/users/${id}`, {
+            method: 'DELETE',
+        });
+
+        if (response.ok) {
+            showAlert('User deleted successfully', 'success');
+            setTimeout(() => window.location.reload(), 1000);
+        } else {
+            const error = await response.json();
+            showAlert(error.detail || 'Failed to delete user', 'error');
+        }
+    } catch (err) {
+        showAlert('Network error: ' + err.message, 'error');
+    }
+}
+</script>
+{% endblock %}

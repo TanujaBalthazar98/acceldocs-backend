@@ -12,6 +12,7 @@ from app.api.health import router as health_router
 from app.api.documents import router as documents_router
 from app.api.sync import router as sync_router
 from app.api.approvals import router as approvals_router
+from app.api.users import router as users_router
 from app.api.ui import router as ui_router
 from app.auth.routes import router as auth_router
 
@@ -52,3 +53,4 @@ app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.include_router(documents_router, prefix="/api/documents", tags=["documents"])
 app.include_router(sync_router, prefix="/api/sync", tags=["sync"])
 app.include_router(approvals_router, prefix="/api/approvals", tags=["approvals"])
+app.include_router(users_router, prefix="/api/users", tags=["users"])

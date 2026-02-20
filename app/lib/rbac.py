@@ -177,3 +177,43 @@ def get_drive_role(role: str | None) -> DriveRole:
     if not role or role not in ROLE_DEFINITIONS:
         return None
     return ROLE_DEFINITIONS[role].drive_role
+
+
+def get_permissions_for_role(role: str | None) -> set[str]:
+    """Get string-based permissions for a role (for API guards).
+
+    Returns a set of permission strings like:
+    - users.view, users.create, users.edit, users.delete, users.manage_roles
+    - documents.view, documents.edit, documents.publish
+    - etc.
+    """
+    perms = get_permissions(role)
+    permission_strings = set()
+
+    # User management permissions
+    if perms.can_view:
+        permission_strings.add("users.view")
+    if perms.can_manage_members:
+        permission_strings.update(["users.create", "users.edit", "users.delete", "users.manage_roles"])
+    elif perms.can_invite_members:
+        permission_strings.add("users.create")
+
+    # Document permissions
+    if perms.can_view_published or perms.can_view_draft:
+        permission_strings.add("documents.view")
+    if perms.can_edit_document:
+        permission_strings.add("documents.edit")
+    if perms.can_publish:
+        permission_strings.add("documents.publish")
+    if perms.can_delete_document:
+        permission_strings.add("documents.delete")
+
+    # Sync permissions
+    if perms.can_sync_content:
+        permission_strings.add("sync.trigger")
+
+    # Settings permissions
+    if perms.can_edit_project_settings:
+        permission_strings.add("settings.edit")
+
+    return permission_strings
