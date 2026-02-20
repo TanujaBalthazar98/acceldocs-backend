@@ -43,7 +43,7 @@
                         </span>
                     </td>
                     <td style="padding: 1rem 0.75rem; color: #666; font-size: 0.875rem;">
-                        {{ user.created_at[:10] }}
+                        {{ user.created_at.strftime('%Y-%m-%d') if user.created_at else '—' }}
                     </td>
                     <td style="padding: 1rem 0.75rem;">
                         <div style="display: flex; gap: 0.5rem;">
@@ -93,8 +93,9 @@
                     <option value="viewer">Viewer (Read-only)</option>
                     <option value="reviewer">Reviewer (Can comment)</option>
                     <option value="editor">Editor (Can edit & publish)</option>
-                    <option value="admin">Admin (Full access)</option>
+                    <option value="admin">Admin (Can manage users)</option>
                 </select>
+                <p style="font-size: 0.75rem; color: #666; margin-top: 0.5rem;">Note: Owner role is reserved and cannot be assigned.</p>
             </div>
             <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
                 <button type="button" onclick="hideInviteModal()" class="btn">Cancel</button>
@@ -122,8 +123,9 @@
                     <option value="viewer">Viewer (Read-only)</option>
                     <option value="reviewer">Reviewer (Can comment)</option>
                     <option value="editor">Editor (Can edit & publish)</option>
-                    <option value="admin">Admin (Full access)</option>
+                    <option value="admin">Admin (Can manage users)</option>
                 </select>
+                <p style="font-size: 0.75rem; color: #666; margin-top: 0.5rem;">Note: Owner role is reserved and cannot be changed.</p>
             </div>
             <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
                 <button type="button" onclick="hideEditModal()" class="btn">Cancel</button>

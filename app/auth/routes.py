@@ -39,6 +39,35 @@ def _create_jwt(user_id: int, email: str) -> str:
     return jwt.encode(payload, settings.secret_key, algorithm=JWT_ALGORITHM)
 
 
+def _check_drive_folder_owner(access_token: str, folder_id: str, user_email: str) -> bool:
+    """Check if user owns the Google Drive root folder."""
+    try:
+        from google.oauth2.credentials import Credentials as UserCredentials
+        from googleapiclient.discovery import build
+
+        creds = UserCredentials(token=access_token)
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+
+        # Get folder metadata
+        folder = service.files().get(
+            fileId=folder_id,
+            fields="owners",
+            supportsAllDrives=True,
+        ).execute()
+
+        owners = folder.get("owners", [])
+        for owner in owners:
+            if owner.get("emailAddress") == user_email:
+                logger.info(f"User {user_email} owns Drive folder {folder_id}")
+                return True
+
+        logger.info(f"User {user_email} does NOT own Drive folder {folder_id}")
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to check folder ownership: {e}")
+        return False
+
+
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     """Dependency: extract and validate JWT from Authorization header."""
     auth_header = request.headers.get("Authorization", "")
@@ -71,7 +100,7 @@ async def login():
             "https://accounts.google.com/o/oauth2/v2/auth"
             f"?client_id={settings.google_client_id}"
             "&response_type=code"
-            "&scope=openid%20email%20profile"
+            "&scope=openid%20email%20profile%20https://www.googleapis.com/auth/drive.readonly"
             "&redirect_uri=http://localhost:8000/auth/callback"
             "&access_type=offline"
         )
@@ -127,15 +156,28 @@ async def callback(code: str | None = None, db: Session = Depends(get_db)):
     if not google_id or not email:
         raise HTTPException(status_code=400, detail="Incomplete user info from Google")
 
+    # Determine role: owner if they own the root Drive folder, else viewer
+    is_folder_owner = False
+    if settings.google_drive_root_folder_id:
+        is_folder_owner = _check_drive_folder_owner(
+            access_token, settings.google_drive_root_folder_id, email
+        )
+
     # Upsert user in DB
     user = db.query(User).filter(User.google_id == google_id).first()
     if user:
         user.email = email
         user.name = name
+        # Update role to owner if they own the folder (even if previously assigned different role)
+        if is_folder_owner and user.role != "owner":
+            user.role = "owner"
+            logger.info(f"Promoted {email} to owner (owns Drive root folder)")
     else:
-        user = User(google_id=google_id, email=email, name=name, role="viewer")
+        role = "owner" if is_folder_owner else "viewer"
+        user = User(google_id=google_id, email=email, name=name, role=role)
         db.add(user)
         db.flush()
+        logger.info(f"Created new user {email} with role {role}")
 
     db.commit()
 
