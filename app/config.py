@@ -1,13 +1,17 @@
 """Application configuration via environment variables."""
 
+import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Only load .env file if it exists (not present on Railway/production)
+_env_file = ".env" if os.path.isfile(".env") else None
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_env_file,
         env_file_encoding="utf-8",
         extra="ignore",
     )

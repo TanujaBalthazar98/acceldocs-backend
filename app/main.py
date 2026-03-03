@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Initialize encryption service for Google token storage
     logger.info("Initializing encryption service...")
+    logger.info("SECRET_KEY length: %d, AUTO_CREATE_SCHEMA: %s, ALLOWED_ORIGINS: %s",
+                len(settings.secret_key), settings.auto_create_schema, settings.allowed_origins)
     init_encryption_service(settings.secret_key)
 
     if settings.auto_create_schema:
