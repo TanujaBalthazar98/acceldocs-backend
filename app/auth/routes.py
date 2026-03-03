@@ -287,21 +287,26 @@ async def callback(
             raise HTTPException(status_code=400, detail="Invalid signup token")
 
     # Exchange authorization code for tokens
-    async with httpx.AsyncClient() as client:
-        token_resp = await client.post(
-            GOOGLE_TOKEN_URL,
-            data={
-                "code": code,
-                "client_id": settings.google_client_id,
-                "client_secret": settings.google_client_secret,
-                "redirect_uri": settings.google_oauth_redirect_uri,
-                "grant_type": "authorization_code",
-            },
-        )
+    logger.info("OAuth callback: exchanging code, redirect_uri=%s", settings.google_oauth_redirect_uri)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            token_resp = await client.post(
+                GOOGLE_TOKEN_URL,
+                data={
+                    "code": code,
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret,
+                    "redirect_uri": settings.google_oauth_redirect_uri,
+                    "grant_type": "authorization_code",
+                },
+            )
+    except Exception as e:
+        logger.exception("Token exchange HTTP request failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Token exchange request failed: {e}")
 
     if token_resp.status_code != 200:
-        logger.error("Token exchange failed: %s", token_resp.text)
-        raise HTTPException(status_code=400, detail="Failed to exchange authorization code")
+        logger.error("Token exchange failed (status %s): %s", token_resp.status_code, token_resp.text)
+        raise HTTPException(status_code=400, detail=f"Failed to exchange authorization code: {token_resp.text}")
 
     tokens = token_resp.json()
     access_token = tokens.get("access_token")
@@ -502,7 +507,7 @@ async def callback(
             },
         }
 
-    # Return HTML that posts message to opener window (for popup flow)
+    # Return HTML that handles both popup flow (postMessage) and redirect flow (store + redirect)
     html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -511,7 +516,7 @@ async def callback(
     </head>
     <body>
         <script>
-            window.opener.postMessage({{
+            var authData = {{
                 type: 'GOOGLE_AUTH_SUCCESS',
                 accessToken: '{access_token}',
                 jwt: '{jwt_token}',
@@ -521,10 +526,22 @@ async def callback(
                     name: '{user.name or ""}',
                     role: '{user.role}'
                 }}
-            }}, '*');
-            window.close();
+            }};
+
+            if (window.opener) {{
+                // Popup flow: send message to parent and close
+                window.opener.postMessage(authData, '*');
+                window.close();
+            }} else {{
+                // Redirect flow: store token in localStorage and redirect to dashboard
+                try {{
+                    localStorage.setItem('acceldocs_auth_token', authData.jwt);
+                    localStorage.setItem('google_access_token', authData.accessToken);
+                }} catch(e) {{}}
+                window.location.href = '/';
+            }}
         </script>
-        <p>Authentication successful! This window will close automatically.</p>
+        <p>Authentication successful! Redirecting...</p>
     </body>
     </html>
     """
