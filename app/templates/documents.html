@@ -5,67 +5,219 @@
 <h1>Documents</h1>
 <p class="subtitle">All documents synced from Google Drive.</p>
 
+<!-- Search and Filters Card -->
 <div class="card mb-4">
-  <div class="flex justify-between">
-    <div class="flex gap-2">
-      <select id="filterStatus" class="btn" onchange="applyFilters()">
+  <!-- Search Bar -->
+  <div style="margin-bottom: 1rem;">
+    <div style="position: relative;">
+      <input
+        type="text"
+        id="searchInput"
+        placeholder="Search documents by title, description, tags..."
+        style="width: 100%; padding: 0.75rem 2.5rem 0.75rem 1rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px;"
+        value="{{ search_query or '' }}"
+      />
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        style="position: absolute; right: 0.75rem; top: 50%; transform: translateY(-50%); width: 18px; height: 18px; color: #94a3b8; pointer-events: none;"
+      >
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+    </div>
+  </div>
+
+  <!-- Quick Filters Row -->
+  <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+    <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+      <select id="filterStatus" class="btn" style="min-width: 120px;">
         <option value="">All Statuses</option>
         <option value="draft" {% if filter_status == 'draft' %}selected{% endif %}>Draft</option>
         <option value="review" {% if filter_status == 'review' %}selected{% endif %}>Review</option>
         <option value="approved" {% if filter_status == 'approved' %}selected{% endif %}>Approved</option>
         <option value="rejected" {% if filter_status == 'rejected' %}selected{% endif %}>Rejected</option>
       </select>
-      <select id="filterProject" class="btn" onchange="applyFilters()">
+
+      <select id="filterProject" class="btn" style="min-width: 140px;">
         <option value="">All Projects</option>
         {% for p in projects %}
         <option value="{{ p }}" {% if filter_project == p %}selected{% endif %}>{{ p }}</option>
         {% endfor %}
       </select>
+
+      <select id="filterVisibility" class="btn" style="min-width: 120px;">
+        <option value="">All Visibility</option>
+        <option value="public" {% if filter_visibility == 'public' %}selected{% endif %}>Public</option>
+        <option value="internal" {% if filter_visibility == 'internal' %}selected{% endif %}>Internal</option>
+      </select>
+
+      <select id="filterVersion" class="btn" style="min-width: 120px;">
+        <option value="">All Versions</option>
+        {% for v in versions %}
+        <option value="{{ v }}" {% if filter_version == v %}selected{% endif %}>{{ v }}</option>
+        {% endfor %}
+      </select>
+
+      <button class="btn" onclick="toggleAdvancedFilters()" id="advancedBtn" style="background: #f1f5f9;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
+          <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+        </svg>
+        Advanced
+      </button>
+
+      <button class="btn" onclick="clearFilters()" style="background: #fee2e2; color: #991b1b;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+        Clear
+      </button>
     </div>
-    <button class="btn btn-primary" onclick="runSync()">Sync from Drive</button>
+
+    <div style="display: flex; gap: 0.5rem; align-items: center;">
+      <label style="font-size: 13px; color: #64748b;">Sort:</label>
+      <select id="sortField" class="btn" style="min-width: 140px;">
+        <option value="title" {% if sort_field == 'title' %}selected{% endif %}>Title</option>
+        <option value="last_synced" {% if sort_field == 'last_synced' %}selected{% endif %}>Last Synced</option>
+        <option value="last_published" {% if sort_field == 'last_published' %}selected{% endif %}>Last Published</option>
+        <option value="modified" {% if sort_field == 'modified' %}selected{% endif %}>Modified Date</option>
+        <option value="created" {% if sort_field == 'created' %}selected{% endif %}>Created Date</option>
+      </select>
+
+      <select id="sortOrder" class="btn" style="min-width: 80px;">
+        <option value="asc" {% if sort_order == 'asc' %}selected{% endif %}>A→Z</option>
+        <option value="desc" {% if sort_order == 'desc' %}selected{% endif %}>Z→A</option>
+      </select>
+
+      <button class="btn btn-primary" onclick="runSync()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
+          <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </svg>
+        Sync from Drive
+      </button>
+    </div>
+  </div>
+
+  <!-- Advanced Filters Panel (Hidden by default) -->
+  <div id="advancedFilters" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e2e8f0;">
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
+      <div>
+        <label style="display: block; font-size: 13px; font-weight: 500; margin-bottom: 0.5rem; color: #475569;">Date Range</label>
+        <div style="display: flex; gap: 0.5rem;">
+          <input type="date" id="dateFrom" class="btn" style="flex: 1;" />
+          <input type="date" id="dateTo" class="btn" style="flex: 1;" />
+        </div>
+      </div>
+      <div>
+        <label style="display: block; font-size: 13px; font-weight: 500; margin-bottom: 0.5rem; color: #475569;">Results Per Page</label>
+        <select id="limitResults" class="btn" style="width: 100%;">
+          <option value="">All</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+          <option value="100" selected>100</option>
+          <option value="250">250</option>
+        </select>
+      </div>
+    </div>
   </div>
 </div>
 
+<!-- Results Info and Bulk Actions Bar -->
+<div style="margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center;">
+  <span style="color: #64748b; font-size: 14px;" id="resultsInfo">
+    Showing {{ documents|length }} document{{ 's' if documents|length != 1 else '' }}
+  </span>
+
+  <!-- Bulk Actions (hidden until items selected) -->
+  <div id="bulkActionsBar" style="display: none; gap: 0.5rem; align-items: center;">
+    <span style="color: #475569; font-size: 14px; font-weight: 500;" id="selectedCount">0 selected</span>
+
+    <select id="bulkActionSelect" class="btn" style="min-width: 160px;">
+      <option value="">Choose Action...</option>
+      <option value="approve">✓ Approve All</option>
+      <option value="reject">✗ Reject All</option>
+      <option value="set_status_draft">Set to Draft</option>
+      <option value="set_status_review">Send to Review</option>
+      <option value="set_visibility_public">Make Public</option>
+      <option value="set_visibility_internal">Make Internal</option>
+      <option value="delete">🗑️ Delete Selected</option>
+    </select>
+
+    <button class="btn btn-primary" onclick="executeBulkAction()" id="bulkActionBtn" disabled>
+      Apply
+    </button>
+
+    <button class="btn" onclick="clearSelection()" style="background: #fee2e2; color: #991b1b;">
+      Clear Selection
+    </button>
+  </div>
+</div>
+
+<!-- Documents Table -->
 <div class="card">
   <table>
-    <tr>
-      <th>Title</th>
-      <th>Project</th>
-      <th>Version</th>
-      <th>Section</th>
-      <th>Status</th>
-      <th>Visibility</th>
-      <th>Actions</th>
-    </tr>
-    {% for doc in documents %}
-    <tr id="row-{{ doc.id }}">
-      <td>
-        <div>{{ doc.title }}</div>
-        <div class="mono text-muted">{{ doc.slug }}</div>
-      </td>
-      <td class="mono">{{ doc.project }}</td>
-      <td class="mono">{{ doc.version }}</td>
-      <td class="text-sm">{{ doc.section or '—' }}</td>
-      <td><span class="pill pill-{{ doc.status }}">{{ doc.status }}</span></td>
-      <td class="text-sm">{{ doc.visibility }}</td>
-      <td>
-        <div class="btn-group">
-          {% if doc.status == 'draft' %}
-          <button class="btn btn-sm" onclick="setStatus({{ doc.id }}, 'review')">Send to Review</button>
-          {% elif doc.status == 'review' %}
-          <button class="btn btn-sm btn-success" onclick="approveDoc({{ doc.id }})">Approve</button>
-          <button class="btn btn-sm btn-danger" onclick="rejectDoc({{ doc.id }})">Reject</button>
-          {% elif doc.status == 'approved' %}
-          <button class="btn btn-sm btn-danger" onclick="setStatus({{ doc.id }}, 'draft')">Unpublish</button>
-          {% elif doc.status == 'rejected' %}
-          <button class="btn btn-sm" onclick="setStatus({{ doc.id }}, 'draft')">Back to Draft</button>
+    <thead>
+      <tr>
+        <th style="width: 3%;">
+          <input type="checkbox" id="selectAll" onchange="toggleSelectAll()" style="cursor: pointer;" />
+        </th>
+        <th style="width: 27%;">Title</th>
+        <th style="width: 14%;">Project</th>
+        <th style="width: 10%;">Version</th>
+        <th style="width: 10%;">Section</th>
+        <th style="width: 10%;">Status</th>
+        <th style="width: 10%;">Visibility</th>
+        <th style="width: 16%;">Actions</th>
+      </tr>
+    </thead>
+    <tbody id="documentsTableBody">
+      {% for doc in documents %}
+      <tr id="row-{{ doc.id }}" data-doc-id="{{ doc.id }}">
+        <td>
+          <input
+            type="checkbox"
+            class="doc-checkbox"
+            data-doc-id="{{ doc.id }}"
+            onchange="updateBulkActionsBar()"
+            style="cursor: pointer;"
+          />
+        </td>
+        <td>
+          <div class="doc-title">{{ doc.title }}</div>
+          <div class="mono text-muted" style="font-size: 12px;">{{ doc.slug }}</div>
+          {% if doc.description %}
+          <div class="text-muted" style="font-size: 12px; margin-top: 0.25rem;">{{ doc.description[:80] }}{{ '...' if doc.description|length > 80 else '' }}</div>
           {% endif %}
-        </div>
-      </td>
-    </tr>
-    {% else %}
-    <tr class="empty-row"><td colspan="7">No documents found. Run a sync to import from Google Drive.</td></tr>
-    {% endfor %}
+        </td>
+        <td class="mono">{{ doc.project }}</td>
+        <td class="mono">{{ doc.version or '—' }}</td>
+        <td class="text-sm">{{ doc.section or '—' }}</td>
+        <td><span class="pill pill-{{ doc.status }}">{{ doc.status }}</span></td>
+        <td class="text-sm">{{ doc.visibility }}</td>
+        <td>
+          <div class="btn-group">
+            <a href="/documents/{{ doc.id }}/preview" class="btn btn-sm" style="background: #e0e7ff; color: #3730a3;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              Preview
+            </a>
+            {% if doc.status == 'draft' %}
+            <button class="btn btn-sm" onclick="setStatus({{ doc.id }}, 'review')">Send to Review</button>
+            {% elif doc.status == 'review' %}
+            <button class="btn btn-sm btn-success" onclick="approveDoc({{ doc.id }})">Approve</button>
+            <button class="btn btn-sm btn-danger" onclick="rejectDoc({{ doc.id }})">Reject</button>
+            {% elif doc.status == 'approved' %}
+            <button class="btn btn-sm btn-danger" onclick="setStatus({{ doc.id }}, 'draft')">Unpublish</button>
+            {% elif doc.status == 'rejected' %}
+            <button class="btn btn-sm" onclick="setStatus({{ doc.id }}, 'draft')">Back to Draft</button>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+      {% else %}
+      <tr class="empty-row"><td colspan="8">No documents found. Try adjusting your filters or run a sync to import from Google Drive.</td></tr>
+      {% endfor %}
+    </tbody>
   </table>
 </div>
 
@@ -74,13 +226,60 @@
 
 {% block scripts %}
 <script>
+let searchTimeout;
+
+// Search input with debounce
+document.getElementById('searchInput').addEventListener('input', function(e) {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(() => applyFilters(), 500);
+});
+
+// Filter change handlers
+document.getElementById('filterStatus').addEventListener('change', applyFilters);
+document.getElementById('filterProject').addEventListener('change', applyFilters);
+document.getElementById('filterVisibility').addEventListener('change', applyFilters);
+document.getElementById('filterVersion').addEventListener('change', applyFilters);
+document.getElementById('sortField').addEventListener('change', applyFilters);
+document.getElementById('sortOrder').addEventListener('change', applyFilters);
+
+function toggleAdvancedFilters() {
+  const panel = document.getElementById('advancedFilters');
+  const btn = document.getElementById('advancedBtn');
+  if (panel.style.display === 'none') {
+    panel.style.display = 'block';
+    btn.style.background = '#dbeafe';
+    btn.style.color = '#1e40af';
+  } else {
+    panel.style.display = 'none';
+    btn.style.background = '#f1f5f9';
+    btn.style.color = '';
+  }
+}
+
 function applyFilters() {
+  const params = new URLSearchParams();
+
+  const search = document.getElementById('searchInput').value.trim();
   const status = document.getElementById('filterStatus').value;
   const project = document.getElementById('filterProject').value;
-  const params = new URLSearchParams();
+  const visibility = document.getElementById('filterVisibility').value;
+  const version = document.getElementById('filterVersion').value;
+  const sort = document.getElementById('sortField').value;
+  const order = document.getElementById('sortOrder').value;
+
+  if (search) params.set('q', search);
   if (status) params.set('status', status);
   if (project) params.set('project', project);
-  window.location.href = '/documents' + (params.toString() ? '?' + params : '');
+  if (visibility) params.set('visibility', visibility);
+  if (version) params.set('version', version);
+  if (sort) params.set('sort', sort);
+  if (order) params.set('order', order);
+
+  window.location.href = '/documents' + (params.toString() ? '?' + params.toString() : '');
+}
+
+function clearFilters() {
+  window.location.href = '/documents';
 }
 
 async function setStatus(id, status) {
@@ -137,6 +336,150 @@ async function runSync() {
   } catch (e) {
     out.textContent = 'Error: ' + e.message;
     showAlert('Sync failed: ' + e.message, 'error');
+  }
+}
+
+// Highlight search terms in results
+function highlightSearchTerms() {
+  const search = document.getElementById('searchInput').value.trim();
+  if (!search) return;
+
+  const terms = search.split(/\s+/).filter(t => t.length > 2);
+  if (terms.length === 0) return;
+
+  document.querySelectorAll('.doc-title').forEach(el => {
+    let html = el.textContent;
+    terms.forEach(term => {
+      const regex = new RegExp(`(${term})`, 'gi');
+      html = html.replace(regex, '<mark style="background: #fef08a; padding: 0 2px; border-radius: 2px;">$1</mark>');
+    });
+    el.innerHTML = html;
+  });
+}
+
+// Highlight on page load if search query exists
+if (document.getElementById('searchInput').value.trim()) {
+  highlightSearchTerms();
+}
+
+// ========== BULK ACTIONS ==========
+
+function toggleSelectAll() {
+  const selectAll = document.getElementById('selectAll');
+  const checkboxes = document.querySelectorAll('.doc-checkbox');
+  checkboxes.forEach(cb => {
+    cb.checked = selectAll.checked;
+  });
+  updateBulkActionsBar();
+}
+
+function updateBulkActionsBar() {
+  const checkboxes = document.querySelectorAll('.doc-checkbox:checked');
+  const count = checkboxes.length;
+  const bulkBar = document.getElementById('bulkActionsBar');
+  const selectedCount = document.getElementById('selectedCount');
+  const bulkActionBtn = document.getElementById('bulkActionBtn');
+  const bulkActionSelect = document.getElementById('bulkActionSelect');
+
+  if (count > 0) {
+    bulkBar.style.display = 'flex';
+    selectedCount.textContent = `${count} selected`;
+    bulkActionBtn.disabled = !bulkActionSelect.value;
+  } else {
+    bulkBar.style.display = 'none';
+    document.getElementById('selectAll').checked = false;
+  }
+
+  // Update "Select All" checkbox state
+  const allCheckboxes = document.querySelectorAll('.doc-checkbox');
+  const selectAll = document.getElementById('selectAll');
+  if (count === allCheckboxes.length && count > 0) {
+    selectAll.checked = true;
+    selectAll.indeterminate = false;
+  } else if (count > 0) {
+    selectAll.checked = false;
+    selectAll.indeterminate = true;
+  } else {
+    selectAll.checked = false;
+    selectAll.indeterminate = false;
+  }
+}
+
+// Enable Apply button when action is selected
+document.getElementById('bulkActionSelect').addEventListener('change', function() {
+  const bulkActionBtn = document.getElementById('bulkActionBtn');
+  bulkActionBtn.disabled = !this.value;
+});
+
+function clearSelection() {
+  document.querySelectorAll('.doc-checkbox').forEach(cb => cb.checked = false);
+  document.getElementById('selectAll').checked = false;
+  updateBulkActionsBar();
+}
+
+function getSelectedDocIds() {
+  const checkboxes = document.querySelectorAll('.doc-checkbox:checked');
+  return Array.from(checkboxes).map(cb => parseInt(cb.dataset.docId));
+}
+
+async function executeBulkAction() {
+  const actionSelect = document.getElementById('bulkActionSelect');
+  const action = actionSelect.value;
+  if (!action) return;
+
+  const docIds = getSelectedDocIds();
+  if (docIds.length === 0) {
+    showAlert('No documents selected', 'error');
+    return;
+  }
+
+  // Parse action (some have format "action_value")
+  let [actionType, actionValue] = action.includes('_') && action.startsWith('set_')
+    ? [action.split('_').slice(0, 2).join('_'), action.split('_').slice(2).join('_')]
+    : [action, null];
+
+  // Confirmation for destructive actions
+  const destructive = ['delete', 'reject'];
+  if (destructive.includes(actionType)) {
+    const confirmMsg = actionType === 'delete'
+      ? `Are you sure you want to DELETE ${docIds.length} document(s)? This cannot be undone.`
+      : `Are you sure you want to REJECT ${docIds.length} document(s)?`;
+
+    if (!confirm(confirmMsg)) {
+      return;
+    }
+  }
+
+  // Show progress
+  const originalText = document.getElementById('bulkActionBtn').textContent;
+  document.getElementById('bulkActionBtn').textContent = 'Processing...';
+  document.getElementById('bulkActionBtn').disabled = true;
+
+  try {
+    const response = await apiFetch('/api/documents/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        document_ids: docIds,
+        action: actionType,
+        value: actionValue,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (data.errors > 0) {
+      showAlert(`Completed with ${data.errors} errors. ${data.success} succeeded.`, 'warning');
+    } else {
+      showAlert(`Successfully processed ${data.success} document(s)`, 'success');
+    }
+
+    // Reload page after short delay
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    showAlert('Bulk action failed: ' + e.message, 'error');
+    document.getElementById('bulkActionBtn').textContent = originalText;
+    document.getElementById('bulkActionBtn').disabled = false;
   }
 }
 </script>

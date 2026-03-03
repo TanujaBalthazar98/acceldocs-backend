@@ -1,0 +1,406 @@
+{% extends "base.html" %}
+{% block title %}Google Drive Browser — AccelDocs{% endblock %}
+
+{% block content %}
+<h1>Google Drive Browser</h1>
+<p class="subtitle">Browse your documentation folders and manually sync files from Google Drive.</p>
+
+<!-- Project Selector -->
+<div class="card mb-4">
+  <div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem;">
+    <div style="flex: 1;">
+      <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.5rem;">Select Project</label>
+      <select id="projectSelect" class="form-input" onchange="loadDriveFolder()" style="max-width: 400px;">
+        <option value="">Choose a project...</option>
+        {% for project in projects %}
+        <option value="{{ project.id }}" data-folder-id="{{ project.drive_folder_id or '' }}">
+          {{ project.name }}
+          {% if project.drive_folder_id %}✓{% else %}(no Drive folder){% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <button id="refreshBtn" class="btn btn-primary" onclick="refreshDrive()" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      Refresh
+    </button>
+  </div>
+</div>
+
+<!-- Drive Browser -->
+<div id="driveContent" class="card" style="min-height: 400px;">
+  <div style="text-align: center; padding: 4rem 2rem; color: #94a3b8;">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width: 64px; height: 64px; margin: 0 auto 1rem; opacity: 0.5;">
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+    </svg>
+    <p style="font-size: 14px;">Select a project with a configured Drive folder to browse.</p>
+  </div>
+</div>
+
+<!-- File Preview Modal -->
+<div id="fileModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; padding: 2rem; overflow-y: auto;">
+  <div style="max-width: 700px; margin: 2rem auto; background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+    <div style="padding: 1.5rem; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center;">
+      <h2 id="fileModalTitle" style="margin: 0;">File Details</h2>
+      <button onclick="closeFileModal()" class="btn btn-sm" style="padding: 0.25rem 0.5rem;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div id="fileModalContent" style="padding: 1.5rem;">
+      <!-- Content loaded dynamically -->
+    </div>
+    <div style="padding: 1.5rem; border-top: 1px solid #e2e8f0; display: flex; gap: 0.75rem; justify-content: flex-end;">
+      <button onclick="closeFileModal()" class="btn">Close</button>
+      <button id="syncFileBtn" onclick="syncSingleFile()" class="btn btn-primary">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+          <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+        </svg>
+        Sync This File
+      </button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentProject = null;
+let currentFolder = null;
+let selectedFile = null;
+
+async function loadDriveFolder() {
+  const select = document.getElementById('projectSelect');
+  const option = select.options[select.selectedIndex];
+  const projectId = option.value;
+  const folderId = option.getAttribute('data-folder-id');
+
+  if (!projectId || !folderId) {
+    showEmptyState();
+    document.getElementById('refreshBtn').disabled = true;
+    return;
+  }
+
+  currentProject = projectId;
+  currentFolder = folderId;
+  document.getElementById('refreshBtn').disabled = false;
+
+  await fetchDriveContents(folderId);
+}
+
+async function refreshDrive() {
+  if (currentFolder) {
+    await fetchDriveContents(currentFolder);
+  }
+}
+
+async function fetchDriveContents(folderId) {
+  const content = document.getElementById('driveContent');
+  content.innerHTML = `
+    <div style="text-align: center; padding: 4rem 2rem; color: #94a3b8;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 48px; height: 48px; margin: 0 auto 1rem; animation: spin 1s linear infinite;">
+        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      <p style="font-size: 14px;">Loading Drive contents...</p>
+    </div>
+  `;
+
+  try {
+    const response = await apiFetch(`/api/drive/browse?folder_id=${folderId}`);
+
+    if (!response.ok) {
+      throw new Error('Failed to fetch Drive contents');
+    }
+
+    const data = await response.json();
+    renderDriveContents(data);
+  } catch (e) {
+    // Check if it's a credentials error
+    const is503 = e.message && e.message.includes('503');
+
+    if (is503) {
+      content.innerHTML = `
+        <div style="padding: 3rem 2rem; max-width: 600px; margin: 0 auto;">
+          <div style="text-align: center; margin-bottom: 2rem;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 48px; height: 48px; margin: 0 auto 1rem; color: #f59e0b;">
+              <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <h3 style="color: #0f172a; margin-bottom: 0.5rem;">Google Drive Not Connected</h3>
+            <p style="color: #64748b; font-size: 14px;">Google Drive credentials are not configured for this backend.</p>
+          </div>
+
+          <div style="background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;">
+            <h4 style="font-size: 14px; font-weight: 600; color: #92400e; margin-bottom: 0.75rem;">Setup Instructions:</h4>
+            <ol style="padding-left: 1.25rem; color: #78350f; font-size: 14px; line-height: 1.8;">
+              <li>Create a Google Cloud service account or OAuth credentials</li>
+              <li>Download the credentials JSON file</li>
+              <li>Set environment variable:
+                <code style="display: block; margin-top: 0.5rem; padding: 0.5rem; background: white; border-radius: 4px; font-family: monospace; font-size: 12px; color: #475569;">
+                  export GOOGLE_SERVICE_ACCOUNT_FILE=/path/to/key.json
+                </code>
+              </li>
+              <li>Restart the backend server</li>
+            </ol>
+          </div>
+
+          <div style="text-align: center;">
+            <a href="https://cloud.google.com/iam/docs/service-accounts-create" target="_blank" class="btn" style="margin-right: 0.5rem;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+              </svg>
+              View Setup Guide
+            </a>
+            <button onclick="refreshDrive()" class="btn btn-primary">Check Again</button>
+          </div>
+        </div>
+      `;
+    } else {
+      content.innerHTML = `
+        <div style="text-align: center; padding: 4rem 2rem;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 48px; height: 48px; margin: 0 auto 1rem; color: #dc2626;">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <p style="color: #dc2626; font-weight: 500; margin-bottom: 0.5rem;">Error Loading Drive</p>
+          <p style="color: #64748b; font-size: 14px;">${e.message}</p>
+          <button onclick="refreshDrive()" class="btn btn-primary" style="margin-top: 1rem;">Retry</button>
+        </div>
+      `;
+    }
+
+    showAlert('Failed to load Drive contents', 'error');
+  }
+}
+
+function renderDriveContents(data) {
+  const content = document.getElementById('driveContent');
+
+  if (!data.files || data.files.length === 0) {
+    content.innerHTML = `
+      <div style="text-align: center; padding: 4rem 2rem; color: #94a3b8;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width: 64px; height: 64px; margin: 0 auto 1rem; opacity: 0.5;">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+        <p style="font-size: 14px;">This folder is empty.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const folders = data.files.filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+  const docs = data.files.filter(f => f.mimeType === 'application/vnd.google-apps.document');
+  const otherFiles = data.files.filter(f =>
+    f.mimeType !== 'application/vnd.google-apps.folder' &&
+    f.mimeType !== 'application/vnd.google-apps.document'
+  );
+
+  let html = '<div style="padding: 0;">';
+
+  // Breadcrumb
+  html += `
+    <div style="padding: 1rem 1.5rem; border-bottom: 1px solid #e2e8f0; background: #f8fafc;">
+      <div style="display: flex; align-items: center; gap: 0.5rem; font-size: 14px; color: #64748b;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+        <span style="font-weight: 500; color: #0f172a;">${data.folderName || 'Root Folder'}</span>
+        <span style="color: #cbd5e1;">•</span>
+        <span>${data.files.length} item${data.files.length !== 1 ? 's' : ''}</span>
+      </div>
+    </div>
+  `;
+
+  // Folders Section
+  if (folders.length > 0) {
+    html += '<div style="padding: 1.5rem;"><h3 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 1rem;">Folders</h3>';
+    html += '<div style="display: grid; gap: 0.75rem;">';
+
+    folders.forEach(folder => {
+      html += `
+        <div style="display: flex; align-items: center; gap: 1rem; padding: 0.75rem 1rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; transition: all 0.15s;" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='#f8fafc'">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px; color: #0ea5e9; flex-shrink: 0;">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-weight: 500; color: #0f172a; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${folder.name}</div>
+          </div>
+          <button onclick="event.stopPropagation(); viewFolderDetails('${folder.id}', '${folder.name.replace(/'/g, "\\'")}')" class="btn btn-sm" style="flex-shrink: 0;">
+            Browse
+          </button>
+        </div>
+      `;
+    });
+
+    html += '</div></div>';
+  }
+
+  // Google Docs Section
+  if (docs.length > 0) {
+    html += '<div style="padding: 1.5rem; border-top: 1px solid #e2e8f0;"><h3 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 1rem;">Google Docs</h3>';
+    html += '<div style="display: grid; gap: 0.75rem;">';
+
+    docs.forEach(doc => {
+      const modifiedDate = doc.modifiedTime ? new Date(doc.modifiedTime).toLocaleDateString() : '—';
+      html += `
+        <div onclick="viewFileDetails('${doc.id}', '${doc.name.replace(/'/g, "\\'")}')" style="display: flex; align-items: center; gap: 1rem; padding: 0.75rem 1rem; background: white; border: 1px solid #e2e8f0; border-radius: 8px; cursor: pointer; transition: all 0.15s;" onmouseover="this.style.borderColor='#0ea5e9'; this.style.background='#f0f9ff'" onmouseout="this.style.borderColor='#e2e8f0'; this.style.background='white'">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px; color: #3b82f6; flex-shrink: 0;">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-weight: 500; color: #0f172a; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${doc.name}</div>
+            <div style="font-size: 12px; color: #94a3b8; margin-top: 2px;">Modified ${modifiedDate}</div>
+          </div>
+          <button onclick="event.stopPropagation(); syncFile('${doc.id}', '${doc.name.replace(/'/g, "\\'")}')" class="btn btn-sm btn-primary" style="flex-shrink: 0;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
+              <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+            </svg>
+            Sync
+          </button>
+        </div>
+      `;
+    });
+
+    html += '</div></div>';
+  }
+
+  // Other Files Section
+  if (otherFiles.length > 0) {
+    html += '<div style="padding: 1.5rem; border-top: 1px solid #e2e8f0;"><h3 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 1rem;">Other Files</h3>';
+    html += '<div style="display: grid; gap: 0.5rem;">';
+
+    otherFiles.forEach(file => {
+      html += `
+        <div style="display: flex; align-items: center; gap: 1rem; padding: 0.5rem 1rem; font-size: 13px; color: #64748b;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; opacity: 0.5;">
+            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>
+          </svg>
+          <span style="flex: 1;">${file.name}</span>
+          <span style="font-size: 11px; color: #94a3b8;">(${file.mimeType.split('.').pop()})</span>
+        </div>
+      `;
+    });
+
+    html += '</div></div>';
+  }
+
+  html += '</div>';
+  content.innerHTML = html;
+}
+
+function showEmptyState() {
+  const content = document.getElementById('driveContent');
+  content.innerHTML = `
+    <div style="text-align: center; padding: 4rem 2rem; color: #94a3b8;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width: 64px; height: 64px; margin: 0 auto 1rem; opacity: 0.5;">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+      </svg>
+      <p style="font-size: 14px;">Select a project with a configured Drive folder to browse.</p>
+    </div>
+  `;
+}
+
+async function viewFileDetails(fileId, fileName) {
+  selectedFile = { id: fileId, name: fileName };
+
+  document.getElementById('fileModalTitle').textContent = fileName;
+  document.getElementById('fileModalContent').innerHTML = `
+    <div style="text-align: center; padding: 2rem;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 32px; height: 32px; margin: 0 auto; animation: spin 1s linear infinite; color: #0ea5e9;">
+        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      <p style="margin-top: 1rem; color: #64748b;">Loading file details...</p>
+    </div>
+  `;
+  document.getElementById('fileModal').style.display = 'block';
+
+  try {
+    const response = await apiFetch(`/api/drive/file/${fileId}`);
+    if (!response.ok) throw new Error('Failed to fetch file details');
+
+    const file = await response.json();
+
+    document.getElementById('fileModalContent').innerHTML = `
+      <div style="display: grid; gap: 1rem;">
+        <div>
+          <div style="font-size: 12px; color: #64748b; margin-bottom: 0.25rem;">File Name</div>
+          <div style="font-weight: 500;">${file.name}</div>
+        </div>
+        <div>
+          <div style="font-size: 12px; color: #64748b; margin-bottom: 0.25rem;">File ID</div>
+          <div class="mono" style="font-size: 13px; color: #475569;">${file.id}</div>
+        </div>
+        <div>
+          <div style="font-size: 12px; color: #64748b; margin-bottom: 0.25rem;">Last Modified</div>
+          <div>${new Date(file.modifiedTime).toLocaleString()}</div>
+        </div>
+        <div>
+          <div style="font-size: 12px; color: #64748b; margin-bottom: 0.25rem;">Owner</div>
+          <div>${file.owners?.[0]?.displayName || 'Unknown'}</div>
+        </div>
+        <div>
+          <div style="font-size: 12px; color: #64748b; margin-bottom: 0.25rem;">View in Drive</div>
+          <a href="${file.webViewLink}" target="_blank" style="color: #0ea5e9; text-decoration: none; font-size: 14px;">Open in Google Drive →</a>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    document.getElementById('fileModalContent').innerHTML = `
+      <div style="text-align: center; padding: 2rem; color: #dc2626;">
+        <p>Failed to load file details: ${e.message}</p>
+      </div>
+    `;
+  }
+}
+
+function viewFolderDetails(folderId, folderName) {
+  currentFolder = folderId;
+  fetchDriveContents(folderId);
+}
+
+async function syncFile(fileId, fileName) {
+  if (!confirm(`Sync "${fileName}" from Google Drive?`)) return;
+
+  try {
+    const response = await apiFetch(`/api/drive/sync/${fileId}`, {
+      method: 'POST',
+      body: JSON.stringify({ project_id: currentProject }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Sync failed');
+    }
+
+    showAlert(`Successfully synced "${fileName}"`, 'success');
+  } catch (e) {
+    showAlert(`Failed to sync: ${e.message}`, 'error');
+  }
+}
+
+async function syncSingleFile() {
+  if (selectedFile) {
+    await syncFile(selectedFile.id, selectedFile.name);
+    closeFileModal();
+  }
+}
+
+function closeFileModal() {
+  document.getElementById('fileModal').style.display = 'none';
+  selectedFile = null;
+}
+
+// Add spin animation
+const style = document.createElement('style');
+style.textContent = '@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }';
+document.head.appendChild(style);
+
+// Close modal on background click
+document.getElementById('fileModal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'fileModal') {
+    closeFileModal();
+  }
+});
+</script>
+{% endblock %}

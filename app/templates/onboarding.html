@@ -1,0 +1,320 @@
+{% extends "base.html" %}
+{% block title %}Welcome to AccelDocs{% endblock %}
+
+{% block content %}
+<div style="max-width: 800px; margin: 0 auto;">
+  <!-- Progress Bar -->
+  <div style="margin-bottom: 3rem;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+      <span class="text-sm text-muted">Setup Progress</span>
+      <span class="text-sm text-muted"><span id="currentStep">1</span> of 4</span>
+    </div>
+    <div style="height: 8px; background: #e2e8f0; border-radius: 999px; overflow: hidden;">
+      <div id="progressBar" style="height: 100%; background: linear-gradient(90deg, #0ea5e9, #3b82f6); width: 25%; transition: width 0.3s;"></div>
+    </div>
+  </div>
+
+  <!-- Step 1: Welcome -->
+  <div id="step1" class="onboarding-step">
+    <div class="card" style="text-align: center; padding: 3rem 2rem;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 64px; height: 64px; margin: 0 auto 1.5rem; color: #0ea5e9;">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+      </svg>
+      <h1 style="font-size: 32px; margin-bottom: 1rem;">Welcome to AccelDocs</h1>
+      <p style="font-size: 16px; color: #64748b; max-width: 500px; margin: 0 auto 2rem; line-height: 1.6;">
+        Turn your Google Docs into beautiful documentation sites with automatic syncing, approval workflows, and git-based publishing.
+      </p>
+
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; margin: 2rem 0 3rem; text-align: left;">
+        <div style="padding: 1.5rem; background: #f8fafc; border-radius: 8px;">
+          <div style="width: 40px; height: 40px; background: #dbeafe; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 0.75rem;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px; color: #0ea5e9;">
+              <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+            </svg>
+          </div>
+          <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 0.25rem;">Auto Sync</h3>
+          <p style="font-size: 13px; color: #64748b; line-height: 1.4;">Google Docs automatically sync to your docs site</p>
+        </div>
+
+        <div style="padding: 1.5rem; background: #f8fafc; border-radius: 8px;">
+          <div style="width: 40px; height: 40px; background: #dcfce7; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 0.75rem;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px; color: #059669;">
+              <polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+            </svg>
+          </div>
+          <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 0.25rem;">Approvals</h3>
+          <p style="font-size: 13px; color: #64748b; line-height: 1.4;">Review and approve changes before publishing</p>
+        </div>
+
+        <div style="padding: 1.5rem; background: #f8fafc; border-radius: 8px;">
+          <div style="width: 40px; height: 40px; background: #fef3c7; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 0.75rem;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px; color: #d97706;">
+              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+            </svg>
+          </div>
+          <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 0.25rem;">Versioned</h3>
+          <p style="font-size: 13px; color: #64748b; line-height: 1.4;">Git-based publishing with preview branches</p>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" onclick="nextStep()" style="padding: 0.75rem 2rem; font-size: 16px;">
+        Get Started
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+          <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+        </svg>
+      </button>
+      <button class="btn" onclick="skipOnboarding()" style="margin-top: 0.5rem;">Skip Setup</button>
+    </div>
+  </div>
+
+  <!-- Step 2: Create Project -->
+  <div id="step2" class="onboarding-step" style="display: none;">
+    <div class="card">
+      <h1 style="margin-bottom: 0.5rem;">Create Your First Project</h1>
+      <p class="subtitle">Projects organize your documentation into separate collections (e.g., Release Notes, User Guides, API Docs).</p>
+
+      <form id="projectForm" onsubmit="createProject(event)" style="margin-top: 2rem;">
+        <div style="margin-bottom: 1.5rem;">
+          <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.5rem;">Project Name *</label>
+          <input type="text" id="projectName" class="form-input" placeholder="e.g. Product Documentation" required style="font-size: 16px; padding: 0.75rem 1rem;" />
+          <div class="text-sm text-muted" style="margin-top: 0.25rem;">This will be visible in your documentation navigation</div>
+        </div>
+
+        <div style="margin-bottom: 1.5rem;">
+          <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.5rem;">Description</label>
+          <textarea id="projectDescription" class="form-input" rows="3" placeholder="Brief description of this project..."></textarea>
+        </div>
+
+        <div style="margin-bottom: 2rem;">
+          <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.5rem;">Default Visibility</label>
+          <select id="projectVisibility" class="form-input">
+            <option value="public">Public (visible to everyone)</option>
+            <option value="internal">Internal (requires authentication)</option>
+          </select>
+        </div>
+
+        <div style="display: flex; gap: 0.75rem; justify-content: space-between;">
+          <button type="button" class="btn" onclick="prevStep()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+              <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+            </svg>
+            Back
+          </button>
+          <button type="submit" class="btn btn-primary">
+            Continue
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+              <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+            </svg>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Step 3: Connect Google Drive -->
+  <div id="step3" class="onboarding-step" style="display: none;">
+    <div class="card">
+      <h1 style="margin-bottom: 0.5rem;">Connect Google Drive Folder</h1>
+      <p class="subtitle">Link a Google Drive folder where your documentation lives. We'll automatically sync any Google Docs inside.</p>
+
+      <div style="margin: 2rem 0;">
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem;">
+          <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 1rem;">How to get your folder ID:</h3>
+          <ol style="padding-left: 1.25rem; color: #64748b; font-size: 14px; line-height: 1.8;">
+            <li>Open your documentation folder in Google Drive</li>
+            <li>Look at the URL in your browser</li>
+            <li>Copy the ID after <code class="mono" style="background: white; padding: 2px 6px; border-radius: 4px; font-size: 12px;">/folders/</code></li>
+          </ol>
+          <div style="margin-top: 1rem; padding: 0.75rem; background: white; border: 1px solid #e2e8f0; border-radius: 6px; font-family: monospace; font-size: 12px; color: #64748b;">
+            https://drive.google.com/drive/folders/<strong style="color: #0ea5e9;">1a2b3c4d5e6f7g8h9i0j</strong>
+          </div>
+        </div>
+      </div>
+
+      <form id="driveForm" onsubmit="connectDrive(event)">
+        <div style="margin-bottom: 2rem;">
+          <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.5rem;">Google Drive Folder ID *</label>
+          <input type="text" id="driveFolderId" class="form-input" placeholder="1a2b3c4d5e6f7g8h9i0j" required style="font-size: 16px; padding: 0.75rem 1rem;" />
+        </div>
+
+        <div style="display: flex; gap: 0.75rem; justify-content: space-between;">
+          <button type="button" class="btn" onclick="prevStep()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+              <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+            </svg>
+            Back
+          </button>
+          <div style="display: flex; gap: 0.75rem;">
+            <button type="button" class="btn" onclick="skipDrive()">Skip for Now</button>
+            <button type="submit" class="btn btn-primary">
+              Continue
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+                <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Step 4: Complete -->
+  <div id="step4" class="onboarding-step" style="display: none;">
+    <div class="card" style="text-align: center; padding: 3rem 2rem;">
+      <div style="width: 80px; height: 80px; background: linear-gradient(135deg, #10b981, #059669); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.5rem;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" style="width: 48px; height: 48px;">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </div>
+
+      <h1 style="font-size: 32px; margin-bottom: 1rem;">You're All Set!</h1>
+      <p style="font-size: 16px; color: #64748b; max-width: 500px; margin: 0 auto 2rem; line-height: 1.6;">
+        Your project <strong id="completedProjectName"></strong> has been created and is ready to sync with Google Drive.
+      </p>
+
+      <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem; margin: 2rem 0; text-align: left;">
+        <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 1rem;">Next Steps:</h3>
+        <ul style="list-style: none; padding: 0;">
+          <li style="padding: 0.5rem 0; display: flex; align-items: start; gap: 0.75rem;">
+            <span style="color: #0ea5e9; font-size: 18px;">1.</span>
+            <span style="flex: 1; font-size: 14px; color: #475569;">Run your first sync from the <a href="/sync" style="color: #0ea5e9; text-decoration: none; font-weight: 500;">Sync page</a></span>
+          </li>
+          <li style="padding: 0.5rem 0; display: flex; align-items: start; gap: 0.75rem;">
+            <span style="color: #0ea5e9; font-size: 18px;">2.</span>
+            <span style="flex: 1; font-size: 14px; color: #475569;">Review synced documents in the <a href="/documents" style="color: #0ea5e9; text-decoration: none; font-weight: 500;">Documents page</a></span>
+          </li>
+          <li style="padding: 0.5rem 0; display: flex; align-items: start; gap: 0.75rem;">
+            <span style="color: #0ea5e9; font-size: 18px;">3.</span>
+            <span style="flex: 1; font-size: 14px; color: #475569;">Approve documents for publishing in <a href="/approvals" style="color: #0ea5e9; text-decoration: none; font-weight: 500;">Approvals</a></span>
+          </li>
+        </ul>
+      </div>
+
+      <button class="btn btn-primary" onclick="finishOnboarding()" style="padding: 0.75rem 2rem; font-size: 16px;">
+        Go to Dashboard
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+          <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentStep = 1;
+let createdProject = null;
+
+function updateProgress() {
+  const progress = (currentStep / 4) * 100;
+  document.getElementById('progressBar').style.width = progress + '%';
+  document.getElementById('currentStep').textContent = currentStep;
+}
+
+function showStep(step) {
+  // Hide all steps
+  document.querySelectorAll('.onboarding-step').forEach(el => {
+    el.style.display = 'none';
+  });
+
+  // Show current step
+  document.getElementById('step' + step).style.display = 'block';
+  currentStep = step;
+  updateProgress();
+
+  // Scroll to top
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function nextStep() {
+  if (currentStep < 4) {
+    showStep(currentStep + 1);
+  }
+}
+
+function prevStep() {
+  if (currentStep > 1) {
+    showStep(currentStep - 1);
+  }
+}
+
+async function createProject(event) {
+  event.preventDefault();
+
+  const name = document.getElementById('projectName').value.trim();
+  const description = document.getElementById('projectDescription').value.trim();
+  const visibility = document.getElementById('projectVisibility').value;
+
+  try {
+    const response = await apiFetch('/api/projects/', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: name,
+        description: description || null,
+        default_visibility: visibility,
+        require_approval: true,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to create project');
+    }
+
+    createdProject = await response.json();
+    document.getElementById('completedProjectName').textContent = createdProject.name;
+
+    nextStep();
+  } catch (e) {
+    showAlert(e.message, 'error');
+  }
+}
+
+async function connectDrive(event) {
+  event.preventDefault();
+
+  const folderId = document.getElementById('driveFolderId').value.trim();
+
+  if (!createdProject) {
+    showAlert('Project not found. Please go back and create a project first.', 'error');
+    return;
+  }
+
+  try {
+    const response = await apiFetch(`/api/projects/${createdProject.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        ...createdProject,
+        drive_folder_id: folderId,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to connect Drive folder');
+    }
+
+    nextStep();
+  } catch (e) {
+    showAlert(e.message, 'error');
+  }
+}
+
+function skipDrive() {
+  nextStep();
+}
+
+function skipOnboarding() {
+  if (confirm('Are you sure you want to skip the setup? You can always create projects later.')) {
+    window.location.href = '/';
+  }
+}
+
+function finishOnboarding() {
+  // Set onboarding completed flag in localStorage
+  localStorage.setItem('onboardingCompleted', 'true');
+  window.location.href = '/';
+}
+</script>
+{% endblock %}

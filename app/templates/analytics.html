@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+
+{% block title %}Analytics - AccelDocs{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+  <div>
+    <h1>Analytics</h1>
+    <p class="subtitle">Document views, trending content, and user activity</p>
+  </div>
+</div>
+
+<!-- Summary Stats -->
+<div class="stats">
+  <div class="stat">
+    <div class="label">Total Views</div>
+    <div class="value brand" id="totalViews">—</div>
+  </div>
+  <div class="stat">
+    <div class="label">Views (7 days)</div>
+    <div class="value success" id="views7d">—</div>
+  </div>
+  <div class="stat">
+    <div class="label">Views (30 days)</div>
+    <div class="value" id="views30d">—</div>
+  </div>
+  <div class="stat">
+    <div class="label">Unique Viewers</div>
+    <div class="value" id="uniqueViewers">—</div>
+  </div>
+</div>
+
+<!-- Trending Documents -->
+<div class="card">
+  <div class="card-header">
+    <h2>🔥 Trending Documents</h2>
+    <div class="text-muted text-sm">Most viewed in the last 7 days</div>
+  </div>
+  <table id="trendingTable">
+    <thead>
+      <tr>
+        <th>Document</th>
+        <th>Project</th>
+        <th>Views (7d)</th>
+        <th>Views (30d)</th>
+      </tr>
+    </thead>
+    <tbody id="trendingBody">
+      <tr class="empty-row"><td colspan="4">Loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Document Stats -->
+<div class="card mt-4">
+  <div class="card-header">
+    <h2>📊 Document Statistics</h2>
+    <div class="text-muted text-sm">All-time view counts</div>
+  </div>
+  <table id="statsTable">
+    <thead>
+      <tr>
+        <th>Document</th>
+        <th>Project</th>
+        <th>Total Views</th>
+        <th>Unique Users</th>
+        <th>Last Viewed</th>
+      </tr>
+    </thead>
+    <tbody id="statsBody">
+      <tr class="empty-row"><td colspan="5">Loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- User Activity -->
+<div class="card mt-4">
+  <div class="card-header">
+    <h2>👥 User Activity</h2>
+    <div class="text-muted text-sm">Most active users</div>
+  </div>
+  <table id="userActivityTable">
+    <thead>
+      <tr>
+        <th>User</th>
+        <th>Name</th>
+        <th>Total Views</th>
+        <th>Last Active</th>
+      </tr>
+    </thead>
+    <tbody id="userActivityBody">
+      <tr class="empty-row"><td colspan="4">Loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadAnalytics() {
+  try {
+    // Load summary
+    const summaryRes = await apiFetch('/api/analytics/summary');
+    if (!summaryRes.ok) {
+      throw new Error('Failed to load analytics summary');
+    }
+    const summary = await summaryRes.json();
+
+    // Update summary stats
+    document.getElementById('totalViews').textContent = summary.total_views.toLocaleString();
+    document.getElementById('views7d').textContent = summary.total_views_last_7_days.toLocaleString();
+    document.getElementById('views30d').textContent = summary.total_views_last_30_days.toLocaleString();
+    document.getElementById('uniqueViewers').textContent = summary.unique_viewers.toLocaleString();
+
+    // Load trending documents
+    const trendingRes = await apiFetch('/api/analytics/documents/trending?limit=10');
+    if (!trendingRes.ok) {
+      throw new Error('Failed to load trending documents');
+    }
+    const trending = await trendingRes.json();
+
+    const trendingBody = document.getElementById('trendingBody');
+    if (trending.length === 0) {
+      trendingBody.innerHTML = '<tr class="empty-row"><td colspan="4">No data available</td></tr>';
+    } else {
+      trendingBody.innerHTML = trending.map(doc => `
+        <tr>
+          <td><strong>${escapeHtml(doc.title)}</strong></td>
+          <td>${escapeHtml(doc.project)}</td>
+          <td>${doc.views_last_7_days}</td>
+          <td>${doc.views_last_30_days}</td>
+        </tr>
+      `).join('');
+    }
+
+    // Load document stats
+    const statsRes = await apiFetch('/api/analytics/documents/stats?limit=20');
+    if (!statsRes.ok) {
+      throw new Error('Failed to load document stats');
+    }
+    const stats = await statsRes.json();
+
+    const statsBody = document.getElementById('statsBody');
+    if (stats.length === 0) {
+      statsBody.innerHTML = '<tr class="empty-row"><td colspan="5">No data available</td></tr>';
+    } else {
+      statsBody.innerHTML = stats.map(stat => `
+        <tr>
+          <td><strong>${escapeHtml(stat.document_title)}</strong></td>
+          <td>${escapeHtml(stat.project)}</td>
+          <td>${stat.total_views}</td>
+          <td>${stat.unique_users}</td>
+          <td class="text-sm text-muted">${stat.last_viewed ? formatDate(stat.last_viewed) : '—'}</td>
+        </tr>
+      `).join('');
+    }
+
+    // Load user activity
+    const activityRes = await apiFetch('/api/analytics/users/activity?limit=15');
+    if (!activityRes.ok) {
+      throw new Error('Failed to load user activity');
+    }
+    const activity = await activityRes.json();
+
+    const activityBody = document.getElementById('userActivityBody');
+    if (activity.length === 0) {
+      activityBody.innerHTML = '<tr class="empty-row"><td colspan="4">No data available</td></tr>';
+    } else {
+      activityBody.innerHTML = activity.map(user => `
+        <tr>
+          <td>${escapeHtml(user.user_email)}</td>
+          <td class="text-muted">${user.user_name ? escapeHtml(user.user_name) : '—'}</td>
+          <td>${user.total_views}</td>
+          <td class="text-sm text-muted">${user.last_active ? formatDate(user.last_active) : '—'}</td>
+        </tr>
+      `).join('');
+    }
+
+  } catch (err) {
+    console.error('Failed to load analytics:', err);
+    showAlert('Failed to load analytics: ' + err.message, 'error');
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function formatDate(isoString) {
+  const date = new Date(isoString);
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays < 7) return `${diffDays}d ago`;
+
+  return date.toLocaleDateString();
+}
+
+// Load on page load
+loadAnalytics();
+
+// Auto-refresh every 30 seconds
+setInterval(loadAnalytics, 30000);
+</script>
+{% endblock %}

@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% block title %}Projects — AccelDocs{% endblock %}
+
+{% block content %}
+<h1>Projects</h1>
+<p class="subtitle">Manage documentation projects and their settings.</p>
+
+<!-- Actions Card -->
+<div class="card mb-4">
+  <div style="display: flex; justify-content: space-between; align-items: center;">
+    <div>
+      <h2 style="margin: 0 0 0.25rem 0;">Project Management</h2>
+      <p class="text-sm text-muted" style="margin: 0;">Configure projects, default visibility, and approval workflows.</p>
+    </div>
+    <button class="btn btn-primary" onclick="showCreateForm()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+      </svg>
+      New Project
+    </button>
+  </div>
+</div>
+
+<!-- Projects Table -->
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+    <h2 style="margin: 0;">All Projects</h2>
+    <span style="color: #64748b; font-size: 14px;">{{ projects|length }} project{{ 's' if projects|length != 1 else '' }}</span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 25%;">Name</th>
+        <th style="width: 30%;">Description</th>
+        <th style="width: 10%;">Documents</th>
+        <th style="width: 10%;">Visibility</th>
+        <th style="width: 12%;">Approval</th>
+        <th style="width: 13%;"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for project in projects %}
+      <tr>
+        <td>
+          <div style="font-weight: 500;">{{ project.name }}</div>
+          <div class="mono text-sm text-muted">{{ project.slug }}</div>
+        </td>
+        <td class="text-sm text-muted">{{ project.description or '—' }}</td>
+        <td>
+          <span class="badge badge-primary">{{ project.document_count }}</span>
+        </td>
+        <td>
+          {% if project.default_visibility == 'public' %}
+          <span class="pill" style="background: #dcfce7; color: #166534;">Public</span>
+          {% else %}
+          <span class="pill" style="background: #fee2e2; color: #991b1b;">Internal</span>
+          {% endif %}
+        </td>
+        <td class="text-sm">
+          {% if project.require_approval %}
+          <span style="color: #059669;">✓ Required</span>
+          {% else %}
+          <span style="color: #94a3b8;">—</span>
+          {% endif %}
+        </td>
+        <td>
+          <div class="btn-group">
+            <button class="btn btn-sm" onclick="editProject({{ project.id }})">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              </svg>
+              Edit
+            </button>
+            <button class="btn btn-sm btn-danger" onclick="deleteProject({{ project.id }}, '{{ project.name }}', {{ project.document_count }})">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
+              Delete
+            </button>
+          </div>
+        </td>
+      </tr>
+      {% else %}
+      <tr class="empty-row">
+        <td colspan="6">No projects yet. Create your first project to get started.</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Create/Edit Project Modal -->
+<div id="projectModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; padding: 2rem; overflow-y: auto;">
+  <div style="max-width: 600px; margin: 2rem auto; background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+    <div style="padding: 1.5rem; border-bottom: 1px solid #e2e8f0;">
+      <h2 id="modalTitle" style="margin: 0;">Create Project</h2>
+    </div>
+    <div style="padding: 1.5rem;">
+      <form id="projectForm" onsubmit="saveProject(event)">
+        <input type="hidden" id="projectId" />
+
+        <div style="margin-bottom: 1rem;">
+          <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.5rem;">Project Name *</label>
+          <input type="text" id="projectName" class="form-input" placeholder="e.g. Release Notes" required />
+          <div class="text-sm text-muted" style="margin-top: 0.25rem;">Name will be auto-converted to a URL-safe slug</div>
+        </div>
+
+        <div style="margin-bottom: 1rem;">
+          <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.5rem;">Description</label>
+          <textarea id="projectDescription" class="form-input" rows="3" placeholder="Brief description of this documentation project"></textarea>
+        </div>
+
+        <div style="margin-bottom: 1rem;">
+          <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.5rem;">Google Drive Folder ID</label>
+          <input type="text" id="projectDriveFolder" class="form-input" placeholder="e.g. 1a2b3c4d5e6f7g8h9i0j" />
+          <div class="text-sm text-muted" style="margin-top: 0.25rem;">Copy from Drive folder URL: <code class="mono">folders/<strong>ID</strong></code></div>
+        </div>
+
+        <div style="margin-bottom: 1rem;">
+          <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 0.5rem;">Default Visibility</label>
+          <select id="projectVisibility" class="form-input">
+            <option value="public">Public (visible to everyone)</option>
+            <option value="internal">Internal (requires authentication)</option>
+          </select>
+        </div>
+
+        <div style="margin-bottom: 1.5rem;">
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+            <input type="checkbox" id="projectRequireApproval" checked style="width: 16px; height: 16px;" />
+            <span style="font-size: 14px; font-weight: 500;">Require approval before publishing</span>
+          </label>
+          <div class="text-sm text-muted" style="margin-top: 0.25rem; margin-left: 1.5rem;">Documents must be approved before going to production</div>
+        </div>
+
+        <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
+          <button type="button" class="btn" onclick="hideProjectModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">
+            <span id="saveButtonText">Create Project</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let editingProjectId = null;
+
+function showCreateForm() {
+  editingProjectId = null;
+  document.getElementById('modalTitle').textContent = 'Create Project';
+  document.getElementById('saveButtonText').textContent = 'Create Project';
+  document.getElementById('projectForm').reset();
+  document.getElementById('projectId').value = '';
+  document.getElementById('projectModal').style.display = 'block';
+}
+
+async function editProject(projectId) {
+  try {
+    const response = await apiFetch(`/api/projects/${projectId}`);
+    if (!response.ok) throw new Error('Failed to fetch project');
+    const project = await response.json();
+
+    editingProjectId = projectId;
+    document.getElementById('modalTitle').textContent = 'Edit Project';
+    document.getElementById('saveButtonText').textContent = 'Save Changes';
+    document.getElementById('projectId').value = project.id;
+    document.getElementById('projectName').value = project.name;
+    document.getElementById('projectDescription').value = project.description || '';
+    document.getElementById('projectDriveFolder').value = project.drive_folder_id || '';
+    document.getElementById('projectVisibility').value = project.default_visibility;
+    document.getElementById('projectRequireApproval').checked = project.require_approval;
+    document.getElementById('projectModal').style.display = 'block';
+  } catch (e) {
+    showAlert('Failed to load project: ' + e.message, 'error');
+  }
+}
+
+async function saveProject(event) {
+  event.preventDefault();
+
+  const data = {
+    name: document.getElementById('projectName').value.trim(),
+    description: document.getElementById('projectDescription').value.trim() || null,
+    drive_folder_id: document.getElementById('projectDriveFolder').value.trim() || null,
+    default_visibility: document.getElementById('projectVisibility').value,
+    require_approval: document.getElementById('projectRequireApproval').checked,
+  };
+
+  try {
+    let response;
+    if (editingProjectId) {
+      response = await apiFetch(`/api/projects/${editingProjectId}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      });
+    } else {
+      response = await apiFetch('/api/projects/', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    }
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to save project');
+    }
+
+    showAlert(editingProjectId ? 'Project updated successfully' : 'Project created successfully', 'success');
+    setTimeout(() => location.reload(), 1000);
+  } catch (e) {
+    showAlert(e.message, 'error');
+  }
+}
+
+async function deleteProject(projectId, projectName, docCount) {
+  const confirmMsg = docCount > 0
+    ? `Are you sure you want to delete "${projectName}"? This will mark the project as inactive but preserve its ${docCount} document(s).`
+    : `Are you sure you want to delete "${projectName}"?`;
+
+  if (!confirm(confirmMsg)) return;
+
+  try {
+    const response = await apiFetch(`/api/projects/${projectId}`, {
+      method: 'DELETE',
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to delete project');
+    }
+
+    showAlert('Project deleted successfully', 'success');
+    setTimeout(() => location.reload(), 1000);
+  } catch (e) {
+    showAlert('Failed to delete project: ' + e.message, 'error');
+  }
+}
+
+function hideProjectModal() {
+  document.getElementById('projectModal').style.display = 'none';
+}
+
+// Close modal on background click
+document.getElementById('projectModal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'projectModal') {
+    hideProjectModal();
+  }
+});
+</script>
+{% endblock %}

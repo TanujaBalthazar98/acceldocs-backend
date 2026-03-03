@@ -1,12 +1,13 @@
 """User management API routes."""
 
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_serializer
 from sqlalchemy.orm import Session
 
-from app.auth.routes import get_current_user
 from app.database import get_db
 from app.lib.rbac import get_assignable_roles, get_permissions_for_role, is_higher_role
+from app.middleware.auth import AuthUser, require_auth
 from app.models import User
 
 router = APIRouter()
@@ -18,7 +19,14 @@ class UserOut(BaseModel):
     email: str
     name: str | None
     role: str
-    created_at: str
+    created_at: datetime | str
+
+    @field_serializer('created_at')
+    def serialize_created_at(self, dt: datetime | str) -> str:
+        """Convert datetime to ISO string."""
+        if isinstance(dt, datetime):
+            return dt.isoformat()
+        return dt
 
     model_config = {"from_attributes": True}
 
@@ -34,10 +42,22 @@ class UserUpdate(BaseModel):
     role: str | None = None
 
 
+@router.get("/me", response_model=UserOut)
+async def get_current_user_details(
+    current_user: AuthUser = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    """Get current authenticated user's details."""
+    user = db.get(User, current_user.id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
 @router.get("/", response_model=list[UserOut])
 async def list_users(
+    current_user: AuthUser = Depends(require_auth),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """List all users. Requires viewer role or higher."""
     user_perms = get_permissions_for_role(current_user.role)
@@ -51,7 +71,7 @@ async def list_users(
 async def get_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(require_auth),
 ):
     """Get user details."""
     user_perms = get_permissions_for_role(current_user.role)
@@ -68,7 +88,7 @@ async def get_user(
 async def create_user(
     body: UserCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(require_auth),
 ):
     """Create/invite a new user. Requires admin role or higher."""
     user_perms = get_permissions_for_role(current_user.role)
@@ -110,7 +130,7 @@ async def update_user(
     user_id: int,
     body: UserUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(require_auth),
 ):
     """Update user details. Role changes require admin or higher."""
     user = db.get(User, user_id)
@@ -159,7 +179,7 @@ async def update_user(
 async def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(require_auth),
 ):
     """Delete a user. Requires admin role or higher."""
     user_perms = get_permissions_for_role(current_user.role)

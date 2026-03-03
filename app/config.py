@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     # Google OAuth (interactive/user auth)
     google_client_id: str = ""
     google_client_secret: str = ""
+    google_oauth_redirect_uri: str = "https://localhost:8081/auth/callback"
     google_oauth_token_file: str = "oauth-token.json"
 
     # Google Drive service account (optional, if org policy allows keys)
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     port: int = 8000
     secret_key: str = "change-me-in-production"
     allowed_origins: str = "http://localhost:3000,http://localhost:5173"
+    auto_create_schema: bool = False
 
     # Netlify
     netlify_site_id: str = ""

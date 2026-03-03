@@ -1,0 +1,358 @@
+"""Document management and cache functions."""
+
+import logging
+from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session, joinedload
+
+from app.models import User, Document, DocumentCache
+
+logger = logging.getLogger(__name__)
+
+
+def _serialize_document(d: Document, include_content: bool = False) -> dict:
+    """Serialize a Document model to dict with owner info."""
+    owner_data = None
+    if d.owner:
+        owner_data = {
+            "id": d.owner.id,
+            "full_name": d.owner.name,
+            "email": d.owner.email,
+        }
+
+    result = {
+        "id": d.id,
+        "google_doc_id": d.google_doc_id,
+        "title": d.title,
+        "slug": d.slug,
+        "project": d.project,
+        "version": d.version,
+        "section": d.section,
+        "visibility": d.visibility,
+        "status": d.status,
+        "description": d.description,
+        "tags": d.tags,
+        "project_id": d.project_id,
+        "project_version_id": d.project_version_id,
+        "topic_id": d.topic_id,
+        "owner_id": d.owner_id,
+        "owner": owner_data,
+        "is_published": d.is_published,
+        "content_id": d.content_id,
+        "published_content_id": d.published_content_id,
+        "video_url": d.video_url,
+        "video_title": d.video_title,
+        "display_order": d.display_order,
+        "google_modified_at": d.google_modified_at,
+        "drive_modified_at": d.drive_modified_at,
+        "last_synced_at": d.last_synced_at,
+        "last_published_at": d.last_published_at,
+        "created_at": d.created_at.isoformat() if d.created_at else None,
+        "updated_at": d.updated_at.isoformat() if d.updated_at else None,
+    }
+
+    if include_content:
+        result["content_html"] = d.content_html
+        result["published_content_html"] = d.published_content_html
+
+    return result
+
+
+def _publish_to_git(doc: Document) -> str | None:
+    """Convert document HTML to Markdown and publish to Git production branch."""
+    try:
+        from app.conversion.html_to_md import convert_html_to_markdown
+        from app.publishing.git_publisher import publish_to_production, push_branch
+
+        html = doc.published_content_html or doc.content_html
+        if not html:
+            logger.warning("No HTML content to publish for doc %s (%s)", doc.id, doc.title)
+            return None
+
+        markdown = convert_html_to_markdown(html)
+        if not markdown.strip():
+            logger.warning("Empty markdown after conversion for doc %s", doc.id)
+            return None
+
+        project_slug = doc.project or "default"
+        version_slug = doc.version or ""
+        section = doc.section or None
+        doc_slug = doc.slug or f"doc-{doc.id}"
+
+        commit_sha = publish_to_production(project_slug, version_slug, section, doc_slug, markdown)
+        if commit_sha:
+            logger.info("Published doc %s (%s) to Git: %s", doc.id, doc.title, commit_sha[:8])
+            # Best-effort push to remote
+            try:
+                push_branch("main")
+            except Exception:
+                logger.warning("Could not push to remote after publishing doc %s", doc.id)
+        return commit_sha
+    except Exception:
+        logger.exception("Failed to publish doc %s to Git", doc.id)
+        return None
+
+
+def _unpublish_from_git(doc: Document) -> str | None:
+    """Remove document from Git production branch."""
+    try:
+        from app.publishing.git_publisher import unpublish_from_production, push_branch
+
+        project_slug = doc.project or "default"
+        version_slug = doc.version or ""
+        section = doc.section or None
+        doc_slug = doc.slug or f"doc-{doc.id}"
+
+        commit_sha = unpublish_from_production(project_slug, version_slug, section, doc_slug)
+        if commit_sha:
+            logger.info("Unpublished doc %s (%s) from Git: %s", doc.id, doc.title, commit_sha[:8])
+            try:
+                push_branch("main")
+            except Exception:
+                logger.warning("Could not push to remote after unpublishing doc %s", doc.id)
+        return commit_sha
+    except Exception:
+        logger.exception("Failed to unpublish doc %s from Git", doc.id)
+        return None
+
+
+async def list_documents(body: dict, db: Session, user: User | None) -> dict:
+    """Get all documents for projects."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        project_ids = body.get("projectIds", [])
+        if not project_ids:
+            return {"ok": True, "documents": []}
+
+        documents = db.query(Document).options(
+            joinedload(Document.owner)
+        ).filter(
+            Document.project_id.in_(project_ids)
+        ).order_by(Document.display_order, Document.id).all()
+
+        doc_list = [_serialize_document(d) for d in documents]
+
+        return {"ok": True, "documents": doc_list}
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def create_document(body: dict, db: Session, user: User | None) -> dict:
+    """Create new document/page."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        google_doc_id = body.get("googleDocId") or body.get("google_doc_id", "")
+        title = body.get("title", "New Document")
+        project = body.get("project", "")
+        version = body.get("version", "v1.0")
+
+        if not google_doc_id:
+            return {"ok": False, "error": "Google Doc ID required"}
+
+        document = Document(
+            google_doc_id=google_doc_id,
+            title=title,
+            slug=body.get("slug", title.lower().replace(" ", "-")),
+            project=project,
+            version=version,
+            section=body.get("section"),
+            visibility=body.get("visibility", "public"),
+            status=body.get("status", "draft"),
+            description=body.get("description"),
+            tags=body.get("tags"),
+            project_id=body.get("projectId") or body.get("project_id"),
+            project_version_id=body.get("projectVersionId") or body.get("project_version_id"),
+            topic_id=body.get("topicId") or body.get("topic_id"),
+            owner_id=user.id,
+            display_order=body.get("displayOrder", body.get("display_order", 0)),
+        )
+        db.add(document)
+        db.commit()
+
+        return {
+            "ok": True,
+            "document": {
+                "id": document.id,
+                "google_doc_id": document.google_doc_id,
+                "title": document.title,
+                "slug": document.slug,
+            }
+        }
+
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "error": str(e)}
+
+
+async def get_document(body: dict, db: Session, user: User | None) -> dict:
+    """Fetch single document."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        doc_id = body.get("id") or body.get("documentId")
+        if not doc_id:
+            return {"ok": False, "error": "Document ID required"}
+
+        document = db.query(Document).options(
+            joinedload(Document.owner)
+        ).filter(Document.id == doc_id).first()
+        if not document:
+            return {"ok": False, "error": "Document not found"}
+
+        return {
+            "ok": True,
+            "document": _serialize_document(document, include_content=True),
+        }
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def update_document(body: dict, db: Session, user: User | None) -> dict:
+    """Modify document (content, metadata, publish status)."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        doc_id = body.get("id") or body.get("documentId")
+        if not doc_id:
+            return {"ok": False, "error": "Document ID required"}
+
+        document = db.query(Document).options(
+            joinedload(Document.owner)
+        ).filter(Document.id == doc_id).first()
+        if not document:
+            return {"ok": False, "error": "Document not found"}
+
+        # Frontend sends { documentId, data: { ...fields } }
+        update_data = body.get("data", body)
+
+        # Track if publish state is changing
+        was_published = document.is_published
+        will_publish = update_data.get("is_published", was_published)
+
+        # Update fields
+        updatable_fields = [
+            "title", "slug", "project", "version", "section", "visibility", "status",
+            "description", "tags", "project_id", "project_version_id", "topic_id",
+            "is_published", "content_html", "published_content_html", "content_id",
+            "published_content_id", "video_url", "video_title", "display_order",
+            "google_modified_at", "drive_modified_at", "last_synced_at", "last_published_at"
+        ]
+        for field in updatable_fields:
+            if field in update_data:
+                setattr(document, field, update_data[field])
+
+        # Trigger Git publishing pipeline when publish state changes
+        if will_publish and not was_published:
+            _publish_to_git(document)
+            document.last_published_at = datetime.now(timezone.utc)
+        elif not will_publish and was_published:
+            _unpublish_from_git(document)
+
+        db.commit()
+
+        return {
+            "ok": True,
+            "document": _serialize_document(document, include_content=True),
+        }
+
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "error": str(e)}
+
+
+async def delete_document(body: dict, db: Session, user: User | None) -> dict:
+    """Delete document."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        doc_id = body.get("id") or body.get("documentId")
+        if not doc_id:
+            return {"ok": False, "error": "Document ID required"}
+
+        document = db.query(Document).filter(Document.id == doc_id).first()
+        if not document:
+            return {"ok": False, "error": "Document not found"}
+
+        db.delete(document)
+        db.commit()
+
+        return {"ok": True}
+
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "error": str(e)}
+
+
+async def document_cache(body: dict, db: Session, user: User | None) -> dict:
+    """Get/set cached HTML content."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        doc_id = body.get("documentId")
+        action = body.get("action", "get")  # get or set
+
+        if not doc_id:
+            return {"ok": False, "error": "Document ID required"}
+
+        if action == "set":
+            # Set cache
+            cache = db.query(DocumentCache).filter(DocumentCache.document_id == doc_id).first()
+            if not cache:
+                # Find org_id from user
+                from app.models import OrgRole
+                org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+                org_id = org_role.organization_id if org_role else 1
+
+                cache = DocumentCache(
+                    document_id=doc_id,
+                    organization_id=org_id,
+                )
+                db.add(cache)
+
+            cache.content_html_encrypted = body.get("content_html")
+            cache.content_text_encrypted = body.get("content_text")
+            cache.headings_encrypted = body.get("headings")
+            cache.published_content_html_encrypted = body.get("published_content_html")
+            db.commit()
+
+            return {"ok": True}
+
+        else:
+            # Get cache
+            cache = db.query(DocumentCache).filter(DocumentCache.document_id == doc_id).first()
+            if not cache:
+                return {"ok": True, "cache": None}
+
+            return {
+                "ok": True,
+                "cache": {
+                    "content_html": cache.content_html_encrypted,
+                    "content_text": cache.content_text_encrypted,
+                    "headings": cache.headings_encrypted,
+                    "published_content_html": cache.published_content_html_encrypted,
+                }
+            }
+
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "error": str(e)}
+
+
+async def docs_ai_assistant(body: dict, db: Session, user: User | None) -> dict:
+    """AI documentation assistant (placeholder)."""
+    # Placeholder - would integrate with AI service
+    return {
+        "ok": True,
+        "message": "AI assistant not yet configured",
+        "response": "The AI documentation assistant feature is coming soon."
+    }

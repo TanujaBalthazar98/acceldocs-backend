@@ -187,6 +187,7 @@ def _sync_one_doc(
         existing.section = section
         existing.visibility = visibility
         existing.status = status
+        existing.is_published = status == "approved"
         existing.description = description
         existing.tags = tags
         existing.drive_modified_at = doc_file.modified_time
@@ -205,6 +206,7 @@ def _sync_one_doc(
             section=section,
             visibility=visibility,
             status=status,
+            is_published=(status == "approved"),
             description=description,
             tags=tags,
             drive_modified_at=doc_file.modified_time,
@@ -232,6 +234,7 @@ def _sync_one_doc(
     elif status == "approved":
         commit_sha = publish_to_production(project, ver, section, doc_slug, markdown)
         if commit_sha:
+            doc.is_published = True
             doc.last_published_at = now
             db.add(
                 SyncLog(
@@ -245,6 +248,7 @@ def _sync_one_doc(
     elif status in {"draft", "rejected"}:
         commit_sha = unpublish_from_production(project, ver, section, doc_slug)
         if commit_sha:
+            doc.is_published = False
             doc.last_published_at = None
             db.add(
                 SyncLog(

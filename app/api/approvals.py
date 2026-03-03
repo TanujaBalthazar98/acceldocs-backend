@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.conversion.html_to_md import convert_html_to_markdown
 from app.database import get_db
 from app.ingestion.drive import _get_service, export_doc_as_html
+from app.middleware.auth import AuthUser, require_auth, require_role
 from app.models import Approval, Document, User
 from app.publishing.git_publisher import publish_to_production, unpublish_from_production
 
@@ -33,8 +34,11 @@ class ApprovalOut(BaseModel):
 
 
 @router.get("/pending", response_model=list)
-async def list_pending(db: Session = Depends(get_db)):
-    """List documents awaiting approval (status=review)."""
+async def list_pending(
+    current_user: AuthUser = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """List documents awaiting approval (status=review). Requires authentication."""
     docs = (
         db.query(Document)
         .filter(Document.status == "review")
@@ -70,8 +74,12 @@ def _get_system_user(db: Session) -> User:
 
 
 @router.post("/action")
-async def perform_action(body: ApprovalAction, db: Session = Depends(get_db)):
-    """Approve or reject a document.
+async def perform_action(
+    body: ApprovalAction,
+    current_user: AuthUser = Depends(require_role("reviewer")),
+    db: Session = Depends(get_db)
+):
+    """Approve or reject a document. Requires reviewer role or higher.
 
     - approve: publishes markdown to production branch
     - reject: moves back to draft
@@ -83,7 +91,11 @@ async def perform_action(body: ApprovalAction, db: Session = Depends(get_db)):
     if body.action not in ("approve", "reject"):
         raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
 
-    actor = _get_system_user(db)
+    # Use the authenticated user instead of system user
+    actor = db.get(User, current_user.id)
+    if not actor:
+        # Fallback to system user if authenticated user not found in DB
+        actor = _get_system_user(db)
 
     if body.action == "approve":
         try:
@@ -99,6 +111,7 @@ async def perform_action(body: ApprovalAction, db: Session = Depends(get_db)):
             )
 
             doc.status = "approved"
+            doc.is_published = True
             doc.last_published_at = datetime.now(timezone.utc).isoformat()
             if commit_sha:
                 db.add(
@@ -115,6 +128,7 @@ async def perform_action(body: ApprovalAction, db: Session = Depends(get_db)):
             raise HTTPException(status_code=500, detail=f"Publish failed: {exc}") from exc
     else:
         doc.status = "draft"
+        doc.is_published = False
         unpublish_from_production(
             project=doc.project,
             version=doc.version,

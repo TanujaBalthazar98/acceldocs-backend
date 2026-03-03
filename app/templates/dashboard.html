@@ -5,6 +5,41 @@
 <h1>Dashboard</h1>
 <p class="subtitle">Overview of your documentation pipeline.</p>
 
+<!-- Getting Started Card (show if no documents) -->
+{% if total_docs == 0 %}
+<div class="card mb-4" style="background: linear-gradient(135deg, #f8fafc 0%, #e0f2fe 100%); border-color: #bae6fd;">
+  <div style="display: flex; align-items: start; gap: 1.5rem;">
+    <div style="flex-shrink: 0;">
+      <div style="width: 56px; height: 56px; background: #0ea5e9; border-radius: 12px; display: flex; align-items: center; justify-content: center;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" style="width: 28px; height: 28px;">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>
+        </svg>
+      </div>
+    </div>
+    <div style="flex: 1;">
+      <h2 style="margin: 0 0 0.5rem 0; font-size: 20px;">Welcome to AccelDocs!</h2>
+      <p style="color: #475569; margin-bottom: 1.5rem; line-height: 1.6;">
+        Get started by setting up your first documentation project. The guided setup will help you connect to Google Drive and run your first sync.
+      </p>
+      <div style="display: flex; gap: 0.75rem;">
+        <a href="/onboarding" class="btn btn-primary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+          Start Setup Wizard
+        </a>
+        <a href="/projects" class="btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+          Create Project Manually
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <div class="stats">
   <div class="stat">
     <div class="label">Total Documents</div>

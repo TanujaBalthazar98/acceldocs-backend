@@ -1,0 +1,369 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - AccelDocs{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 2rem;">
+    <div style="margin-bottom: 1.5rem;">
+        <h1 style="margin: 0 0 0.5rem 0; font-size: 2rem; font-weight: 600;">Settings</h1>
+        <p style="margin: 0; color: #666;">Configure system settings and integrations.</p>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs-container">
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="drive">Google Drive</button>
+            <button class="tab-btn" data-tab="git">Git Publishing</button>
+            <button class="tab-btn" data-tab="auth">Authentication</button>
+            <button class="tab-btn" data-tab="netlify">Netlify</button>
+            <button class="tab-btn" data-tab="system">System</button>
+        </div>
+
+        <!-- Google Drive Tab -->
+        <div class="tab-content active" id="drive-tab">
+            <div class="card">
+                <div style="padding: 1.5rem; border-bottom: 1px solid #eee;">
+                    <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Google Drive Configuration</h2>
+                </div>
+                <div style="padding: 1.5rem;">
+                    <div style="margin-bottom: 1rem;">
+                        <label class="form-label">Root Folder ID</label>
+                        <input type="text" id="google_drive_root_folder_id" class="form-input" placeholder="1AbC2dEf3GhI4jKl5mNo6pQr">
+                        <p class="form-help">The ID of the root documentation folder in Google Drive</p>
+                    </div>
+                    <div style="margin-bottom: 1rem;">
+                        <label class="form-label">Service Account File Path</label>
+                        <input type="text" id="google_service_account_file" class="form-input" placeholder="credentials/service-account.json">
+                        <p class="form-help">Path to Google service account JSON file</p>
+                    </div>
+                    <div style="display: flex; gap: 0.75rem; margin-top: 1.5rem;">
+                        <button onclick="testDriveConnection()" class="btn" style="background: #e5e7eb; color: #374151;">
+                            Test Connection
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Git Publishing Tab -->
+        <div class="tab-content" id="git-tab">
+            <div class="card">
+                <div style="padding: 1.5rem; border-bottom: 1px solid #eee;">
+                    <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Git Publishing Configuration</h2>
+                </div>
+                <div style="padding: 1.5rem;">
+                    <div style="margin-bottom: 1rem;">
+                        <label class="form-label">Docs Repository Path</label>
+                        <input type="text" id="docs_repo_path" class="form-input" placeholder="/path/to/acceldocs-site">
+                        <p class="form-help">Local path to the MkDocs repository</p>
+                    </div>
+                    <div style="margin-bottom: 1rem;">
+                        <label class="form-label">Remote URL</label>
+                        <input type="text" id="docs_repo_url" class="form-input" placeholder="https://github.com/yourorg/acceldocs-site.git">
+                        <p class="form-help">Git remote URL for the docs repository</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Authentication Tab -->
+        <div class="tab-content" id="auth-tab">
+            <div class="card">
+                <div style="padding: 1.5rem; border-bottom: 1px solid #eee;">
+                    <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Authentication Configuration</h2>
+                </div>
+                <div style="padding: 1.5rem;">
+                    <div style="margin-bottom: 1rem;">
+                        <label class="form-label">Google OAuth Client ID</label>
+                        <input type="text" id="google_client_id" class="form-input" placeholder="123456789-abcdefg.apps.googleusercontent.com">
+                        <p class="form-help">OAuth 2.0 client ID from Google Cloud Console</p>
+                    </div>
+                    <div style="margin-bottom: 1rem;">
+                        <label class="form-label">Google OAuth Client Secret</label>
+                        <div style="position: relative;">
+                            <input type="password" id="google_client_secret" class="form-input" placeholder="***">
+                            <button type="button" onclick="toggleSecret('google_client_secret')" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: #666;">
+                                👁️
+                            </button>
+                        </div>
+                        <p class="form-help">OAuth 2.0 client secret (leave as *** to keep current)</p>
+                    </div>
+                    <div style="margin-bottom: 1rem;">
+                        <label class="form-label">Server Secret Key</label>
+                        <div style="position: relative;">
+                            <input type="password" id="secret_key" class="form-input" placeholder="***">
+                            <button type="button" onclick="toggleSecret('secret_key')" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: #666;">
+                                👁️
+                            </button>
+                        </div>
+                        <p class="form-help">Secret key for session/JWT signing (leave as *** to keep current)</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Netlify Tab -->
+        <div class="tab-content" id="netlify-tab">
+            <div class="card">
+                <div style="padding: 1.5rem; border-bottom: 1px solid #eee;">
+                    <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Netlify Configuration</h2>
+                </div>
+                <div style="padding: 1.5rem;">
+                    <div style="margin-bottom: 1rem;">
+                        <label class="form-label">Netlify Site ID</label>
+                        <input type="text" id="netlify_site_id" class="form-input" placeholder="abc123-def456-ghi789">
+                        <p class="form-help">Site ID from Netlify dashboard</p>
+                    </div>
+                    <div style="margin-bottom: 1rem;">
+                        <label class="form-label">Netlify Auth Token</label>
+                        <div style="position: relative;">
+                            <input type="password" id="netlify_auth_token" class="form-input" placeholder="***">
+                            <button type="button" onclick="toggleSecret('netlify_auth_token')" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: #666;">
+                                👁️
+                            </button>
+                        </div>
+                        <p class="form-help">Personal access token from Netlify (leave as *** to keep current)</p>
+                    </div>
+                    <div style="display: flex; gap: 0.75rem; margin-top: 1.5rem;">
+                        <button onclick="triggerDeploy()" class="btn" style="background: #e5e7eb; color: #374151;">
+                            Trigger Deploy
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- System Tab -->
+        <div class="tab-content" id="system-tab">
+            <div class="card">
+                <div style="padding: 1.5rem; border-bottom: 1px solid #eee;">
+                    <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">System Configuration</h2>
+                </div>
+                <div style="padding: 1.5rem;">
+                    <div style="margin-bottom: 1rem;">
+                        <label class="form-label">Allowed Origins (CORS)</label>
+                        <input type="text" id="allowed_origins" class="form-input" placeholder="http://localhost:5173,https://app.example.com">
+                        <p class="form-help">Comma-separated list of allowed origins for CORS</p>
+                    </div>
+                    <div style="display: flex; gap: 0.75rem; margin-top: 1.5rem;">
+                        <button onclick="backupDatabase()" class="btn" style="background: #e5e7eb; color: #374151;">
+                            Backup Database
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Save Button (sticky at bottom) -->
+    <div style="position: sticky; bottom: 0; background: white; padding: 1.5rem 0; border-top: 1px solid #eee; margin-top: 2rem;">
+        <button onclick="saveSettings()" class="btn btn-primary" style="width: 100%;">
+            Save All Settings
+        </button>
+    </div>
+</div>
+
+<script>
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const tabName = btn.dataset.tab;
+
+        // Update active tab button
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        // Update active tab content
+        document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+        document.getElementById(`${tabName}-tab`).classList.add('active');
+    });
+});
+
+// Load settings on page load
+async function loadSettings() {
+    try {
+        const response = await apiFetch('/api/settings');
+        if (response.ok) {
+            const data = await response.json();
+
+            // Populate form fields
+            Object.keys(data).forEach(key => {
+                const input = document.getElementById(key);
+                if (input) {
+                    input.value = data[key] || '';
+                }
+            });
+        } else {
+            showAlert('Failed to load settings', 'error');
+        }
+    } catch (err) {
+        showAlert('Network error: ' + err.message, 'error');
+    }
+}
+
+// Save all settings
+async function saveSettings() {
+    const updates = {
+        google_drive_root_folder_id: document.getElementById('google_drive_root_folder_id').value,
+        google_service_account_file: document.getElementById('google_service_account_file').value,
+        google_client_id: document.getElementById('google_client_id').value,
+        google_client_secret: document.getElementById('google_client_secret').value,
+        docs_repo_path: document.getElementById('docs_repo_path').value,
+        docs_repo_url: document.getElementById('docs_repo_url').value,
+        netlify_site_id: document.getElementById('netlify_site_id').value,
+        netlify_auth_token: document.getElementById('netlify_auth_token').value,
+        secret_key: document.getElementById('secret_key').value,
+        allowed_origins: document.getElementById('allowed_origins').value,
+    };
+
+    try {
+        const response = await apiFetch('/api/settings', {
+            method: 'PUT',
+            body: JSON.stringify(updates),
+        });
+
+        if (response.ok) {
+            showAlert('Settings saved successfully', 'success');
+        } else {
+            const error = await response.json();
+            showAlert(error.detail || 'Failed to save settings', 'error');
+        }
+    } catch (err) {
+        showAlert('Network error: ' + err.message, 'error');
+    }
+}
+
+// Test Drive connection
+async function testDriveConnection() {
+    try {
+        const response = await apiFetch('/api/settings/test-drive', {
+            method: 'POST',
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            showAlert(`✓ ${result.message}${result.folder_name ? ': ' + result.folder_name : ''}`, 'success');
+        } else {
+            showAlert(`✗ ${result.message}`, 'error');
+        }
+    } catch (err) {
+        showAlert('Test failed: ' + err.message, 'error');
+    }
+}
+
+// Trigger Netlify deploy
+async function triggerDeploy() {
+    if (!confirm('Trigger a new Netlify deployment?')) {
+        return;
+    }
+
+    try {
+        const response = await apiFetch('/api/settings/deploy-netlify', {
+            method: 'POST',
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            showAlert(`✓ ${result.message}${result.deploy_id ? ' (ID: ' + result.deploy_id + ')' : ''}`, 'success');
+        } else {
+            showAlert(`✗ ${result.message}`, 'error');
+        }
+    } catch (err) {
+        showAlert('Deploy failed: ' + err.message, 'error');
+    }
+}
+
+// Backup database
+async function backupDatabase() {
+    if (!confirm('Create a database backup?')) {
+        return;
+    }
+
+    try {
+        const response = await apiFetch('/api/settings/backup-db', {
+            method: 'POST',
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            showAlert(`✓ Backup created: ${result.backup_file}`, 'success');
+        } else {
+            const error = await response.json();
+            showAlert(error.detail || 'Backup failed', 'error');
+        }
+    } catch (err) {
+        showAlert('Backup failed: ' + err.message, 'error');
+    }
+}
+
+// Toggle secret visibility
+function toggleSecret(fieldId) {
+    const input = document.getElementById(fieldId);
+    input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+// Load settings on page load
+loadSettings();
+</script>
+
+<style>
+.tabs-container {
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.tabs {
+    display: flex;
+    border-bottom: 1px solid #e5e7eb;
+    background: #f9fafb;
+}
+
+.tab-btn {
+    flex: 1;
+    padding: 1rem;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    font-weight: 500;
+    color: #6b7280;
+    transition: all 0.2s;
+}
+
+.tab-btn:hover {
+    background: white;
+    color: #374151;
+}
+
+.tab-btn.active {
+    background: white;
+    color: #2563eb;
+    border-bottom-color: #2563eb;
+}
+
+.tab-content {
+    display: none;
+    padding: 1.5rem;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+.form-label {
+    display: block;
+    font-weight: 500;
+    margin-bottom: 0.5rem;
+    font-size: 0.875rem;
+    color: #374151;
+}
+
+.form-help {
+    font-size: 0.75rem;
+    color: #6b7280;
+    margin-top: 0.25rem;
+    margin-bottom: 0;
+}
+</style>
+{% endblock %}

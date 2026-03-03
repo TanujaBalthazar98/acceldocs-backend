@@ -2,44 +2,170 @@
 {% block title %}Sync — AccelDocs{% endblock %}
 
 {% block content %}
-<h1>Sync</h1>
-<p class="subtitle">Scan Google Drive and sync documents to the pipeline.</p>
+<h1>Sync History</h1>
+<p class="subtitle">Monitor Google Drive sync operations and troubleshoot issues.</p>
 
-<div class="card">
-  <div class="card-header">
-    <h2>Drive Sync</h2>
-    <button id="syncBtn" class="btn btn-primary" onclick="runSync()">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+<!-- Stats Cards -->
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem;">
+  <div class="card" style="padding: 1.5rem;">
+    <div style="font-size: 13px; color: #64748b; margin-bottom: 0.5rem;">Total Operations</div>
+    <div style="font-size: 2rem; font-weight: 600; color: #0f172a;">{{ stats.total }}</div>
+  </div>
+
+  <div class="card" style="padding: 1.5rem;">
+    <div style="font-size: 13px; color: #64748b; margin-bottom: 0.5rem;">Successful</div>
+    <div style="font-size: 2rem; font-weight: 600; color: #059669;">{{ stats.successful }}</div>
+  </div>
+
+  <div class="card" style="padding: 1.5rem;">
+    <div style="font-size: 13px; color: #64748b; margin-bottom: 0.5rem;">With Errors</div>
+    <div style="font-size: 2rem; font-weight: 600; color: #dc2626;">{{ stats.errors }}</div>
+  </div>
+
+  <div class="card" style="padding: 1.5rem;">
+    <div style="font-size: 13px; color: #64748b; margin-bottom: 0.5rem;">Last 24 Hours</div>
+    <div style="font-size: 2rem; font-weight: 600; color: #3b82f6;">{{ stats.recent }}</div>
+  </div>
+</div>
+
+<!-- Sync Trigger Card -->
+<div class="card mb-4">
+  <div style="display: flex; justify-content: space-between; align-items: start;">
+    <div style="flex: 1;">
+      <h2 style="margin: 0 0 0.5rem 0;">Drive Sync</h2>
+      <p class="text-sm text-muted" style="margin: 0;">Scans your Google Drive folder, exports new/changed documents, converts to Markdown, and publishes based on status.</p>
+    </div>
+    <button id="syncBtn" class="btn btn-primary" onclick="runSync()" style="white-space: nowrap;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
       Run Full Sync
     </button>
   </div>
-  <p class="text-sm text-muted mb-4">Scans your Google Drive folder, exports new/changed Google Docs as HTML, converts to Markdown, and publishes based on document status.</p>
-  <pre id="syncOut">Ready to sync. Click "Run Full Sync" to start.</pre>
+  <pre id="syncOut" style="display: none; margin-top: 1rem; padding: 1rem; background: #f8fafc; border-radius: 6px; font-size: 13px; line-height: 1.6;">Ready to sync.</pre>
 </div>
 
-<div class="card">
-  <div class="card-header">
-    <h2>Recent Sync Activity</h2>
+<!-- Filters -->
+<div class="card mb-4">
+  <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+    <select id="filterAction" class="btn" style="min-width: 140px;" onchange="applyFilters()">
+      <option value="">All Actions</option>
+      <option value="sync" {% if filter_action == 'sync' %}selected{% endif %}>Sync</option>
+      <option value="publish" {% if filter_action == 'publish' %}selected{% endif %}>Publish</option>
+      <option value="publish_preview" {% if filter_action == 'publish_preview' %}selected{% endif %}>Publish Preview</option>
+      <option value="unpublish" {% if filter_action == 'unpublish' %}selected{% endif %}>Unpublish</option>
+    </select>
+
+    <select id="filterBranch" class="btn" style="min-width: 140px;" onchange="applyFilters()">
+      <option value="">All Branches</option>
+      <option value="main" {% if filter_branch == 'main' %}selected{% endif %}>main</option>
+      <option value="docs-preview" {% if filter_branch == 'docs-preview' %}selected{% endif %}>docs-preview</option>
+    </select>
+
+    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; padding: 0.5rem 0.75rem; background: #f1f5f9; border-radius: 6px;">
+      <input type="checkbox" id="filterErrors" {% if filter_errors %}checked{% endif %} onchange="applyFilters()" />
+      <span style="font-size: 14px; color: #475569;">Errors Only</span>
+    </label>
+
+    <div style="flex: 1;"></div>
+
+    <label style="font-size: 13px; color: #64748b;">Show:</label>
+    <select id="limitResults" class="btn" style="min-width: 100px;" onchange="applyFilters()">
+      <option value="50" {% if limit == 50 %}selected{% endif %}>50</option>
+      <option value="100" selected {% if limit == 100 %}selected{% endif %}>100</option>
+      <option value="250" {% if limit == 250 %}selected{% endif %}>250</option>
+      <option value="500" {% if limit == 500 %}selected{% endif %}>500</option>
+    </select>
+
+    <button class="btn" onclick="clearFilters()" style="background: #fee2e2; color: #991b1b;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
+        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+      Clear
+    </button>
   </div>
+</div>
+
+<!-- Sync History Table -->
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+    <h2 style="margin: 0;">Sync Activity</h2>
+    <span style="color: #64748b; font-size: 14px;">Showing {{ sync_logs|length }} operation{{ 's' if sync_logs|length != 1 else '' }}</span>
+  </div>
+
   <table>
-    <tr><th>Document</th><th>Action</th><th>Branch</th><th>Commit</th><th>Date</th></tr>
-    {% for log in sync_logs %}
-    <tr>
-      <td>{{ log.doc_title }}</td>
-      <td>
-        {% if 'publish' in log.action %}
-        <span class="pill pill-approved">{{ log.action }}</span>
-        {% else %}
-        <span class="pill pill-draft">{{ log.action }}</span>
-        {% endif %}
-      </td>
-      <td class="mono">{{ log.branch or '—' }}</td>
-      <td class="mono">{{ log.commit_sha[:8] if log.commit_sha else '—' }}</td>
-      <td class="text-sm text-muted">{{ log.created_at }}</td>
-    </tr>
-    {% else %}
-    <tr class="empty-row"><td colspan="5">No sync activity yet. Run a sync to get started.</td></tr>
-    {% endfor %}
+    <thead>
+      <tr>
+        <th style="width: 5%;">Status</th>
+        <th style="width: 30%;">Document</th>
+        <th style="width: 12%;">Action</th>
+        <th style="width: 12%;">Branch</th>
+        <th style="width: 15%;">Commit</th>
+        <th style="width: 18%;">Date</th>
+        <th style="width: 8%;"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for log in sync_logs %}
+      <tr id="log-{{ loop.index }}">
+        <td>
+          {% if log.error %}
+          <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%;" title="Error"></span>
+          {% else %}
+          <span style="display: inline-block; width: 10px; height: 10px; background: #059669; border-radius: 50%;" title="Success"></span>
+          {% endif %}
+        </td>
+        <td>
+          <div style="font-weight: 500;">{{ log.doc_title }}</div>
+        </td>
+        <td>
+          {% if log.action == 'publish' %}
+          <span class="pill" style="background: #dcfce7; color: #166534;">publish</span>
+          {% elif log.action == 'publish_preview' %}
+          <span class="pill" style="background: #dbeafe; color: #1e40af;">preview</span>
+          {% elif log.action == 'unpublish' %}
+          <span class="pill" style="background: #fee2e2; color: #991b1b;">unpublish</span>
+          {% else %}
+          <span class="pill" style="background: #f1f5f9; color: #475569;">{{ log.action }}</span>
+          {% endif %}
+        </td>
+        <td class="mono text-sm">{{ log.branch or '—' }}</td>
+        <td class="mono text-sm">
+          {% if log.commit_sha %}
+          <a href="#" style="color: #3b82f6; text-decoration: none;">{{ log.commit_sha[:8] }}</a>
+          {% else %}
+          —
+          {% endif %}
+        </td>
+        <td class="text-sm text-muted">{{ log.created_at }}</td>
+        <td>
+          {% if log.error %}
+          <button class="btn btn-sm" onclick="toggleError({{ loop.index }})" style="background: #fee2e2; color: #991b1b; font-size: 12px;">
+            View Error
+          </button>
+          {% endif %}
+        </td>
+      </tr>
+      {% if log.error %}
+      <tr id="error-{{ loop.index }}" style="display: none; background: #fef2f2;">
+        <td colspan="7" style="padding: 1rem;">
+          <div style="display: flex; gap: 1rem;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 20px; height: 20px; color: #dc2626; flex-shrink: 0;">
+              <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <div style="flex: 1;">
+              <div style="font-weight: 600; color: #991b1b; margin-bottom: 0.5rem;">Error Details</div>
+              <pre style="margin: 0; padding: 0.75rem; background: white; border: 1px solid #fecaca; border-radius: 4px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word;">{{ log.error }}</pre>
+            </div>
+          </div>
+        </td>
+      </tr>
+      {% endif %}
+      {% else %}
+      <tr class="empty-row"><td colspan="7">No sync activity yet. Run a sync to get started.</td></tr>
+      {% endfor %}
+    </tbody>
   </table>
 </div>
 {% endblock %}
@@ -49,22 +175,71 @@
 async function runSync() {
   const out = document.getElementById('syncOut');
   const btn = document.getElementById('syncBtn');
+
   btn.disabled = true;
-  btn.textContent = 'Syncing...';
+  btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation: spin 1s linear infinite;"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Syncing...';
+  out.style.display = 'block';
   out.textContent = 'Scanning Google Drive...\n';
 
   try {
-    const data = await apiFetch('/api/sync/trigger', { method: 'POST' });
-    out.textContent += '\n' + JSON.stringify(data, null, 2);
-    showAlert(`Sync complete: ${data.synced || 0} documents synced, ${data.errors || 0} errors`);
+    const response = await apiFetch('/api/sync/trigger', { method: 'POST' });
+    const data = await response.json();
+
+    out.textContent += '\n✓ Sync Complete\n\n';
+    out.textContent += `Created:  ${data.created || 0}\n`;
+    out.textContent += `Updated:  ${data.updated || 0}\n`;
+    out.textContent += `Skipped:  ${data.skipped || 0}\n`;
+    out.textContent += `Errors:   ${data.errors || 0}\n`;
+    out.textContent += `Published (Preview): ${data.published_preview || 0}\n`;
+    out.textContent += `Published (Prod):    ${data.published_production || 0}\n`;
+
+    showAlert(`Sync complete: ${data.synced || 0} documents processed`, data.errors > 0 ? 'warning' : 'success');
     setTimeout(() => location.reload(), 2000);
   } catch (e) {
-    out.textContent += '\nError: ' + e.message;
+    out.textContent += '\n✗ Error: ' + e.message;
     showAlert('Sync failed: ' + e.message, 'error');
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Run Full Sync';
+    btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Run Full Sync';
   }
 }
+
+function toggleError(index) {
+  const errorRow = document.getElementById(`error-${index}`);
+  const btn = event.target;
+
+  if (errorRow.style.display === 'none') {
+    errorRow.style.display = 'table-row';
+    btn.textContent = 'Hide Error';
+  } else {
+    errorRow.style.display = 'none';
+    btn.textContent = 'View Error';
+  }
+}
+
+function applyFilters() {
+  const params = new URLSearchParams();
+
+  const action = document.getElementById('filterAction').value;
+  const branch = document.getElementById('filterBranch').value;
+  const errorsOnly = document.getElementById('filterErrors').checked;
+  const limit = document.getElementById('limitResults').value;
+
+  if (action) params.set('action', action);
+  if (branch) params.set('branch', branch);
+  if (errorsOnly) params.set('errors', 'true');
+  if (limit) params.set('limit', limit);
+
+  window.location.href = '/sync' + (params.toString() ? '?' + params.toString() : '');
+}
+
+function clearFilters() {
+  window.location.href = '/sync';
+}
+
+// Add spin animation for sync button
+const style = document.createElement('style');
+style.textContent = '@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }';
+document.head.appendChild(style);
 </script>
 {% endblock %}
