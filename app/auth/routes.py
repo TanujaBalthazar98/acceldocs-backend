@@ -341,16 +341,41 @@ async def callback(
             access_token, settings.google_drive_root_folder_id, email
         )
 
-    # Upsert user in DB
+    # Check if user already exists
     user = db.query(User).filter(User.google_id == google_id).first()
+    is_new_user = user is None
+
     if user:
         user.email = email
         user.name = name
-        # Update role to owner if they own the folder (even if previously assigned different role)
         if is_folder_owner and user.role != "owner":
             user.role = "owner"
             logger.info(f"Promoted {email} to owner (owns Drive root folder)")
     else:
+        # New user — only create if they came through signup flow or can auto-join an org
+        if not signup_info:
+            # Check if they can auto-join by email domain
+            inferred_domain = _extract_org_domain(email)
+            existing_org = None
+            if inferred_domain:
+                existing_org = db.query(Organization).filter(Organization.domain == inferred_domain).first()
+
+            if not existing_org:
+                # No signup state and no matching org — redirect to signup
+                logger.info(f"New user {email} has no signup state and no matching org, redirecting to signup")
+                redirect_url = "/signup?reason=no_account"
+                if wants_json:
+                    return {
+                        "error": "no_account",
+                        "message": "No account found. Please sign up first.",
+                        "redirect": "/signup",
+                    }
+                return HTMLResponse(
+                    content=f'<script>window.location.href="{redirect_url}";</script>'
+                    f'<p>No account found. <a href="{redirect_url}">Sign up</a></p>',
+                    status_code=200,
+                )
+
         role = "owner" if is_folder_owner else "viewer"
         user = User(google_id=google_id, email=email, name=name, role=role)
         db.add(user)
@@ -371,14 +396,12 @@ async def callback(
         action = signup_info.get("action")
 
         if action == "join":
-            # Join existing organization
             org_id = signup_info.get("org_id")
             organization = db.query(Organization).filter(Organization.id == org_id).first()
 
             if not organization:
                 raise HTTPException(status_code=400, detail="Organization not found")
 
-            # Add user as member (default role: viewer, can be changed by admin later)
             org_role = OrgRole(organization_id=organization.id, user_id=user.id, role="viewer")
             db.add(org_role)
             db.flush()
@@ -386,7 +409,6 @@ async def callback(
             logger.info(f"Added user {user.email} to organization {organization.name}")
 
         elif action == "create":
-            # Create new organization with provided details
             org_name = signup_info.get("org_name")
             drive_folder_id = signup_info.get("drive_folder_id")
             inferred_domain = _extract_org_domain(email)
@@ -396,7 +418,6 @@ async def callback(
                 if not domain_in_use:
                     claimed_domain = inferred_domain
 
-            # Create organization with drive folder
             organization = Organization(
                 name=org_name,
                 drive_folder_id=drive_folder_id,
@@ -406,7 +427,6 @@ async def callback(
             db.add(organization)
             db.flush()
 
-            # Add user as owner
             org_role = OrgRole(organization_id=organization.id, user_id=user.id, role="owner")
             db.add(org_role)
             db.flush()
@@ -416,8 +436,8 @@ async def callback(
         else:
             raise HTTPException(status_code=400, detail=f"Invalid signup action: {action}")
 
-    else:
-        # Fallback: auto-join by email domain if org exists, otherwise create default org.
+    elif is_new_user:
+        # New user without signup info — auto-join by email domain
         inferred_domain = _extract_org_domain(email)
         existing_org = None
         if inferred_domain:
@@ -430,24 +450,13 @@ async def callback(
             organization_id = existing_org.id
             logger.info(f"Auto-joined {user.email} to organization {existing_org.name} via domain {inferred_domain}")
         else:
-            # Create default organization for user (backward compatibility)
-            default_name = f"{user.name}'s Workspace" if user.name else f"{user.email}'s Workspace"
-            claimed_domain = None
-            if inferred_domain:
-                domain_in_use = db.query(Organization).filter(Organization.domain == inferred_domain).first()
-                if not domain_in_use:
-                    claimed_domain = inferred_domain
-
-            organization = Organization(name=default_name, domain=claimed_domain, owner_id=user.id)
-            db.add(organization)
-            db.flush()
-
-            # Add user as owner of the organization
-            org_role = OrgRole(organization_id=organization.id, user_id=user.id, role="owner")
-            db.add(org_role)
-            db.flush()
-            organization_id = organization.id
-            logger.info(f"Created default organization {default_name} for user {user.email}")
+            # This shouldn't happen — we checked above. But just in case.
+            organization_id = None
+            logger.warning(f"New user {user.email} has no org after callback — should not reach here")
+    else:
+        # Existing user with no org (edge case — shouldn't normally happen)
+        organization_id = None
+        logger.warning(f"Existing user {user.email} has no organization")
 
     # Store encrypted refresh token if provided
     if refresh_token:
