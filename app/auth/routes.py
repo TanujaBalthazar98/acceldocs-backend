@@ -497,6 +497,7 @@ async def callback(
         return {
             "access_token": jwt_token,
             "token_type": "bearer",
+            "google_access_token": access_token,
             "user": {
                 "id": user.id,
                 "email": user.email,
