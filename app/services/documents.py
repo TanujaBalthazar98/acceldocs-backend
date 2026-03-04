@@ -5,9 +5,59 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import User, Document, DocumentCache, ProjectVersion
+from app.models import User, Document, DocumentCache, Project, ProjectVersion, Topic
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_publish_path(doc: Document) -> tuple[str, str, str | None, str]:
+    """Resolve a document's publish path from FK relationships, falling back to string fields.
+
+    Walks the FK chain:  doc → project_rel → slug,  doc → project_version → slug,
+    doc → topic → (walk parent chain for nested section path).
+
+    Returns:
+        (project_slug, version_slug, section_path_or_none, doc_slug)
+    """
+    # --- project slug ---
+    project_slug = "default"
+    if doc.project_rel:
+        # If the project is a sub-project, build path: parent-slug/child-slug
+        parts: list[str] = []
+        p: Project | None = doc.project_rel
+        while p is not None:
+            parts.append(p.slug or p.name.lower().replace(" ", "-"))
+            p = p.parent
+        parts.reverse()
+        project_slug = "/".join(parts)
+    elif doc.project:
+        # Legacy string field
+        project_slug = doc.project
+
+    # --- version slug ---
+    version_slug = ""
+    if doc.project_version:
+        version_slug = doc.project_version.slug or doc.project_version.name
+    elif doc.version:
+        version_slug = doc.version
+
+    # --- section (topic hierarchy) ---
+    section: str | None = None
+    if doc.topic:
+        topic_parts: list[str] = []
+        t: Topic | None = doc.topic
+        while t is not None:
+            topic_parts.append(t.slug or t.name.lower().replace(" ", "-"))
+            t = t.parent
+        topic_parts.reverse()
+        section = "/".join(topic_parts)
+    elif doc.section:
+        section = doc.section
+
+    # --- doc slug ---
+    doc_slug = doc.slug or f"doc-{doc.id}"
+
+    return project_slug, version_slug, section, doc_slug
 
 
 def _serialize_document(d: Document, include_content: bool = False) -> dict:
@@ -74,10 +124,7 @@ def _publish_to_git(doc: Document) -> str | None:
             logger.warning("Empty markdown after conversion for doc %s", doc.id)
             return None
 
-        project_slug = doc.project or "default"
-        version_slug = doc.version or ""
-        section = doc.section or None
-        doc_slug = doc.slug or f"doc-{doc.id}"
+        project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
 
         commit_sha = publish_to_production(project_slug, version_slug, section, doc_slug, markdown)
         if commit_sha:
@@ -98,10 +145,7 @@ def _unpublish_from_git(doc: Document) -> str | None:
     try:
         from app.publishing.git_publisher import unpublish_from_production, push_branch
 
-        project_slug = doc.project or "default"
-        version_slug = doc.version or ""
-        section = doc.section or None
-        doc_slug = doc.slug or f"doc-{doc.id}"
+        project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
 
         commit_sha = unpublish_from_production(project_slug, version_slug, section, doc_slug)
         if commit_sha:
@@ -166,20 +210,57 @@ async def create_document(body: dict, db: Session, user: User | None) -> dict:
             if default_ver:
                 project_version_id = default_ver.id
 
+        topic_id = body.get("topicId") or body.get("topic_id")
+
+        # Resolve legacy string fields from FK relationships so the publish
+        # pipeline can build correct file paths even if the caller only
+        # provides the relational IDs (e.g. the onboarding import).
+        resolved_project = project
+        resolved_version = version
+        resolved_section = body.get("section")
+
+        if project_id and not resolved_project:
+            proj = db.get(Project, int(project_id))
+            if proj:
+                # Walk up the parent chain for sub-projects
+                parts: list[str] = []
+                p: Project | None = proj
+                while p is not None:
+                    parts.append(p.slug or p.name.lower().replace(" ", "-"))
+                    p = p.parent
+                parts.reverse()
+                resolved_project = "/".join(parts)
+
+        if project_version_id and not resolved_version:
+            pv = db.get(ProjectVersion, int(project_version_id))
+            if pv:
+                resolved_version = pv.slug or pv.name
+
+        if topic_id and not resolved_section:
+            topic = db.get(Topic, int(topic_id))
+            if topic:
+                topic_parts: list[str] = []
+                t: Topic | None = topic
+                while t is not None:
+                    topic_parts.append(t.slug or t.name.lower().replace(" ", "-"))
+                    t = t.parent
+                topic_parts.reverse()
+                resolved_section = "/".join(topic_parts)
+
         document = Document(
             google_doc_id=google_doc_id,
             title=title,
             slug=body.get("slug", title.lower().replace(" ", "-")),
-            project=project,
-            version=version,
-            section=body.get("section"),
+            project=resolved_project,
+            version=resolved_version,
+            section=resolved_section,
             visibility=body.get("visibility", "public"),
             status=body.get("status", "draft"),
             description=body.get("description"),
             tags=body.get("tags"),
             project_id=project_id,
             project_version_id=project_version_id,
-            topic_id=body.get("topicId") or body.get("topic_id"),
+            topic_id=topic_id,
             owner_id=user.id,
             display_order=body.get("displayOrder", body.get("display_order", 0)),
         )

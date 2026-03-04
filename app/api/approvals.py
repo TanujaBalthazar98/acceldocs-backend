@@ -12,6 +12,7 @@ from app.ingestion.drive import _get_service, export_doc_as_html
 from app.middleware.auth import AuthUser, require_auth, require_role
 from app.models import Approval, Document, User
 from app.publishing.git_publisher import publish_to_production, unpublish_from_production
+from app.services.documents import _resolve_publish_path
 
 router = APIRouter()
 
@@ -102,11 +103,12 @@ async def perform_action(
             service = _get_service()
             html = export_doc_as_html(service, doc.google_doc_id)
             markdown = convert_html_to_markdown(html)
+            project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
             commit_sha = publish_to_production(
-                project=doc.project,
-                version=doc.version,
-                section=doc.section,
-                slug=doc.slug,
+                project=project_slug,
+                version=version_slug,
+                section=section,
+                slug=doc_slug,
                 markdown=markdown,
             )
 
@@ -129,11 +131,12 @@ async def perform_action(
     else:
         doc.status = "draft"
         doc.is_published = False
+        p_slug, v_slug, sec, d_slug = _resolve_publish_path(doc)
         unpublish_from_production(
-            project=doc.project,
-            version=doc.version,
-            section=doc.section,
-            slug=doc.slug,
+            project=p_slug,
+            version=v_slug,
+            section=sec,
+            slug=d_slug,
         )
         doc.last_published_at = None
 
