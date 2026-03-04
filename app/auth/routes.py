@@ -554,11 +554,124 @@ async def logout():
 
 
 @router.get("/me")
-async def me(user: User = Depends(get_current_user)):
-    """Return the current authenticated user."""
+async def me(request: Request, user: User = Depends(get_current_user)):
+    """Return the current authenticated user with token expiry info."""
+    # Extract expiry from the JWT so the frontend can schedule refresh
+    auth_header = request.headers.get("Authorization", "")
+    expires_at = None
+    if auth_header.startswith("Bearer "):
+        try:
+            payload = jwt.decode(
+                auth_header[7:], settings.secret_key, algorithms=[JWT_ALGORITHM]
+            )
+            expires_at = payload.get("exp")
+        except Exception:
+            pass
+
     return {
         "id": user.id,
         "email": user.email,
         "name": user.name,
         "role": user.role,
+        "expires_at": expires_at,
+    }
+
+
+@router.post("/refresh")
+async def refresh_token(request: Request, db: Session = Depends(get_db)):
+    """Issue a fresh JWT if the current token is valid or recently expired (within 7-day grace).
+
+    Also returns a fresh Google access token if a refresh token is stored.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    token = auth_header[7:]
+    user_id = None
+    email = None
+
+    # Try to decode — allow recently expired tokens (7-day grace period)
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload["sub"])
+        email = payload.get("email")
+    except jwt.ExpiredSignatureError:
+        # Decode without verification to get claims from expired token
+        try:
+            payload = jwt.decode(
+                token, settings.secret_key, algorithms=[JWT_ALGORITHM],
+                options={"verify_exp": False}
+            )
+            user_id = int(payload["sub"])
+            email = payload.get("email")
+            # Check grace period: only allow refresh within 7 days of expiry
+            exp = payload.get("exp", 0)
+            now = datetime.now(timezone.utc).timestamp()
+            if now - exp > 7 * 24 * 3600:
+                raise HTTPException(status_code=401, detail="Token expired beyond grace period")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token claims")
+
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    # Issue fresh JWT
+    new_jwt = _create_jwt(user.id, user.email)
+
+    # Try to get a fresh Google access token using stored refresh token
+    google_access_token = None
+    org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+    if org_role:
+        google_token = db.query(GoogleToken).filter(
+            GoogleToken.user_id == user.id,
+            GoogleToken.organization_id == org_role.organization_id,
+        ).first()
+
+        if google_token and google_token.encrypted_refresh_token:
+            try:
+                encryption_service = get_encryption_service()
+                refresh_tok = encryption_service.decrypt(google_token.encrypted_refresh_token)
+
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(GOOGLE_TOKEN_URL, data={
+                        "client_id": settings.google_client_id,
+                        "client_secret": settings.google_client_secret,
+                        "refresh_token": refresh_tok,
+                        "grant_type": "refresh_token",
+                    })
+
+                if resp.status_code == 200:
+                    token_data = resp.json()
+                    google_access_token = token_data.get("access_token")
+                    google_token.last_refreshed_at = datetime.now(timezone.utc)
+                    db.commit()
+                    logger.info(f"Refreshed Google access token for user {user.email}")
+                else:
+                    logger.warning(f"Google token refresh failed: {resp.status_code}")
+            except Exception as e:
+                logger.error(f"Error refreshing Google token: {e}")
+
+    # Decode expiry from the new JWT
+    new_payload = jwt.decode(new_jwt, settings.secret_key, algorithms=[JWT_ALGORITHM])
+
+    return {
+        "access_token": new_jwt,
+        "token_type": "bearer",
+        "expires_at": new_payload.get("exp"),
+        "google_access_token": google_access_token,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+        },
     }
