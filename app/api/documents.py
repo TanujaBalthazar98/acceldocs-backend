@@ -1,6 +1,7 @@
 """Document CRUD API routes."""
 
 import markdown
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +14,7 @@ from app.database import get_db
 from app.middleware.auth import AuthUser, can_access_document, get_current_user, require_role
 from app.models import Document, DocumentView
 from app.publishing.git_publisher import unpublish_from_production
-from app.services.documents import _resolve_publish_path
+from app.services.documents import _publish_to_git, _resolve_publish_path
 
 router = APIRouter()
 
@@ -251,12 +252,13 @@ async def bulk_action(
                 try:
                     doc.status = body.value
                     doc.is_published = body.value == "approved"
-                    if body.value in {"draft", "rejected"}:
+                    if body.value == "approved":
+                        _publish_to_git(doc)
+                        doc.last_published_at = datetime.now(timezone.utc).isoformat()
+                    elif body.value in {"draft", "rejected"}:
+                        _p, _v, _s, _d = _resolve_publish_path(doc)
                         unpublish_from_production(
-                            project=doc.project,
-                            version=doc.version,
-                            section=doc.section,
-                            slug=doc.slug,
+                            project=_p, version=_v, section=_s, slug=_d,
                         )
                         doc.last_published_at = None
                     success_count += 1
@@ -280,11 +282,9 @@ async def bulk_action(
             for doc in docs:
                 try:
                     # Unpublish first
+                    _p, _v, _s, _d = _resolve_publish_path(doc)
                     unpublish_from_production(
-                        project=doc.project,
-                        version=doc.version,
-                        section=doc.section,
-                        slug=doc.slug,
+                        project=_p, version=_v, section=_s, slug=_d,
                     )
                     db.delete(doc)
                     success_count += 1
@@ -296,6 +296,9 @@ async def bulk_action(
             for doc in docs:
                 try:
                     doc.status = "approved"
+                    doc.is_published = True
+                    _publish_to_git(doc)
+                    doc.last_published_at = datetime.now(timezone.utc).isoformat()
                     success_count += 1
                 except Exception as e:
                     error_count += 1
@@ -305,11 +308,9 @@ async def bulk_action(
             for doc in docs:
                 try:
                     doc.status = "rejected"
+                    _p, _v, _s, _d = _resolve_publish_path(doc)
                     unpublish_from_production(
-                        project=doc.project,
-                        version=doc.version,
-                        section=doc.section,
-                        slug=doc.slug,
+                        project=_p, version=_v, section=_s, slug=_d,
                     )
                     doc.last_published_at = None
                     success_count += 1
