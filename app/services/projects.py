@@ -65,12 +65,14 @@ async def create_project(body: dict, db: Session, user: User | None) -> dict:
             return {"ok": False, "error": "Insufficient permissions"}
 
         # Create project
+        parent_id = body.get("parent_id") or body.get("parentId")
         project = Project(
             name=body.get("name", "New Project"),
             slug=body.get("slug", "new-project"),
             description=body.get("description"),
-            drive_folder_id=body.get("drive_folder_id"),
-            drive_parent_id=body.get("drive_parent_id"),
+            drive_folder_id=body.get("drive_folder_id") or body.get("driveFolderId"),
+            drive_parent_id=body.get("drive_parent_id") or body.get("driveParentId"),
+            parent_id=int(parent_id) if parent_id else None,
             visibility=body.get("visibility", "internal"),
             default_visibility=body.get("default_visibility", "public"),
             require_approval=body.get("require_approval", True),

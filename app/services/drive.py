@@ -669,15 +669,101 @@ async def convert_markdown_to_gdoc(body: dict, db: Session, user: User | None) -
 
 
 async def discover_drive_structure(body: dict, db: Session, user: User | None) -> dict:
-    """Recursively explore Drive folders."""
+    """Recursively explore Drive folders and return hierarchy.
+
+    Maps the Drive folder tree to acceldocs structure:
+      Level 0 (root):     docs here → "General" project
+      Level 1 folders:    → Projects
+      Level 2+ folders:   → Topics (with parent_id for nesting)
+      Google Docs:        → Documents (linked to their parent project/topic)
+
+    Returns a flat list of items with depth + parentDriveId so the
+    frontend can build and display the tree.
+    """
     if not user:
         return {"ok": False, "error": "Authentication required"}
 
-    # TODO: Implement recursive folder discovery
-    return {
-        "ok": False,
-        "error": "Not yet implemented"
-    }
+    folder_id = body.get("folderId") or body.get("folder_id")
+    if not folder_id:
+        return {"ok": False, "error": "Folder ID required"}
+
+    access_token = body.get("_google_access_token")
+    max_depth = int(body.get("maxDepth", 4))
+
+    service = GoogleDriveService(db, user)
+    _original_get_credentials = service.get_credentials
+    service.get_credentials = lambda _: _original_get_credentials(access_token)
+
+    FOLDER_MIME = "application/vnd.google-apps.folder"
+    DOC_MIME = "application/vnd.google-apps.document"
+
+    # BFS to walk the tree
+    all_items = []  # {id, name, mimeType, parentDriveId, depth, isFolder, type}
+    queue = [(folder_id, 0, None)]  # (drive_folder_id, depth, parentDriveId)
+
+    try:
+        while queue:
+            current_id, depth, parent_drive_id = queue.pop(0)
+
+            result = await service.list_folder(current_id)
+            if not result.get("ok"):
+                # If auth error on first call, propagate it
+                if depth == 0:
+                    return result
+                logger.warning("Failed to list folder %s: %s", current_id, result.get("error"))
+                continue
+
+            for f in result.get("files", []):
+                is_folder = f["mimeType"] == FOLDER_MIME
+                is_doc = f["mimeType"] == DOC_MIME
+
+                # Determine what this item maps to in acceldocs
+                if is_folder:
+                    if depth == 0:
+                        item_type = "project"
+                    else:
+                        item_type = "topic"
+                elif is_doc:
+                    item_type = "document"
+                else:
+                    # Skip non-Google-Doc files (Sheets, PDFs, etc.)
+                    continue
+
+                all_items.append({
+                    "id": f["id"],
+                    "name": f["name"],
+                    "mimeType": f["mimeType"],
+                    "parentDriveId": current_id,
+                    "depth": depth,
+                    "isFolder": is_folder,
+                    "type": item_type,  # "project", "topic", or "document"
+                    "modifiedTime": f.get("modifiedTime"),
+                })
+
+                # Queue subfolders for scanning (respect depth limit)
+                if is_folder and depth < max_depth:
+                    queue.append((f["id"], depth + 1, current_id))
+
+        # Separate into categories for easier frontend consumption
+        projects = [i for i in all_items if i["type"] == "project"]
+        topics = [i for i in all_items if i["type"] == "topic"]
+        documents = [i for i in all_items if i["type"] == "document"]
+
+        return {
+            "ok": True,
+            "rootFolderId": folder_id,
+            "items": all_items,
+            "summary": {
+                "projects": len(projects),
+                "topics": len(topics),
+                "documents": len(documents),
+                "total": len(all_items),
+            }
+        }
+
+    except Exception as e:
+        logger.exception("discover_drive_structure error: %s", e)
+        return {"ok": False, "error": str(e)}
 
 
 async def import_markdown(body: dict, db: Session, user: User | None) -> dict:

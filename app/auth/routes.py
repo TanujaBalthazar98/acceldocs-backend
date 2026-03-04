@@ -342,6 +342,7 @@ async def callback(
         )
 
     # Upsert user in DB
+    is_new_user = False
     user = db.query(User).filter(User.google_id == google_id).first()
     if user:
         user.email = email
@@ -350,6 +351,7 @@ async def callback(
             user.role = "owner"
             logger.info(f"Promoted {email} to owner (owns Drive root folder)")
     else:
+        is_new_user = True
         role = "owner" if is_folder_owner else "viewer"
         user = User(google_id=google_id, email=email, name=name, role=role)
         db.add(user)
@@ -514,6 +516,7 @@ async def callback(
                 type: 'GOOGLE_AUTH_SUCCESS',
                 accessToken: '{access_token}',
                 jwt: '{jwt_token}',
+                isNewUser: {'true' if is_new_user else 'false'},
                 user: {{
                     id: {user.id},
                     email: '{user.email}',
@@ -527,12 +530,13 @@ async def callback(
                 window.opener.postMessage(authData, '*');
                 window.close();
             }} else {{
-                // Redirect flow: store token in localStorage and redirect to dashboard
+                // Redirect flow: store token in localStorage and redirect
                 try {{
                     localStorage.setItem('acceldocs_auth_token', authData.jwt);
                     localStorage.setItem('google_access_token', authData.accessToken);
                 }} catch(e) {{}}
-                window.location.href = '/';
+                // New users go to dashboard (onboarding will trigger automatically)
+                window.location.href = '/dashboard';
             }}
         </script>
         <p>Authentication successful! Redirecting...</p>
