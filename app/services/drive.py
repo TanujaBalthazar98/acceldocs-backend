@@ -674,7 +674,8 @@ async def discover_drive_structure(body: dict, db: Session, user: User | None) -
     Maps the Drive folder tree to acceldocs structure:
       Level 0 (root):     docs here → "General" project
       Level 1 folders:    → Projects
-      Level 2+ folders:   → Topics (with parent_id for nesting)
+      Level 2 folders:    → Sub-projects (projects with parent_id)
+      Level 3+ folders:   → Topics (with parent_id for nesting)
       Google Docs:        → Documents (linked to their parent project/topic)
 
     Returns a flat list of items with depth + parentDriveId so the
@@ -721,6 +722,8 @@ async def discover_drive_structure(body: dict, db: Session, user: User | None) -
                 if is_folder:
                     if depth == 0:
                         item_type = "project"
+                    elif depth == 1:
+                        item_type = "subproject"
                     else:
                         item_type = "topic"
                 elif is_doc:
@@ -746,6 +749,7 @@ async def discover_drive_structure(body: dict, db: Session, user: User | None) -
 
         # Separate into categories for easier frontend consumption
         projects = [i for i in all_items if i["type"] == "project"]
+        subprojects = [i for i in all_items if i["type"] == "subproject"]
         topics = [i for i in all_items if i["type"] == "topic"]
         documents = [i for i in all_items if i["type"] == "document"]
 
@@ -755,6 +759,7 @@ async def discover_drive_structure(body: dict, db: Session, user: User | None) -
             "items": all_items,
             "summary": {
                 "projects": len(projects),
+                "subprojects": len(subprojects),
                 "topics": len(topics),
                 "documents": len(documents),
                 "total": len(all_items),
