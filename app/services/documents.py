@@ -108,13 +108,30 @@ def _serialize_document(d: Document, include_content: bool = False) -> dict:
     return result
 
 
+def _fetch_html_from_drive(doc: Document) -> str | None:
+    """Fetch the latest HTML content for a document from Google Drive."""
+    try:
+        from app.ingestion.drive import _get_service, export_doc_as_html
+        service = _get_service()
+        return export_doc_as_html(service, doc.google_doc_id)
+    except Exception:
+        logger.warning("Could not fetch content from Drive for doc %s (%s)", doc.id, doc.title)
+        return None
+
+
 def _publish_to_git(doc: Document) -> str | None:
-    """Convert document HTML to Markdown and publish to Git production branch."""
+    """Convert document HTML to Markdown and publish to Git production branch.
+
+    Uses cached content_html if available; otherwise fetches fresh from Drive.
+    """
     try:
         from app.conversion.html_to_md import convert_html_to_markdown
         from app.publishing.git_publisher import publish_to_production, push_branch
 
         html = doc.published_content_html or doc.content_html
+        if not html:
+            # No cached content — try fetching from Drive now
+            html = _fetch_html_from_drive(doc)
         if not html:
             logger.warning("No HTML content to publish for doc %s (%s)", doc.id, doc.title)
             return None
@@ -129,7 +146,6 @@ def _publish_to_git(doc: Document) -> str | None:
         commit_sha = publish_to_production(project_slug, version_slug, section, doc_slug, markdown)
         if commit_sha:
             logger.info("Published doc %s (%s) to Git: %s", doc.id, doc.title, commit_sha[:8])
-            # Best-effort push to remote
             try:
                 push_branch("main")
             except Exception:
