@@ -99,6 +99,8 @@ async def create_project(body: dict, db: Session, user: User | None) -> dict:
 
         return {
             "ok": True,
+            "projectId": project.id,
+            "versionId": version.id,
             "project": {
                 "id": project.id,
                 "name": project.name,

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import User, Document, DocumentCache
+from app.models import User, Document, DocumentCache, ProjectVersion
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,18 @@ async def create_document(body: dict, db: Session, user: User | None) -> dict:
         if not google_doc_id:
             return {"ok": False, "error": "Google Doc ID required"}
 
+        project_id = body.get("projectId") or body.get("project_id")
+        project_version_id = body.get("projectVersionId") or body.get("project_version_id")
+
+        # If no version specified, resolve the project's default version
+        if project_id and not project_version_id:
+            default_ver = db.query(ProjectVersion).filter(
+                ProjectVersion.project_id == int(project_id),
+                ProjectVersion.is_default == True,
+            ).first()
+            if default_ver:
+                project_version_id = default_ver.id
+
         document = Document(
             google_doc_id=google_doc_id,
             title=title,
@@ -165,8 +177,8 @@ async def create_document(body: dict, db: Session, user: User | None) -> dict:
             status=body.get("status", "draft"),
             description=body.get("description"),
             tags=body.get("tags"),
-            project_id=body.get("projectId") or body.get("project_id"),
-            project_version_id=body.get("projectVersionId") or body.get("project_version_id"),
+            project_id=project_id,
+            project_version_id=project_version_id,
             topic_id=body.get("topicId") or body.get("topic_id"),
             owner_id=user.id,
             display_order=body.get("displayOrder", body.get("display_order", 0)),
