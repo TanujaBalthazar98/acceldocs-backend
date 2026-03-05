@@ -6,7 +6,7 @@
       "providers": ["python"],
       "phases": {
         "setup": {
-          "aptPkgs": ["git"]
+          "aptPkgs": ["git", "libpq-dev"]
         }
       }
     }
