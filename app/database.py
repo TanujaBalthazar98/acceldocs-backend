@@ -1,4 +1,4 @@
-"""SQLAlchemy database setup."""
+"""SQLAlchemy database setup — supports both PostgreSQL (production) and SQLite (local dev)."""
 
 import os
 import tempfile
@@ -17,13 +17,20 @@ if is_pytest and settings.is_sqlite:
 else:
     database_url = settings.database_url
 
-connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+# SQLite needs check_same_thread=False; PostgreSQL doesn't need special args
+connect_args = {"check_same_thread": False} if settings.is_sqlite else {}
 
-engine = create_engine(
-    database_url,
-    connect_args=connect_args,
-    echo=False,
-)
+# PostgreSQL benefits from connection pooling; SQLite doesn't support it
+engine_kwargs: dict = {
+    "connect_args": connect_args,
+    "echo": False,
+}
+if not settings.is_sqlite:
+    engine_kwargs["pool_size"] = 5
+    engine_kwargs["max_overflow"] = 10
+    engine_kwargs["pool_pre_ping"] = True  # detect stale connections
+
+engine = create_engine(database_url, **engine_kwargs)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
