@@ -33,7 +33,10 @@ async def publish_mkdocs(
     if not user:
         return {"ok": False, "error": "Authentication required"}
 
-    org_id = body.get("organizationId") or body.get("organization_id")
+    try:
+        org_id = int(body.get("organizationId") or body.get("organization_id") or 0)
+    except (ValueError, TypeError):
+        org_id = 0
     if not org_id:
         return {"ok": False, "error": "organizationId required"}
 

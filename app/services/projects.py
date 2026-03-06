@@ -4,6 +4,16 @@ from sqlalchemy.orm import Session
 from app.models import User, Project, ProjectVersion, Topic, OrgRole, ProjectMember, Organization
 
 
+def _int(val) -> int | None:
+    """Safely cast a value to int for PostgreSQL type safety."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
 async def list_projects(body: dict, db: Session, user: User | None) -> dict:
     """List all projects in organization."""
     if not user:
@@ -72,7 +82,7 @@ async def create_project(body: dict, db: Session, user: User | None) -> dict:
             description=body.get("description"),
             drive_folder_id=body.get("drive_folder_id") or body.get("driveFolderId"),
             drive_parent_id=body.get("drive_parent_id") or body.get("driveParentId"),
-            parent_id=int(parent_id) if parent_id else None,
+            parent_id=_int(parent_id),
             visibility=body.get("visibility", "internal"),
             default_visibility=body.get("default_visibility", "public"),
             require_approval=body.get("require_approval", True),
@@ -120,7 +130,7 @@ async def update_project_settings(body: dict, db: Session, user: User | None) ->
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        project_id = body.get("id") or body.get("projectId")
+        project_id = _int(body.get("id") or body.get("projectId"))
         if not project_id:
             return {"ok": False, "error": "Project ID required"}
 
@@ -152,7 +162,7 @@ async def get_project_settings(body: dict, db: Session, user: User | None) -> di
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        project_id = body.get("id") or body.get("projectId")
+        project_id = _int(body.get("id") or body.get("projectId"))
         if not project_id:
             return {"ok": False, "error": "Project ID required"}
 
@@ -267,7 +277,7 @@ async def delete_project(body: dict, db: Session, user: User | None) -> dict:
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        project_id = body.get("id") or body.get("projectId")
+        project_id = _int(body.get("id") or body.get("projectId"))
         if not project_id:
             return {"ok": False, "error": "Project ID required"}
 
@@ -296,8 +306,11 @@ async def list_project_versions(body: dict, db: Session, user: User | None) -> d
         if not project_ids:
             return {"ok": True, "versions": []}
 
+        # Cast all IDs to int for PostgreSQL
+        int_ids = [_int(pid) for pid in project_ids if _int(pid) is not None]
+
         versions = db.query(ProjectVersion).filter(
-            ProjectVersion.project_id.in_(project_ids)
+            ProjectVersion.project_id.in_(int_ids)
         ).all()
 
         version_list = []
@@ -328,7 +341,7 @@ async def create_project_version(body: dict, db: Session, user: User | None) -> 
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        project_id = body.get("projectId")
+        project_id = _int(body.get("projectId"))
         name = body.get("name", "v1.0")
         slug = body.get("slug", "v1-0")
 
@@ -375,8 +388,11 @@ async def list_topics(body: dict, db: Session, user: User | None) -> dict:
         if not project_ids:
             return {"ok": True, "topics": []}
 
+        # Cast all IDs to int for PostgreSQL
+        int_ids = [_int(pid) for pid in project_ids if _int(pid) is not None]
+
         topics = db.query(Topic).filter(
-            Topic.project_id.in_(project_ids)
+            Topic.project_id.in_(int_ids)
         ).order_by(Topic.display_order, Topic.id).all()
 
         topic_list = []
@@ -406,7 +422,7 @@ async def create_topic(body: dict, db: Session, user: User | None) -> dict:
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        project_id = body.get("projectId") or body.get("project_id")
+        project_id = _int(body.get("projectId") or body.get("project_id"))
         name = body.get("name", "New Topic")
 
         if not project_id:
@@ -414,8 +430,8 @@ async def create_topic(body: dict, db: Session, user: User | None) -> dict:
 
         topic = Topic(
             project_id=project_id,
-            project_version_id=body.get("projectVersionId") or body.get("project_version_id"),
-            parent_id=body.get("parentId") or body.get("parent_id"),
+            project_version_id=_int(body.get("projectVersionId") or body.get("project_version_id")),
+            parent_id=_int(body.get("parentId") or body.get("parent_id")),
             name=name,
             slug=body.get("slug", name.lower().replace(" ", "-")),
             display_order=body.get("displayOrder", body.get("display_order", 0)),
@@ -445,7 +461,7 @@ async def delete_topic(body: dict, db: Session, user: User | None) -> dict:
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        topic_id = body.get("id") or body.get("topicId")
+        topic_id = _int(body.get("id") or body.get("topicId"))
         if not topic_id:
             return {"ok": False, "error": "Topic ID required"}
 

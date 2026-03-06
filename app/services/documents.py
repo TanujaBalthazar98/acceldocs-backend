@@ -10,6 +10,16 @@ from app.models import User, Document, DocumentCache, Project, ProjectVersion, T
 logger = logging.getLogger(__name__)
 
 
+def _int(val) -> int | None:
+    """Safely cast a value to int for PostgreSQL type safety."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
 def _resolve_publish_path(doc: Document) -> tuple[str, str, str | None, str]:
     """Resolve a document's publish path from FK relationships, falling back to string fields.
 
@@ -182,7 +192,8 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        project_ids = body.get("projectIds", [])
+        raw_ids = body.get("projectIds", [])
+        project_ids = [_int(pid) for pid in raw_ids if _int(pid) is not None]
         if not project_ids:
             return {"ok": True, "documents": []}
 
@@ -214,19 +225,19 @@ async def create_document(body: dict, db: Session, user: User | None) -> dict:
         if not google_doc_id:
             return {"ok": False, "error": "Google Doc ID required"}
 
-        project_id = body.get("projectId") or body.get("project_id")
-        project_version_id = body.get("projectVersionId") or body.get("project_version_id")
+        project_id = _int(body.get("projectId") or body.get("project_id"))
+        project_version_id = _int(body.get("projectVersionId") or body.get("project_version_id"))
 
         # If no version specified, resolve the project's default version
         if project_id and not project_version_id:
             default_ver = db.query(ProjectVersion).filter(
-                ProjectVersion.project_id == int(project_id),
+                ProjectVersion.project_id == project_id,
                 ProjectVersion.is_default == True,
             ).first()
             if default_ver:
                 project_version_id = default_ver.id
 
-        topic_id = body.get("topicId") or body.get("topic_id")
+        topic_id = _int(body.get("topicId") or body.get("topic_id"))
 
         # Resolve legacy string fields from FK relationships so the publish
         # pipeline can build correct file paths even if the caller only
@@ -236,7 +247,7 @@ async def create_document(body: dict, db: Session, user: User | None) -> dict:
         resolved_section = body.get("section")
 
         if project_id and not resolved_project:
-            proj = db.get(Project, int(project_id))
+            proj = db.get(Project, project_id)
             if proj:
                 # Walk up the parent chain for sub-projects
                 parts: list[str] = []
@@ -248,12 +259,12 @@ async def create_document(body: dict, db: Session, user: User | None) -> dict:
                 resolved_project = "/".join(parts)
 
         if project_version_id and not resolved_version:
-            pv = db.get(ProjectVersion, int(project_version_id))
+            pv = db.get(ProjectVersion, project_version_id)
             if pv:
                 resolved_version = pv.slug or pv.name
 
         if topic_id and not resolved_section:
-            topic = db.get(Topic, int(topic_id))
+            topic = db.get(Topic, topic_id)
             if topic:
                 topic_parts: list[str] = []
                 t: Topic | None = topic
@@ -304,7 +315,7 @@ async def get_document(body: dict, db: Session, user: User | None) -> dict:
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        doc_id = body.get("id") or body.get("documentId")
+        doc_id = _int(body.get("id") or body.get("documentId"))
         if not doc_id:
             return {"ok": False, "error": "Document ID required"}
 
@@ -329,7 +340,7 @@ async def update_document(body: dict, db: Session, user: User | None) -> dict:
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        doc_id = body.get("id") or body.get("documentId")
+        doc_id = _int(body.get("id") or body.get("documentId"))
         if not doc_id:
             return {"ok": False, "error": "Document ID required"}
 
@@ -383,7 +394,7 @@ async def delete_document(body: dict, db: Session, user: User | None) -> dict:
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        doc_id = body.get("id") or body.get("documentId")
+        doc_id = _int(body.get("id") or body.get("documentId"))
         if not doc_id:
             return {"ok": False, "error": "Document ID required"}
 
@@ -407,7 +418,7 @@ async def document_cache(body: dict, db: Session, user: User | None) -> dict:
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        doc_id = body.get("documentId")
+        doc_id = _int(body.get("documentId"))
         action = body.get("action", "get")  # get or set
 
         if not doc_id:

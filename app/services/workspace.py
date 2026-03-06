@@ -162,9 +162,15 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        org_id = body.get("id")
+        org_id = body.get("id") or body.get("organizationId")
         if not org_id:
             return {"ok": False, "error": "Organization ID required"}
+
+        # Cast to int for PostgreSQL type safety
+        try:
+            org_id = int(org_id)
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "Invalid organization ID"}
 
         # Check if user is owner/admin
         org_role = db.query(OrgRole).filter(

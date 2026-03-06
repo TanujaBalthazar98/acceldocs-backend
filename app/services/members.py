@@ -6,6 +6,16 @@ from sqlalchemy.orm import Session
 from app.models import User, Invitation, OrgRole, ProjectMember, JoinRequest
 
 
+def _int(val) -> int | None:
+    """Safely cast a value to int for PostgreSQL type safety."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
 async def create_invitation(body: dict, db: Session, user: User | None) -> dict:
     """Create organization invitation."""
     if not user:
@@ -47,7 +57,7 @@ async def create_project_invitation(body: dict, db: Session, user: User | None) 
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        project_id = body.get("projectId")
+        project_id = _int(body.get("projectId"))
         email = body.get("email")
         role = body.get("role", "viewer")
 
@@ -78,7 +88,7 @@ async def remove_project_invitation(body: dict, db: Session, user: User | None) 
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        invitation_id = body.get("invitationId")
+        invitation_id = _int(body.get("invitationId"))
         if not invitation_id:
             return {"ok": False, "error": "Invitation ID required"}
 
@@ -102,7 +112,7 @@ async def update_member_role(body: dict, db: Session, user: User | None) -> dict
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        member_id = body.get("memberId")
+        member_id = _int(body.get("memberId"))
         new_role = body.get("role")
 
         if not member_id or not new_role:
@@ -134,8 +144,8 @@ async def update_project_member_role(body: dict, db: Session, user: User | None)
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        project_id = body.get("projectId")
-        member_id = body.get("memberId")
+        project_id = _int(body.get("projectId"))
+        member_id = _int(body.get("memberId"))
         new_role = body.get("role")
 
         if not all([project_id, member_id, new_role]):
@@ -165,8 +175,8 @@ async def remove_project_member(body: dict, db: Session, user: User | None) -> d
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        project_id = body.get("projectId")
-        member_id = body.get("memberId")
+        project_id = _int(body.get("projectId"))
+        member_id = _int(body.get("memberId"))
 
         if not project_id or not member_id:
             return {"ok": False, "error": "Project ID and member ID required"}
@@ -230,7 +240,7 @@ async def get_project_share(body: dict, db: Session, user: User | None) -> dict:
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        project_id = body.get("projectId")
+        project_id = _int(body.get("projectId"))
         if not project_id:
             return {"ok": False, "error": "Project ID required"}
 
