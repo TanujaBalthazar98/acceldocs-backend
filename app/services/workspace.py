@@ -185,7 +185,7 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
         if not org:
             return {"ok": False, "error": "Organization not found"}
 
-        # Update fields
+        # Update fields — also check nested "data" dict that some callers use
         updatable_fields = [
             "name", "slug", "domain", "custom_docs_domain", "subdomain",
             "logo_url", "tagline", "primary_color", "secondary_color", "accent_color",
@@ -194,9 +194,14 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
             "mcp_enabled", "openapi_spec_json", "openapi_spec_url", "drive_folder_id"
         ]
 
+        # Merge nested "data" dict into body so callers can use either format
+        merged = {**body}
+        if isinstance(body.get("data"), dict):
+            merged.update(body["data"])
+
         for field in updatable_fields:
-            if field in body:
-                setattr(org, field, body[field])
+            if field in merged:
+                setattr(org, field, merged[field])
 
         db.commit()
 
