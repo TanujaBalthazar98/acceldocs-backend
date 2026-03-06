@@ -215,7 +215,9 @@ class GoogleDriveService:
                 q=f"'{folder_id}' in parents and trashed=false",
                 fields="files(id, name, mimeType, modifiedTime, size, webViewLink)",
                 pageSize=100,
-                orderBy="folder,name"
+                orderBy="folder,name",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
             ).execute()
 
             files = results.get("files", [])
@@ -267,7 +269,8 @@ class GoogleDriveService:
 
             folder = service.files().create(
                 body=file_metadata,
-                fields="id, name, webViewLink"
+                fields="id, name, webViewLink",
+                supportsAllDrives=True,
             ).execute()
 
             return {
@@ -310,7 +313,8 @@ class GoogleDriveService:
 
             doc = service.files().create(
                 body=file_metadata,
-                fields="id, name, webViewLink"
+                fields="id, name, webViewLink",
+                supportsAllDrives=True,
             ).execute()
 
             return {
@@ -347,7 +351,8 @@ class GoogleDriveService:
             # Get document metadata
             metadata = service.files().get(
                 fileId=doc_id,
-                fields="name, modifiedTime"
+                fields="name, modifiedTime",
+                supportsAllDrives=True,
             ).execute()
 
             # Export as HTML
@@ -459,7 +464,8 @@ class GoogleDriveService:
             if not old_parent_id:
                 file_metadata = service.files().get(
                     fileId=file_id,
-                    fields="parents"
+                    fields="parents",
+                    supportsAllDrives=True,
                 ).execute()
                 old_parents = file_metadata.get("parents", [])
                 old_parent_id = old_parents[0] if old_parents else None
