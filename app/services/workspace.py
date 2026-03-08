@@ -1,8 +1,12 @@
 """Workspace and organization management functions."""
 
+import logging
+
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from app.models import User, Organization, OrgRole
+
+logger = logging.getLogger(__name__)
 
 
 async def ensure_workspace(body: dict, db: Session, user: User | None) -> dict:
@@ -199,11 +203,22 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
         if isinstance(body.get("data"), dict):
             merged.update(body["data"])
 
+        logger.info("update-organization org_id=%s keys=%s", org_id, list(merged.keys()))
+
+        updated_fields = []
         for field in updatable_fields:
             if field in merged:
                 setattr(org, field, merged[field])
+                updated_fields.append(field)
+
+        logger.info("update-organization updated fields: %s", updated_fields)
+        if "drive_folder_id" in updated_fields:
+            logger.info("drive_folder_id set to: %s", org.drive_folder_id)
 
         db.commit()
+        db.refresh(org)
+
+        logger.info("update-organization after commit: drive_folder_id=%s", org.drive_folder_id)
 
         return {
             "ok": True,
@@ -212,10 +227,12 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
                 "name": org.name,
                 "slug": org.slug,
                 "domain": org.domain,
+                "drive_folder_id": org.drive_folder_id,
             }
         }
 
     except Exception as e:
+        logger.error("update-organization error: %s", e, exc_info=True)
         db.rollback()
         return {"ok": False, "error": str(e)}
 

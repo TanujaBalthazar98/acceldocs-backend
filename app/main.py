@@ -30,6 +30,37 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _ensure_missing_columns(eng):
+    """Add any columns present in ORM models but missing from the live DB.
+
+    SQLAlchemy's create_all() only creates new tables; it never alters existing
+    ones.  This helper inspects every mapped table and issues ALTER TABLE ADD
+    COLUMN for anything that doesn't exist yet — safe to run on every startup.
+    """
+    from sqlalchemy import inspect as sa_inspect, text
+
+    inspector = sa_inspect(eng)
+    with eng.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not inspector.has_table(table.name):
+                continue  # create_all will handle brand-new tables
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in existing:
+                    continue
+                # Build a portable column type string
+                col_type = col.type.compile(dialect=eng.dialect)
+                nullable = "" if col.nullable else " NOT NULL"
+                default = ""
+                if col.server_default is not None:
+                    default = f" DEFAULT {col.server_default.arg}"
+                elif col.nullable:
+                    default = " DEFAULT NULL"
+                stmt = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col_type}{nullable}{default}'
+                logger.info("Adding missing column: %s", stmt)
+                conn.execute(text(stmt))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize encryption service for Google token storage
@@ -41,6 +72,9 @@ async def lifespan(app: FastAPI):
     if settings.auto_create_schema:
         logger.info("AUTO_CREATE_SCHEMA enabled: creating database tables...")
         Base.metadata.create_all(bind=engine)
+        # create_all only creates NEW tables — it won't add columns to existing
+        # tables.  Run a lightweight migration to add any missing columns.
+        _ensure_missing_columns(engine)
     else:
         logger.info("AUTO_CREATE_SCHEMA disabled: expecting schema to be managed by migrations")
     logger.info("AccelDocs backend started on %s:%s", settings.host, settings.port)
