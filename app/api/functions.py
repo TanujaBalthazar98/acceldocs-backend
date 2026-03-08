@@ -76,7 +76,7 @@ async def invoke_function(
         "import-markdown": drive.import_markdown,
         "store-refresh-token": drive.store_refresh_token,
 
-        # Members (8 functions)
+        # Members (11 functions)
         "create-invitation": members.create_invitation,
         "create-project-invitation": members.create_project_invitation,
         "remove-project-invitation": members.remove_project_invitation,
@@ -84,6 +84,9 @@ async def invoke_function(
         "update-project-member-role": members.update_project_member_role,
         "remove-project-member": members.remove_project_member,
         "list-join-requests": members.list_join_requests,
+        "create-join-request": members.create_join_request,
+        "approve-join-request": members.approve_join_request,
+        "reject-join-request": members.reject_join_request,
         "get-project-share": members.get_project_share,
 
         # Maintenance (3 functions)
@@ -112,3 +115,52 @@ async def invoke_function(
             "ok": False,
             "error": str(e)
         }
+
+
+@router.post("/api/rpc/{rpc_name}")
+async def invoke_rpc(
+    rpc_name: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_current_user_optional),
+):
+    """RPC endpoint used by the frontend for Supabase-style calls.
+
+    Translates underscore names to hyphenated function names and strips
+    leading underscores from parameter keys (e.g. _request_id → requestId).
+    """
+    try:
+        raw = await request.json()
+    except Exception:
+        raw = {}
+
+    # Convert _snake_case params to camelCase: _request_id → requestId
+    body: dict = {}
+    for key, value in raw.items():
+        clean = key.lstrip("_")
+        # Convert snake_case to camelCase
+        parts = clean.split("_")
+        camel = parts[0] + "".join(p.capitalize() for p in parts[1:])
+        body[camel] = value
+
+    # Map underscore rpc name to hyphenated function name
+    function_name = rpc_name.replace("_", "-")
+
+    # Re-use the same dispatch by calling invoke_function logic
+    from app.services import workspace, projects, documents, drive, members
+
+    handlers = {
+        "approve-join-request": members.approve_join_request,
+        "reject-join-request": members.reject_join_request,
+        "create-join-request": members.create_join_request,
+        "list-join-requests": members.list_join_requests,
+    }
+
+    handler = handlers.get(function_name)
+    if not handler:
+        raise HTTPException(status_code=404, detail=f"RPC '{rpc_name}' not found")
+
+    try:
+        return await handler(body=body, db=db, user=user)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

@@ -234,6 +234,122 @@ async def list_join_requests(body: dict, db: Session, user: User | None) -> dict
         return {"ok": False, "error": str(e)}
 
 
+async def create_join_request(body: dict, db: Session, user: User | None) -> dict:
+    """Submit a request to join an organization."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        org_id = _int(body.get("organizationId"))
+        if not org_id:
+            return {"ok": False, "error": "Organization ID required"}
+
+        # Don't allow if already a member
+        existing_role = db.query(OrgRole).filter(
+            OrgRole.user_id == user.id,
+            OrgRole.organization_id == org_id,
+        ).first()
+        if existing_role:
+            return {"ok": False, "error": "Already a member of this organization"}
+
+        # Don't allow duplicate pending requests
+        existing_req = db.query(JoinRequest).filter(
+            JoinRequest.user_id == user.id,
+            JoinRequest.organization_id == org_id,
+            JoinRequest.status == "pending",
+        ).first()
+        if existing_req:
+            return {"ok": False, "error": "You already have a pending request"}
+
+        req = JoinRequest(
+            organization_id=org_id,
+            user_id=user.id,
+            message=body.get("message", ""),
+            status="pending",
+        )
+        db.add(req)
+        db.commit()
+
+        return {"ok": True, "request": {"id": req.id, "status": req.status}}
+
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "error": str(e)}
+
+
+async def approve_join_request(body: dict, db: Session, user: User | None) -> dict:
+    """Approve a pending join request — adds the user to the organization."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        request_id = _int(body.get("requestId") or body.get("id"))
+        if not request_id:
+            return {"ok": False, "error": "Request ID required"}
+
+        # Requester must be owner/admin
+        requester_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+        if not requester_role or requester_role.role not in ["owner", "admin"]:
+            return {"ok": False, "error": "Insufficient permissions"}
+
+        req = db.query(JoinRequest).filter(JoinRequest.id == request_id).first()
+        if not req:
+            return {"ok": False, "error": "Request not found"}
+        if req.organization_id != requester_role.organization_id:
+            return {"ok": False, "error": "Request does not belong to your organization"}
+        if req.status != "pending":
+            return {"ok": False, "error": f"Request already {req.status}"}
+
+        # Add user to org as viewer
+        role = body.get("role", "viewer")
+        org_role = OrgRole(
+            organization_id=req.organization_id,
+            user_id=req.user_id,
+            role=role,
+        )
+        db.add(org_role)
+        req.status = "approved"
+        db.commit()
+
+        return {"ok": True}
+
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "error": str(e)}
+
+
+async def reject_join_request(body: dict, db: Session, user: User | None) -> dict:
+    """Reject a pending join request."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        request_id = _int(body.get("requestId") or body.get("id"))
+        if not request_id:
+            return {"ok": False, "error": "Request ID required"}
+
+        requester_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+        if not requester_role or requester_role.role not in ["owner", "admin"]:
+            return {"ok": False, "error": "Insufficient permissions"}
+
+        req = db.query(JoinRequest).filter(JoinRequest.id == request_id).first()
+        if not req:
+            return {"ok": False, "error": "Request not found"}
+        if req.organization_id != requester_role.organization_id:
+            return {"ok": False, "error": "Request does not belong to your organization"}
+        if req.status != "pending":
+            return {"ok": False, "error": f"Request already {req.status}"}
+
+        req.status = "rejected"
+        db.commit()
+
+        return {"ok": True}
+
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "error": str(e)}
+
+
 async def get_project_share(body: dict, db: Session, user: User | None) -> dict:
     """Get project sharing information."""
     if not user:
