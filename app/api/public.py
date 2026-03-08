@@ -258,10 +258,10 @@ async def public_content(
     if not org:
         return {"ok": False, "error": "Organization not found"}
 
-    # All projects belonging to this org
+    # Published projects belonging to this org
     projects = (
         db.query(Project)
-        .filter(Project.organization_id == org_id)
+        .filter(Project.organization_id == org_id, Project.is_published == True)
         .all()
     )
     project_ids = [p.id for p in projects]
