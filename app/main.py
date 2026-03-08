@@ -39,26 +39,30 @@ def _ensure_missing_columns(eng):
     """
     from sqlalchemy import inspect as sa_inspect, text
 
-    inspector = sa_inspect(eng)
-    with eng.begin() as conn:
-        for table in Base.metadata.sorted_tables:
-            if not inspector.has_table(table.name):
-                continue  # create_all will handle brand-new tables
-            existing = {c["name"] for c in inspector.get_columns(table.name)}
-            for col in table.columns:
-                if col.name in existing:
+    try:
+        inspector = sa_inspect(eng)
+        with eng.begin() as conn:
+            for table in Base.metadata.sorted_tables:
+                try:
+                    if not inspector.has_table(table.name):
+                        continue
+                    existing = {c["name"] for c in inspector.get_columns(table.name)}
+                except Exception:
                     continue
-                # Build a portable column type string
-                col_type = col.type.compile(dialect=eng.dialect)
-                nullable = "" if col.nullable else " NOT NULL"
-                default = ""
-                if col.server_default is not None:
-                    default = f" DEFAULT {col.server_default.arg}"
-                elif col.nullable:
-                    default = " DEFAULT NULL"
-                stmt = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col_type}{nullable}{default}'
-                logger.info("Adding missing column: %s", stmt)
-                conn.execute(text(stmt))
+                for col in table.columns:
+                    if col.name in existing:
+                        continue
+                    try:
+                        col_type = col.type.compile(dialect=eng.dialect)
+                        # Always add as nullable to avoid issues with existing rows
+                        stmt = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col_type}'
+                        logger.info("Adding missing column: %s", stmt)
+                        conn.execute(text(stmt))
+                    except Exception as col_err:
+                        logger.warning("Could not add column %s.%s: %s",
+                                       table.name, col.name, col_err)
+    except Exception as e:
+        logger.error("_ensure_missing_columns failed (non-fatal): %s", e)
 
 
 @asynccontextmanager
