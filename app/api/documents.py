@@ -253,7 +253,7 @@ async def bulk_action(
                     doc.status = body.value
                     doc.is_published = body.value == "approved"
                     if body.value == "approved":
-                        _publish_to_git(doc)
+                        _publish_to_git(doc, db=db)
                         doc.last_published_at = datetime.now(timezone.utc).isoformat()
                     elif body.value in {"draft", "rejected"}:
                         _p, _v, _s, _d = _resolve_publish_path(doc)
@@ -297,7 +297,7 @@ async def bulk_action(
                 try:
                     doc.status = "approved"
                     doc.is_published = True
-                    _publish_to_git(doc)
+                    _publish_to_git(doc, db=db)
                     doc.last_published_at = datetime.now(timezone.utc).isoformat()
                     success_count += 1
                 except Exception as e:

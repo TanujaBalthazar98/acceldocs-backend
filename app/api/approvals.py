@@ -12,7 +12,7 @@ from app.ingestion.drive import _get_service, export_doc_as_html
 from app.middleware.auth import AuthUser, require_auth, require_role
 from app.models import Approval, Document, User
 from app.publishing.git_publisher import publish_to_production, unpublish_from_production
-from app.services.documents import _resolve_publish_path
+from app.services.documents import _resolve_publish_path, _set_branding_from_doc
 
 router = APIRouter()
 
@@ -100,6 +100,7 @@ async def perform_action(
 
     if body.action == "approve":
         try:
+            _set_branding_from_doc(doc, db)
             service = _get_service()
             html = export_doc_as_html(service, doc.google_doc_id)
             markdown = convert_html_to_markdown(html)

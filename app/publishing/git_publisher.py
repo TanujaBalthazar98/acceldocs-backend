@@ -9,11 +9,16 @@ Also regenerates zensical.toml after content changes.
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import git
 
 from app.config import settings
-from app.publishing.mkdocs_gen import write_mkdocs_yml
+from app.publishing.mkdocs_gen import write_zensical_toml
+
+# Module-level dict: callers can set branding before publishing so the
+# generated config reflects the organization's theme.
+_current_branding: dict[str, Any] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +79,16 @@ def publish_document(
         full_path.write_text(markdown_content, encoding="utf-8")
         index_paths = _ensure_parent_indexes(repo_path, full_path)
 
-        cfg_path = write_mkdocs_yml(repo_path)
+        cfg_path = write_zensical_toml(repo_path, **_current_branding)
 
-        repo.index.add([rel_path, str(cfg_path.relative_to(repo_path)), *index_paths])
+        # Track all generated files
+        files_to_add = [rel_path, str(cfg_path.relative_to(repo_path)), *index_paths]
+        # Also add custom CSS if it was generated
+        css_path = repo_path / "docs" / "stylesheets" / "extra.css"
+        if css_path.exists():
+            files_to_add.append(str(css_path.relative_to(repo_path)))
+
+        repo.index.add(files_to_add)
 
         if not repo.is_dirty(untracked_files=True):
             logger.info("No changes to commit for %s", rel_path)
@@ -121,7 +133,7 @@ def unpublish_from_production(
         if full_path.exists():
             full_path.unlink()
 
-        cfg_path = write_mkdocs_yml(repo_path)
+        cfg_path = write_zensical_toml(repo_path, **_current_branding)
         repo.index.add([str(cfg_path.relative_to(repo_path))])
         if full_path.exists():
             repo.index.add([rel_path])
@@ -241,6 +253,6 @@ def _ensure_seed_commit(repo: git.Repo, repo_path: Path) -> None:
     index_md = docs_dir / "index.md"
     if not index_md.exists():
         index_md.write_text("# AccelDocs\n\nWelcome to the documentation.\n")
-    cfg_path = write_mkdocs_yml(repo_path)
+    cfg_path = write_zensical_toml(repo_path, **_current_branding)
     repo.index.add(["docs/index.md", str(cfg_path.relative_to(repo_path))])
     repo.index.commit("Initial docs structure")

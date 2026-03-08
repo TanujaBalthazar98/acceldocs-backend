@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import User, Document, DocumentCache, Project, ProjectVersion, Topic
+from app.models import User, Document, DocumentCache, Organization, Project, ProjectVersion, Topic
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +129,30 @@ def _fetch_html_from_drive(doc: Document) -> str | None:
         return None
 
 
-def _publish_to_git(doc: Document) -> str | None:
+def _set_branding_from_doc(doc: Document, db) -> None:
+    """Load org branding into the git publisher so zensical.toml reflects it."""
+    try:
+        from app.publishing import git_publisher
+        org = None
+        if doc.project_id:
+            proj = db.get(Project, doc.project_id) if db else None
+            if proj and proj.organization_id:
+                org = db.get(Organization, proj.organization_id)
+        if org:
+            git_publisher._current_branding = {
+                "site_name": org.name or "Documentation",
+                "site_description": org.tagline or "",
+                "primary_color": org.primary_color or None,
+                "logo_url": org.logo_url or None,
+                "font_heading": org.font_heading or None,
+                "font_body": org.font_body or None,
+                "custom_css": org.custom_css or None,
+            }
+    except Exception:
+        pass  # non-fatal — publish with defaults
+
+
+def _publish_to_git(doc: Document, db=None) -> str | None:
     """Convert document HTML to Markdown and publish to Git production branch.
 
     Uses cached content_html if available; otherwise fetches fresh from Drive.
@@ -137,6 +160,8 @@ def _publish_to_git(doc: Document) -> str | None:
     try:
         from app.conversion.html_to_md import convert_html_to_markdown
         from app.publishing.git_publisher import publish_to_production, push_branch
+
+        _set_branding_from_doc(doc, db)
 
         html = doc.published_content_html or doc.content_html
         if not html:
@@ -371,7 +396,7 @@ async def update_document(body: dict, db: Session, user: User | None) -> dict:
 
         # Trigger Git publishing pipeline when publish state changes
         if will_publish and not was_published:
-            _publish_to_git(document)
+            _publish_to_git(document, db=db)
             document.last_published_at = datetime.now(timezone.utc)
         elif not will_publish and was_published:
             _unpublish_from_git(document)
