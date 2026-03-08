@@ -97,7 +97,7 @@ async def publish_mkdocs(
     if published > 0:
         db.commit()
 
-    # Push to the GitHub remote so Zensical picks up the changes
+    # Push to GitHub so the Actions workflow builds and deploys the site
     push_ok = False
     push_error: str | None = None
     if published > 0 and org and org.github_repo_full_name and org.github_token_encrypted:
@@ -107,7 +107,20 @@ async def publish_mkdocs(
             from app.api.github_publish import _set_docs_repo_remote
             _set_docs_repo_remote(org.github_repo_full_name, token)
             push_ok = push_branch("main")
-            if not push_ok:
+            if push_ok:
+                # Ensure GitHub Pages is set to deploy via GitHub Actions (not raw branch)
+                import requests as _req
+                _req.put(
+                    f"https://api.github.com/repos/{org.github_repo_full_name}/pages",
+                    headers={
+                        "Authorization": f"token {token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    json={"build_type": "workflow"},
+                    timeout=10,
+                )
+            else:
                 push_error = "Docs committed locally but push to GitHub failed."
         except Exception as exc:
             logger.warning("Push to GitHub failed: %s", exc)

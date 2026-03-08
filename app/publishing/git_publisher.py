@@ -14,7 +14,7 @@ from typing import Any
 import git
 
 from app.config import settings
-from app.publishing.mkdocs_gen import write_zensical_toml
+from app.publishing.mkdocs_gen import write_zensical_toml, generate_mkdocs_yml_content
 
 # Module-level dict: callers can set branding before publishing so the
 # generated config reflects the organization's theme.
@@ -24,6 +24,63 @@ logger = logging.getLogger(__name__)
 
 PREVIEW_BRANCH = "docs-preview"
 MAIN_BRANCH = "main"
+
+# GitHub Actions workflow that builds the docs with MkDocs Material and
+# deploys to GitHub Pages via the official actions/deploy-pages action.
+_DOCS_WORKFLOW = """\
+name: Deploy Documentation
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+      - name: Install MkDocs Material
+        run: pip install mkdocs-material pymdown-extensions
+      - name: Build documentation
+        run: mkdocs build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment
+"""
+
+
+def _ensure_workflow(repo_path: Path) -> list[str]:
+    """Write the GitHub Actions workflow file if absent. Returns new rel paths."""
+    wf_dir = repo_path / ".github" / "workflows"
+    wf_path = wf_dir / "deploy.yml"
+    if wf_path.exists():
+        return []
+    wf_dir.mkdir(parents=True, exist_ok=True)
+    wf_path.write_text(_DOCS_WORKFLOW, encoding="utf-8")
+    return [str(wf_path.relative_to(repo_path))]
 
 
 def get_repo() -> git.Repo:
@@ -81,8 +138,21 @@ def publish_document(
 
         cfg_path = write_zensical_toml(repo_path, **_current_branding)
 
+        # Write mkdocs.yml for GitHub Actions CI build
+        mkdocs_path = repo_path / "mkdocs.yml"
+        mkdocs_path.write_text(generate_mkdocs_yml_content(**_current_branding), encoding="utf-8")
+
+        # Write GitHub Actions workflow if not already present
+        workflow_paths = _ensure_workflow(repo_path)
+
         # Track all generated files
-        files_to_add = [rel_path, str(cfg_path.relative_to(repo_path)), *index_paths]
+        files_to_add = [
+            rel_path,
+            str(cfg_path.relative_to(repo_path)),
+            "mkdocs.yml",
+            *index_paths,
+            *workflow_paths,
+        ]
         # Also add custom CSS if it was generated
         css_path = repo_path / "docs" / "stylesheets" / "extra.css"
         if css_path.exists():

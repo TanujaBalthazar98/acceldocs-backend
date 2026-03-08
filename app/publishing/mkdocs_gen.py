@@ -273,6 +273,73 @@ def write_mkdocs_yml(repo_path: Path | None = None, **branding) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# MkDocs Material YAML (used by GitHub Actions CI build)
+# ---------------------------------------------------------------------------
+
+def generate_mkdocs_yml_content(
+    *,
+    site_name: str = "Documentation",
+    site_description: str = "",
+    primary_color: str | None = None,
+    font_body: str | None = None,
+    **_,  # absorb extra kwargs (logo_url, custom_css, font_heading …)
+) -> str:
+    """Generate a mkdocs.yml for MkDocs Material that GitHub Actions can build."""
+    lines = [
+        f'site_name: "{site_name}"',
+        'docs_dir: docs',
+        '',
+        'theme:',
+        '  name: material',
+        '  language: en',
+        '  features:',
+        '    - content.code.copy',
+        '    - content.code.annotate',
+        '    - navigation.footer',
+        '    - navigation.indexes',
+        '    - navigation.instant',
+        '    - navigation.instant.prefetch',
+        '    - navigation.path',
+        '    - navigation.sections',
+        '    - navigation.top',
+        '    - navigation.tracking',
+        '    - search.highlight',
+        '  palette:',
+        '    - scheme: default',
+    ]
+    if primary_color:
+        lines.append(f'      primary: "{primary_color}"')
+    lines += [
+        '      toggle:',
+        '        icon: material/brightness-7',
+        '        name: Switch to dark mode',
+        '    - scheme: slate',
+    ]
+    if primary_color:
+        lines.append(f'      primary: "{primary_color}"')
+    lines += [
+        '      toggle:',
+        '        icon: material/brightness-4',
+        '        name: Switch to light mode',
+    ]
+    if font_body:
+        lines += ['', f'  font:', f'    text: "{font_body}"']
+    if site_description:
+        lines += ['', f'site_description: "{site_description}"']
+    lines += [
+        '',
+        'markdown_extensions:',
+        '  - tables',
+        '  - admonition',
+        '  - toc',
+        '  - pymdownx.highlight:',
+        '      anchor_linenums: true',
+        '  - pymdownx.superfences',
+    ]
+    return '\n'.join(lines) + '\n'
+
+
+# ---------------------------------------------------------------------------
 # Index generation (unchanged)
 # ---------------------------------------------------------------------------
 
