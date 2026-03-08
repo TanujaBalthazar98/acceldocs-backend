@@ -60,6 +60,15 @@ class Organization(Base):
     openapi_spec_url: Mapped[str | None] = mapped_column(String(500))
     drive_folder_id: Mapped[str | None] = mapped_column(String(255))
     drive_permissions_last_synced_at: Mapped[str | None] = mapped_column(String(50))
+    # GitHub publishing
+    github_username: Mapped[str | None] = mapped_column(String(255))
+    github_token_encrypted: Mapped[str | None] = mapped_column(Text)
+    github_repo_name: Mapped[str | None] = mapped_column(String(255))
+    github_repo_full_name: Mapped[str | None] = mapped_column(String(500))
+    github_pages_url: Mapped[str | None] = mapped_column(String(500))
+    github_custom_domain: Mapped[str | None] = mapped_column(String(255))
+    github_domain_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_published_at: Mapped[str | None] = mapped_column(String(50))
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

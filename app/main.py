@@ -22,6 +22,7 @@ from app.api.ui import router as ui_router
 from app.api.functions import router as functions_router
 from app.api.publish import router as publish_router
 from app.api.public import router as public_router
+from app.api.github_publish import router as github_router
 from app.auth.routes import router as auth_router
 
 logging.basicConfig(
@@ -116,3 +117,4 @@ app.include_router(projects_router, prefix="/api/projects", tags=["projects"])
 app.include_router(drive_router, prefix="/api/drive", tags=["drive"])
 app.include_router(analytics_router, prefix="/api/analytics", tags=["analytics"])
 app.include_router(publish_router, tags=["publish"])
+app.include_router(github_router, prefix="/api", tags=["github"])
