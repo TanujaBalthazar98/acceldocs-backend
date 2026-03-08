@@ -1,12 +1,34 @@
 """Workspace and organization management functions."""
 
 import logging
+import re
 
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from app.models import User, Organization, OrgRole
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_org_slug(org: Organization, db: Session) -> str:
+    """Return org.slug, auto-generating and persisting one if missing."""
+    if org.slug:
+        return org.slug
+    # Generate slug from org name or owner email
+    base = (org.name or "workspace").lower()
+    base = re.sub(r"[^a-z0-9]+", "-", base).strip("-") or "workspace"
+    org.slug = base
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        # Slug might collide (unique constraint) — append org id
+        org.slug = f"{base}-{org.id}"
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+    return org.slug or base
 
 
 async def ensure_workspace(body: dict, db: Session, user: User | None) -> dict:
@@ -37,12 +59,13 @@ async def ensure_workspace(body: dict, db: Session, user: User | None) -> dict:
                     for m in members
                 ]
 
+                slug = _ensure_org_slug(org, db)
                 return {
                     "ok": True,
                     "organization": {
                         "id": org.id,
                         "name": org.name,
-                        "slug": org.slug,
+                        "slug": slug,
                         "domain": org.domain,
                     },
                     "members": member_list
@@ -120,11 +143,14 @@ async def get_organization(body: dict, db: Session, user: User | None) -> dict:
                     "name": member_user.name
                 })
 
+        # Ensure org always has a slug
+        slug = _ensure_org_slug(org, db)
+
         return {
             "ok": True,
             "id": org.id,
             "name": org.name,
-            "slug": org.slug,
+            "slug": slug,
             "domain": org.domain,
             "custom_docs_domain": org.custom_docs_domain,
             "subdomain": org.subdomain,
@@ -225,7 +251,7 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
             "organization": {
                 "id": org.id,
                 "name": org.name,
-                "slug": org.slug,
+                "slug": _ensure_org_slug(org, db),
                 "domain": org.domain,
                 "drive_folder_id": org.drive_folder_id,
             }
