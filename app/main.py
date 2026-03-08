@@ -21,6 +21,7 @@ from app.api.analytics import router as analytics_router
 from app.api.ui import router as ui_router
 from app.api.functions import router as functions_router
 from app.api.publish import router as publish_router
+from app.api.public import router as public_router
 from app.auth.routes import router as auth_router
 
 logging.basicConfig(
@@ -100,7 +101,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routes
+# Routes — public endpoints first (Strapi-compatible queries for docs viewer)
+app.include_router(public_router)
 app.include_router(ui_router)
 app.include_router(health_router)
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
