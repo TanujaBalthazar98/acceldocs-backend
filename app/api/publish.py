@@ -1,4 +1,4 @@
-"""Bulk publish API — publish all docs for an org to the MkDocs git repo."""
+"""Bulk publish API — publish all docs for an org via Zensical (git push)."""
 
 import logging
 from datetime import datetime, timezone
@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session, joinedload
 from app.database import get_db
 from app.middleware.auth import get_current_user_optional
 from app.models import Document, Organization, OrgRole, Project, User
-from app.services.documents import _publish_to_git, _resolve_publish_path
+from app.publishing.git_publisher import push_branch
+from app.services.documents import _publish_to_git
+from app.services.encryption import get_encryption_service
 
 logger = logging.getLogger(__name__)
 
@@ -95,17 +97,35 @@ async def publish_mkdocs(
     if published > 0:
         db.commit()
 
-    # Build the expected GitHub Pages URL from the org domain or slug
-    pages_url = None
-    if org:
-        domain = getattr(org, "domain", None) or getattr(org, "slug", None)
-        if domain:
-            pages_url = f"https://{domain}.github.io/docs"
+    # Push to the GitHub remote so Zensical picks up the changes
+    push_ok = False
+    push_error: str | None = None
+    if published > 0 and org and org.github_repo_full_name and org.github_token_encrypted:
+        try:
+            token = get_encryption_service().decrypt(org.github_token_encrypted)
+            # Re-stamp the remote URL with the current token before pushing
+            from app.api.github_publish import _set_docs_repo_remote
+            _set_docs_repo_remote(org.github_repo_full_name, token)
+            push_ok = push_branch("main")
+            if not push_ok:
+                push_error = "Docs committed locally but push to GitHub failed."
+        except Exception as exc:
+            logger.warning("Push to GitHub failed: %s", exc)
+            push_error = "Docs committed but push to GitHub failed. Check your GitHub connection."
+    elif published > 0 and not (org and org.github_repo_full_name):
+        push_error = "No GitHub repository configured. Connect GitHub in Settings to publish remotely."
 
-    return {
+    # Prefer the stored Pages URL; fall back to deriving from username
+    pages_url = (org.github_pages_url if org else None) or None
+
+    result: dict = {
         "ok": True,
         "published": published,
         "skipped": skipped,
         "errors": errors,
+        "pushed": push_ok,
         "pagesUrl": pages_url,
     }
+    if push_error:
+        result["pushWarning"] = push_error
+    return result
