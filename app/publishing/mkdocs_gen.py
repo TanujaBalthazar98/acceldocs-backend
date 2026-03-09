@@ -115,6 +115,7 @@ def generate_zensical_toml(
     site_name: str = "Documentation",
     site_description: str = "",
     primary_color: str | None = None,
+    accent_color: str | None = None,
     logo_url: str | None = None,
     font_heading: str | None = None,
     font_body: str | None = None,
@@ -164,15 +165,18 @@ def generate_zensical_toml(
     for feat in [
         "content.code.copy",
         "content.code.annotate",
+        "content.tabs.link",
         "navigation.footer",
         "navigation.indexes",
         "navigation.instant",
         "navigation.instant.prefetch",
+        "navigation.instant.progress",
         "navigation.path",
         "navigation.sections",
         "navigation.top",
         "navigation.tracking",
         "search.highlight",
+        "search.suggest",
     ]:
         lines.append(f'    "{feat}",')
     lines.append("]")
@@ -183,6 +187,8 @@ def generate_zensical_toml(
     lines.append('scheme = "default"')
     if primary_color:
         lines.append(f"primary = {_toml_str(primary_color)}")
+    if accent_color:
+        lines.append(f"accent = {_toml_str(accent_color)}")
     lines.append('toggle.icon = "lucide/sun"')
     lines.append('toggle.name = "Switch to dark mode"')
     lines.append("")
@@ -191,6 +197,8 @@ def generate_zensical_toml(
     lines.append('scheme = "slate"')
     if primary_color:
         lines.append(f"primary = {_toml_str(primary_color)}")
+    if accent_color:
+        lines.append(f"accent = {_toml_str(accent_color)}")
     lines.append('toggle.icon = "lucide/moon"')
     lines.append('toggle.name = "Switch to light mode"')
     lines.append("")
@@ -215,9 +223,16 @@ def generate_zensical_toml(
     lines.append("[project.markdown_extensions]")
     lines.append("tables = {}")
     lines.append("admonition = {}")
-    lines.append('"pymdownx.highlight" = {}')
-    lines.append('"pymdownx.superfences" = {}')
-    lines.append("toc = {}")
+    lines.append("footnotes = {}")
+    lines.append('"def_list" = {}')
+    lines.append('"pymdownx.tasklist" = {custom_checkbox = true}')
+    lines.append('"pymdownx.highlight" = {anchor_linenums = true}')
+    lines.append('"pymdownx.inlinehilite" = {}')
+    lines.append('"pymdownx.snippets" = {}')
+    lines.append('"pymdownx.superfences" = {custom_fences = [{name = "mermaid", class = "mermaid", format = "!!python/name:pymdownx.superfences.fence_code_format"}]}')
+    lines.append('"pymdownx.tabbed" = {alternate_style = true}')
+    lines.append('"pymdownx.details" = {}')
+    lines.append("toc = {permalink = true}")
     lines.append("")
 
     # Analytics
@@ -248,6 +263,7 @@ def write_zensical_toml(
     site_name: str = "Documentation",
     site_description: str = "",
     primary_color: str | None = None,
+    accent_color: str | None = None,
     logo_url: str | None = None,
     font_heading: str | None = None,
     font_body: str | None = None,
@@ -271,6 +287,7 @@ def write_zensical_toml(
         site_name=site_name,
         site_description=site_description,
         primary_color=primary_color,
+        accent_color=accent_color,
         logo_url=logo_url,
         font_heading=font_heading,
         font_body=font_body,

@@ -160,6 +160,7 @@ def _set_branding_from_doc(doc: Document, db) -> None:
                 "site_name": org.name or "Documentation",
                 "site_description": org.tagline or "",
                 "primary_color": org.primary_color or None,
+                "accent_color": org.accent_color or None,
                 "logo_url": org.logo_url or None,
                 "font_heading": org.font_heading or None,
                 "font_body": org.font_body or None,
