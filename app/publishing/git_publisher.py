@@ -176,15 +176,23 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
     """
     toml_path = repo_path / "zensical.toml"
     if not toml_path.exists():
-        return f"zensical.toml not found at {repo_path} — docs repo may not be initialised"
+        # Last-resort: generate the config now so the build doesn't fail
+        logger.warning("zensical.toml missing at %s — generating now", repo_path)
+        try:
+            write_zensical_toml(repo_path)
+        except Exception as gen_exc:
+            return f"zensical.toml not found and could not be generated: {gen_exc}"
+        if not toml_path.exists():
+            return f"zensical.toml not found at {repo_path} — docs repo may not be initialised"
 
     # --- 1. Build ---
+    # IMPORTANT: pass just the filename since cwd is already repo_path
     try:
         result = subprocess.run(
             [
                 "python", "-c",
                 "import sys, zensical; zensical.build(sys.argv[1], True)",
-                str(toml_path),
+                "zensical.toml",
             ],
             cwd=str(repo_path),
             capture_output=True,
