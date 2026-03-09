@@ -194,22 +194,36 @@ async def publish_mkdocs(
     skipped = 0
     errors = 0
     content_fetched = 0
+    doc_details: list[dict] = []  # diagnostic info per doc
 
     # Set branding from org for zensical config
     if org and all_docs:
         _set_branding_from_doc(all_docs[0], db)
 
     for doc in all_docs:
+        detail = {"id": doc.id, "title": doc.title or "(untitled)", "status": "unknown"}
         try:
+            has_html = bool(doc.content_html)
+            has_pub_html = bool(doc.published_content_html)
+            has_gdoc_id = bool(doc.google_doc_id)
+            detail["has_html"] = has_html
+            detail["has_pub_html"] = has_pub_html
+            detail["has_gdoc_id"] = has_gdoc_id
+            detail["project_id"] = doc.project_id
+            detail["project_legacy"] = doc.project
+
             # If doc has no content, try to fetch from Google Drive
             if not doc.content_html and not doc.published_content_html:
                 html = _try_fetch_content_from_drive(doc, google_token)
                 if html:
                     doc.content_html = html
                     content_fetched += 1
+                    detail["fetched"] = True
                 else:
                     logger.warning("No content for doc %s (%s) — skipping", doc.id, doc.title)
                     skipped += 1
+                    detail["status"] = "skipped_no_content"
+                    doc_details.append(detail)
                     continue
 
             commit_sha = _publish_to_git(doc, db=db)
@@ -219,11 +233,18 @@ async def publish_mkdocs(
                 if doc.content_html and not doc.published_content_html:
                     doc.published_content_html = doc.content_html
                 published += 1
+                detail["status"] = "published"
+                detail["commit"] = commit_sha[:8]
             else:
                 skipped += 1
+                detail["status"] = "skipped_no_changes"
         except Exception as e:
             logger.error("Failed to publish doc %s: %s", doc.id, e)
             errors += 1
+            detail["status"] = f"error: {e}"
+        doc_details.append(detail)
+
+    logger.info("Publish details: %s", doc_details)
 
     if published > 0 or content_fetched > 0:
         try:
@@ -285,6 +306,9 @@ async def publish_mkdocs(
         "contentFetched": content_fetched,
         "pushed": push_ok,
         "pagesUrl": pages_url,
+        "totalDocsFound": len(all_docs),
+        "hasGoogleToken": bool(google_token),
+        "docDetails": doc_details[:20],  # first 20 for debugging
     }
     if push_error:
         result["pushWarning"] = push_error
