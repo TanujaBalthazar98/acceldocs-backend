@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session, joinedload
 from app.database import get_db
 from app.middleware.auth import get_current_user_optional
 from app.models import Document, Organization, OrgRole, Project, User
-from app.publishing.git_publisher import push_branch, deploy_to_gh_pages
+from app.publishing.git_publisher import push_branch, deploy_to_gh_pages, get_repo
+from app.publishing.mkdocs_gen import write_zensical_toml
 from app.config import settings as _settings
 from app.services.documents import _publish_to_git, _set_branding_from_doc
 from app.services.encryption import get_encryption_service
@@ -252,10 +253,29 @@ async def publish_mkdocs(
         except Exception:
             db.rollback()
 
+    # Always refresh zensical.toml with current branding/nav before deploying,
+    # even when no doc content changed (fixes stale nav restriction).
+    if org and org.github_repo_full_name:
+        try:
+            from pathlib import Path as _Path
+            from app.publishing import git_publisher as _gp
+            _branding = dict(_gp._current_branding) if _gp._current_branding else {}
+            if not _branding.get("site_name"):
+                _branding["site_name"] = org.name or "Documentation"
+            _repo_path = _Path(_settings.docs_repo_path)
+            _cfg = write_zensical_toml(_repo_path, **_branding)
+            _repo = get_repo()
+            _repo.index.add([str(_cfg.relative_to(_repo_path))])
+            if _repo.is_dirty():
+                _repo.index.commit("Update zensical.toml configuration")
+                published += 1
+        except Exception as _toml_err:
+            logger.warning("Could not refresh zensical.toml before deploy: %s", _toml_err)
+
     # Build with zensical locally and push the pre-built HTML to gh-pages
     push_ok = False
     push_error: str | None = None
-    if published > 0 and org and org.github_repo_full_name and org.github_token_encrypted:
+    if org and org.github_repo_full_name and org.github_token_encrypted:
         try:
             import requests as _req
             from pathlib import Path as _Path
