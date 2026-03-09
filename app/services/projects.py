@@ -474,6 +474,7 @@ async def create_topic(body: dict, db: Session, user: User | None) -> dict:
 
         return {
             "ok": True,
+            "topicId": topic.id,
             "topic": {
                 "id": topic.id,
                 "project_id": topic.project_id,

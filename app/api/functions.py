@@ -31,7 +31,11 @@ async def invoke_function(
 
     # Extract Google access token from header (for Drive operations)
     google_token = request.headers.get("x-google-token")
-    if function_name in ("google-drive", "discover-drive-structure") and google_token:
+    if google_token and function_name in (
+        "google-drive", "discover-drive-structure",
+        "import-markdown", "convert-markdown-to-gdoc",
+        "create-document", "create-topic", "create-project",
+    ):
         body["_google_access_token"] = google_token
 
     # Import service modules (lazy import to avoid circular dependencies)

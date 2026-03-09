@@ -13,6 +13,16 @@ This service implements all 8 Drive operations with proper token management:
 
 import logging
 from datetime import datetime, timezone
+
+
+def _safe_int(val) -> int | None:
+    """Safely cast a value to int, returning None on failure."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
 from typing import Any
 
 import httpx
@@ -778,14 +788,175 @@ async def discover_drive_structure(body: dict, db: Session, user: User | None) -
 
 
 async def import_markdown(body: dict, db: Session, user: User | None) -> dict:
-    """Batch import markdown files."""
+    """Batch import markdown files.
+
+    Accepts a list of files (each with path and content) and creates
+    a Document record for each one. If a Google access token is
+    available, also creates a Google Doc for each file.
+
+    Body keys:
+      files: list of { path: str, content: str, targetTopicId?: int }
+      projectId: int
+      projectVersionId: int | None
+      organizationId: int | None
+      parentTopicId: int | None
+      jobId: str | None  (for batched imports)
+    """
     if not user:
         return {"ok": False, "error": "Authentication required"}
 
-    # TODO: Implement batch markdown import
+    import uuid as _uuid
+    from app.models import Document, Project, ProjectVersion, Topic
+
+    files = body.get("files", [])
+    if not files:
+        return {"ok": False, "error": "No files to import"}
+
+    project_id = _safe_int(body.get("projectId"))
+    project_version_id = _safe_int(body.get("projectVersionId"))
+    parent_topic_id = _safe_int(body.get("parentTopicId"))
+    google_token = body.get("_google_access_token")
+    job_id = body.get("jobId") or str(_uuid.uuid4())
+
+    if not project_id:
+        return {"ok": False, "error": "projectId required"}
+
+    # Verify project exists
+    project = db.get(Project, project_id)
+    if not project:
+        return {"ok": False, "error": "Project not found"}
+
+    # Resolve project slug chain
+    resolved_project = ""
+    proj = project
+    parts: list[str] = []
+    while proj is not None:
+        parts.append(proj.slug or proj.name.lower().replace(" ", "-"))
+        proj = proj.parent
+    parts.reverse()
+    resolved_project = "/".join(parts)
+
+    # Resolve version
+    resolved_version = ""
+    if project_version_id:
+        pv = db.get(ProjectVersion, project_version_id)
+        if pv:
+            resolved_version = pv.slug or pv.name
+
+    # Resolve parent topic section path
+    resolved_section = ""
+    if parent_topic_id:
+        topic = db.get(Topic, parent_topic_id)
+        if topic:
+            topic_parts: list[str] = []
+            t = topic
+            while t is not None:
+                topic_parts.append(t.slug or t.name.lower().replace(" ", "-"))
+                t = t.parent
+            topic_parts.reverse()
+            resolved_section = "/".join(topic_parts)
+
+    # Optional: create Google Docs via Drive API
+    drive_service = None
+    if google_token:
+        try:
+            from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
+            creds = Credentials(token=google_token)
+            drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        except Exception as e:
+            logger.warning("Could not init Drive service for import: %s", e)
+
+    imported = 0
+    errors_list: list[str] = []
+
+    for f in files:
+        file_path = f.get("path", "untitled")
+        content = f.get("content", "")
+        target_topic_id = _safe_int(f.get("targetTopicId")) or parent_topic_id
+
+        # Derive title from file path
+        file_name = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
+        title = file_name.replace(".md", "").replace(".markdown", "").replace("-", " ").replace("_", " ")
+        slug = file_name.replace(".md", "").replace(".markdown", "").lower().replace(" ", "-")
+
+        google_doc_id = None
+
+        # Try creating a Google Doc if we have a Drive service
+        if drive_service and content:
+            try:
+                # Create a Google Doc
+                file_metadata = {"name": title, "mimeType": "application/vnd.google-apps.document"}
+                # If there's a parent folder, put the doc there
+                if project and hasattr(project, "drive_folder_id") and project.drive_folder_id:
+                    file_metadata["parents"] = [project.drive_folder_id]
+
+                created_file = drive_service.files().create(
+                    body=file_metadata, fields="id"
+                ).execute()
+                google_doc_id = created_file.get("id")
+
+                if google_doc_id:
+                    # Update the doc content via Docs API
+                    try:
+                        from googleapiclient.discovery import build as build_api
+                        docs_service = build_api("docs", "v1", credentials=creds, cache_discovery=False)
+                        # Insert the markdown as plain text (Drive will format it)
+                        docs_service.documents().batchUpdate(
+                            documentId=google_doc_id,
+                            body={"requests": [{"insertText": {"location": {"index": 1}, "text": content}}]}
+                        ).execute()
+                    except Exception as e:
+                        logger.warning("Could not insert content into Google Doc %s: %s", google_doc_id, e)
+
+            except Exception as e:
+                logger.warning("Could not create Google Doc for %s: %s", title, e)
+
+        try:
+            # Convert markdown to HTML for storage
+            content_html = None
+            if content:
+                try:
+                    import markdown as _md
+                    content_html = _md.markdown(content, extensions=["tables", "fenced_code"])
+                except ImportError:
+                    # Wrap raw markdown in pre tags as fallback
+                    content_html = f"<pre>{content}</pre>"
+
+            document = Document(
+                google_doc_id=google_doc_id,
+                title=title,
+                slug=slug,
+                project=resolved_project,
+                version=resolved_version,
+                section=resolved_section,
+                visibility="internal",
+                status="draft",
+                project_id=project_id,
+                project_version_id=project_version_id,
+                topic_id=target_topic_id,
+                owner_id=user.id,
+                content_html=content_html,
+            )
+            db.add(document)
+            db.flush()
+            imported += 1
+        except Exception as e:
+            logger.error("Failed to create document for %s: %s", title, e)
+            errors_list.append(f"{title}: {e}")
+
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "error": f"Database commit failed: {e}"}
+
     return {
-        "ok": False,
-        "error": "Not yet implemented"
+        "ok": True,
+        "jobId": job_id,
+        "imported": imported,
+        "errors": errors_list,
+        "total": len(files),
     }
 
 

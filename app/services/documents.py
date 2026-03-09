@@ -465,6 +465,7 @@ async def create_document(body: dict, db: Session, user: User | None) -> dict:
 
         return {
             "ok": True,
+            "documentId": document.id,
             "document": {
                 "id": document.id,
                 "google_doc_id": document.google_doc_id,
