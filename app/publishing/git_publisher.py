@@ -192,8 +192,10 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
             timeout=120,
         )
         if result.returncode != 0:
-            logger.error("zensical build failed (rc=%s): %s", result.returncode, result.stderr)
-            return f"Zensical build failed (rc={result.returncode}): {result.stderr[:300]}"
+            full_err = (result.stderr or result.stdout or "no output")
+            logger.error("zensical build failed (rc=%s):\n%s", result.returncode, full_err)
+            # Return last 600 chars so we capture the actual exception type/message
+            return f"Zensical build failed (rc={result.returncode}): {full_err[-600:]}"
         logger.info("zensical build output: %s", result.stdout.strip())
     except Exception as build_exc:
         logger.exception("zensical build raised an exception")
