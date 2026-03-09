@@ -3,7 +3,8 @@
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
@@ -11,7 +12,7 @@ from app.middleware.auth import get_current_user_optional
 from app.models import Document, Organization, OrgRole, Project, User
 from app.publishing.git_publisher import push_branch, deploy_to_gh_pages
 from app.config import settings as _settings
-from app.services.documents import _publish_to_git
+from app.services.documents import _publish_to_git, _set_branding_from_doc
 from app.services.encryption import get_encryption_service
 
 logger = logging.getLogger(__name__)
@@ -19,17 +20,62 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _try_fetch_content_from_drive(doc: Document, google_token: str | None) -> str | None:
+    """Attempt to fetch HTML content from Google Drive for a document.
+
+    Tries the user's OAuth token first (passed from frontend), then falls
+    back to the service-account approach.
+    """
+    if not doc.google_doc_id:
+        return None
+
+    # Try with user's OAuth token
+    if google_token:
+        try:
+            from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
+
+            creds = Credentials(token=google_token)
+            service = build("docs", "v1", credentials=creds, cache_discovery=False)
+            # Export as HTML via Drive API
+            drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+            content = drive_service.files().export(
+                fileId=doc.google_doc_id, mimeType="text/html"
+            ).execute()
+            html = content.decode("utf-8") if isinstance(content, bytes) else content
+            if html and html.strip():
+                logger.info("Fetched content from Drive (OAuth) for doc %s", doc.id)
+                return html
+        except Exception as e:
+            logger.warning("OAuth fetch failed for doc %s: %s", doc.id, e)
+
+    # Fallback: service account
+    try:
+        from app.ingestion.drive import _get_service, export_doc_as_html
+        service = _get_service()
+        html = export_doc_as_html(service, doc.google_doc_id)
+        if html and html.strip():
+            logger.info("Fetched content from Drive (service account) for doc %s", doc.id)
+            return html
+    except Exception as e:
+        logger.warning("Service account fetch failed for doc %s: %s", doc.id, e)
+
+    return None
+
+
 @router.post("/publish/mkdocs")
 async def publish_mkdocs(
     body: dict,
+    request: Request = None,
     db: Session = Depends(get_db),
     user: User | None = Depends(get_current_user_optional),
 ):
-    """Publish all is_published documents for an org to the MkDocs git repo.
+    """Publish all documents for an org to the docs git repo.
 
-    Called by GeneralSettings when the user clicks "Publish to MkDocs".
-    Iterates every published document, fetches content from Drive if needed,
-    converts to Markdown, and commits to the docs git repo.
+    Called by the frontend when the user clicks "Publish".
+    Iterates every document in the org's projects, fetches content from
+    Drive if needed, converts to Markdown, and commits to the docs git repo.
+    Then builds with Zensical and pushes to gh-pages.
 
     Returns a summary: { ok, published, skipped, errors, pagesUrl }
     """
@@ -57,39 +103,121 @@ async def publish_mkdocs(
     # Get the org for site metadata
     org = db.get(Organization, org_id)
 
-    # Fetch all published documents for this org's projects
-    project_ids = [
-        row.id
-        for row in db.query(Project.id).filter(Project.organization_id == org_id).all()
-    ]
+    # Extract Google access token from header (for fetching content on-the-fly)
+    google_token = None
+    if request:
+        google_token = request.headers.get("x-google-token")
+    if not google_token:
+        google_token = body.get("_google_access_token") or body.get("googleAccessToken")
+
+    # Get all org projects
+    projects = db.query(Project).filter(Project.organization_id == org_id).all()
+    project_ids = [p.id for p in projects]
     if not project_ids:
         return {"ok": True, "published": 0, "skipped": 0, "errors": 0, "pagesUrl": None}
 
-    # Publish all docs that have content — no individual approval required
-    docs = (
+    # Build slug→id map for backfilling orphan docs
+    slug_to_project: dict[str, Project] = {}
+    for p in projects:
+        if p.slug:
+            slug_to_project[p.slug.lower()] = p
+        if p.name:
+            slug_to_project[p.name.lower()] = p
+            slug_to_project[p.name.lower().replace(" ", "-")] = p
+
+    # ----- Collect ALL publishable docs -----
+    # Step 1: docs with project_id set
+    docs_with_pid = (
         db.query(Document)
         .options(
             joinedload(Document.project_rel).joinedload(Project.parent),
             joinedload(Document.project_version),
             joinedload(Document.topic),
         )
+        .filter(Document.project_id.in_(project_ids))
+        .all()
+    )
+
+    # Step 2: orphan docs (project_id NULL) — backfill them
+    org_user_ids = {
+        r.user_id
+        for r in db.query(OrgRole).filter(OrgRole.organization_id == org_id).all()
+    }
+    orphans = (
+        db.query(Document)
+        .options(
+            joinedload(Document.project_rel),
+            joinedload(Document.project_version),
+            joinedload(Document.topic),
+        )
         .filter(
-            Document.project_id.in_(project_ids),
-            Document.content_html.isnot(None),
-            Document.content_html != "",
+            Document.project_id.is_(None),
+            or_(
+                Document.owner_id.in_(org_user_ids),
+                Document.owner_id.is_(None),
+            ),
         )
         .all()
     )
 
+    # Backfill orphans via legacy project string
+    backfilled = 0
+    for d in orphans:
+        if d.project and d.project.lower() in slug_to_project:
+            proj = slug_to_project[d.project.lower()]
+            d.project_id = proj.id
+            backfilled += 1
+    if backfilled > 0:
+        try:
+            db.commit()
+            logger.info("Publish: backfilled project_id for %d orphan documents", backfilled)
+        except Exception:
+            db.rollback()
+
+    # Combine: all docs that belong to this org
+    seen_ids: set[int] = set()
+    all_docs: list[Document] = []
+    for d in docs_with_pid:
+        if d.id not in seen_ids:
+            seen_ids.add(d.id)
+            all_docs.append(d)
+    for d in orphans:
+        if d.id not in seen_ids and d.project_id and d.project_id in set(project_ids):
+            seen_ids.add(d.id)
+            all_docs.append(d)
+
+    logger.info("Publish: found %d docs total (%d with FK, %d orphans backfilled)",
+                len(all_docs), len(docs_with_pid), backfilled)
+
+    # ----- Publish each doc -----
     published = 0
     skipped = 0
     errors = 0
+    content_fetched = 0
 
-    for doc in docs:
+    # Set branding from org for zensical config
+    if org and all_docs:
+        _set_branding_from_doc(all_docs[0], db)
+
+    for doc in all_docs:
         try:
+            # If doc has no content, try to fetch from Google Drive
+            if not doc.content_html and not doc.published_content_html:
+                html = _try_fetch_content_from_drive(doc, google_token)
+                if html:
+                    doc.content_html = html
+                    content_fetched += 1
+                else:
+                    logger.warning("No content for doc %s (%s) — skipping", doc.id, doc.title)
+                    skipped += 1
+                    continue
+
             commit_sha = _publish_to_git(doc, db=db)
             if commit_sha:
+                doc.is_published = True
                 doc.last_published_at = datetime.now(timezone.utc).isoformat()
+                if doc.content_html and not doc.published_content_html:
+                    doc.published_content_html = doc.content_html
                 published += 1
             else:
                 skipped += 1
@@ -97,8 +225,11 @@ async def publish_mkdocs(
             logger.error("Failed to publish doc %s: %s", doc.id, e)
             errors += 1
 
-    if published > 0:
-        db.commit()
+    if published > 0 or content_fetched > 0:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
 
     # Build with zensical locally and push the pre-built HTML to gh-pages
     push_ok = False
@@ -151,6 +282,7 @@ async def publish_mkdocs(
         "published": published,
         "skipped": skipped,
         "errors": errors,
+        "contentFetched": content_fetched,
         "pushed": push_ok,
         "pagesUrl": pages_url,
     }
