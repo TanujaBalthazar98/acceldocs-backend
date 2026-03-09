@@ -139,7 +139,7 @@ async def publish_mkdocs(
                 push_error = deploy_result if isinstance(deploy_result, str) else "Docs built locally but push to GitHub Pages failed."
         except Exception as exc:
             logger.warning("Deploy to gh-pages failed: %s", exc)
-            push_error = "Docs committed but deployment failed. Check your GitHub connection."
+            push_error = f"Deployment failed: {exc}"
     elif published > 0 and not (org and org.github_repo_full_name):
         push_error = "No GitHub repository configured. Connect GitHub in Settings to publish remotely."
 

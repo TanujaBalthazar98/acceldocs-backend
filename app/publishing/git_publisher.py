@@ -176,8 +176,7 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
     """
     toml_path = repo_path / "zensical.toml"
     if not toml_path.exists():
-        logger.error("deploy_to_gh_pages: zensical.toml not found at %s", toml_path)
-        return False
+        return f"zensical.toml not found at {repo_path} — docs repo may not be initialised"
 
     # --- 1. Build ---
     try:
@@ -194,16 +193,15 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
         )
         if result.returncode != 0:
             logger.error("zensical build failed (rc=%s): %s", result.returncode, result.stderr)
-            return False
+            return f"Zensical build failed (rc={result.returncode}): {result.stderr[:300]}"
         logger.info("zensical build output: %s", result.stdout.strip())
-    except Exception:
+    except Exception as build_exc:
         logger.exception("zensical build raised an exception")
-        return False
+        return f"Zensical build error: {build_exc}"
 
     site_dir = repo_path / "site"
     if not site_dir.exists() or not any(site_dir.iterdir()):
-        logger.error("deploy_to_gh_pages: site/ is empty after build")
-        return False
+        return "site/ directory is empty after build — nothing to deploy"
 
     # --- 2. Clone gh-pages into a temp dir (or init fresh) ---
     with tempfile.TemporaryDirectory(prefix="gh-pages-") as tmpdir:
