@@ -262,21 +262,29 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
     try:
         raw_ids = body.get("projectIds", [])
         project_ids = [_int(pid) for pid in raw_ids if _int(pid) is not None]
+        logger.info("[list_documents] user=%s raw_ids=%s project_ids=%s",
+                     user.id, raw_ids[:5], project_ids[:5])
         if not project_ids:
+            logger.warning("[list_documents] No valid project IDs after casting")
             return {"ok": True, "documents": []}
 
         # ----- Step 1: resolve org-scoped project info -----
         from app.models import OrgRole
         org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
         org_id = org_role.organization_id if org_role else None
+        logger.info("[list_documents] org_id=%s", org_id)
 
         # Only allow project IDs that belong to the user's organization
         projects = db.query(Project).filter(Project.id.in_(project_ids)).all()
+        logger.info("[list_documents] projects from DB: %s",
+                     [(p.id, p.name, p.organization_id) for p in projects])
         if org_id:
             projects = [p for p in projects if p.organization_id == org_id]
         scoped_project_ids = [p.id for p in projects]
+        logger.info("[list_documents] scoped_project_ids=%s", scoped_project_ids)
 
         if not scoped_project_ids:
+            logger.warning("[list_documents] No scoped projects — returning empty")
             return {"ok": True, "documents": []}
 
         # ----- Step 2: query documents by FK -----
@@ -285,9 +293,23 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
         ).filter(
             Document.project_id.in_(scoped_project_ids)
         ).order_by(Document.display_order, Document.id).all()
+        logger.info("[list_documents] FK query returned %d docs", len(documents))
 
-        # ----- Step 3: find orphan docs (project_id is NULL) that belong to
-        #       this user and try to backfill them into scoped projects -----
+        # ----- Step 3: Also get ALL documents in the org (by project FK) -----
+        # Some docs may have project_id pointing to projects not in the
+        # requested list (e.g. stale sub-projects). Count total for debug.
+        all_org_docs = db.query(Document).filter(
+            Document.project_id.in_(scoped_project_ids)
+        ).count()
+
+        # Count total documents in the entire DB for diagnostics
+        total_docs_in_db = db.query(Document).count()
+        null_pid_docs = db.query(Document).filter(Document.project_id.is_(None)).count()
+        logger.info("[list_documents] total_docs_in_db=%d null_project_id=%d org_docs=%d",
+                     total_docs_in_db, null_pid_docs, all_org_docs)
+
+        # ----- Step 4: find orphan docs (project_id is NULL) that can be
+        #       backfilled into scoped projects -----
         slug_to_id: dict[str, int] = {}
         for p in projects:
             if p.slug:
@@ -295,6 +317,7 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
             if p.name:
                 slug_to_id[p.name.lower()] = p.id
                 slug_to_id[p.name.lower().replace(" ", "-")] = p.id
+        logger.info("[list_documents] slug_to_id keys=%s", list(slug_to_id.keys()))
 
         # Include docs owned by this user OR unowned docs (created by sync
         # which doesn't set owner_id).  The backfill below only assigns them
@@ -308,6 +331,9 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
                 Document.owner_id.is_(None),
             ),
         ).all()
+        logger.info("[list_documents] orphans found: %d — legacy strings: %s",
+                     len(orphans),
+                     [(d.id, d.title, d.project, d.owner_id) for d in orphans[:10]])
 
         backfilled = 0
         for d in orphans:
@@ -331,6 +357,7 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
                 unique_docs.append(d)
 
         doc_list = [_serialize_document(d) for d in unique_docs]
+        logger.info("[list_documents] returning %d documents", len(doc_list))
         return {"ok": True, "documents": doc_list}
 
     except Exception as e:
