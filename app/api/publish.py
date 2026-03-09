@@ -332,4 +332,20 @@ async def publish_mkdocs(
     }
     if push_error:
         result["pushWarning"] = push_error
+
+    # Include docs-site git state for debugging
+    try:
+        from pathlib import Path as _P
+        import subprocess as _sp
+        _rp = _P(_settings.docs_repo_path)
+        _log = _sp.run(["git", "log", "--oneline", "-5"], cwd=str(_rp), capture_output=True, text=True, timeout=10)
+        _files = _sp.run(["find", "docs", "-name", "*.md"], cwd=str(_rp), capture_output=True, text=True, timeout=10)
+        result["_debug"] = {
+            "docsRepoPath": str(_rp.resolve()),
+            "gitLog": _log.stdout.strip().splitlines(),
+            "mdFiles": _files.stdout.strip().splitlines(),
+        }
+    except Exception as _dbg_e:
+        result["_debug"] = {"error": str(_dbg_e)}
+
     return result
