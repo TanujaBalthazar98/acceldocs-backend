@@ -483,6 +483,164 @@ async def delete_topic(body: dict, db: Session, user: User | None) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+async def invite_to_project(body: dict, db: Session, user: User | None) -> dict:
+    """Invite a user (by email) to a specific external project.
+
+    Creates a ProjectMember record for the target user (registering them if
+    needed via a pending Invitation). The project must have visibility=external.
+
+    Body: { projectId, email, role? }
+    """
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        from app.models import Invitation
+        import secrets
+
+        project_id = _int(body.get("projectId") or body.get("project_id"))
+        email = (body.get("email") or "").strip().lower()
+        role = (body.get("role") or "viewer").strip()
+
+        if not project_id:
+            return {"ok": False, "error": "projectId required"}
+        if not email:
+            return {"ok": False, "error": "email required"}
+
+        project = db.get(Project, project_id)
+        if not project:
+            return {"ok": False, "error": "Project not found"}
+        if project.visibility != "external":
+            return {"ok": False, "error": "Can only invite to external projects"}
+
+        # Verify the caller is an org member with sufficient role
+        caller_role = (
+            db.query(OrgRole)
+            .filter(OrgRole.user_id == user.id, OrgRole.organization_id == project.organization_id)
+            .first()
+        )
+        if not caller_role or caller_role.role not in ("owner", "admin", "editor"):
+            return {"ok": False, "error": "Insufficient permissions to invite"}
+
+        # Check if target user already exists
+        from app.models import User as UserModel
+        target_user = db.query(UserModel).filter(UserModel.email == email).first()
+
+        if target_user:
+            # Check if already a member
+            existing = (
+                db.query(ProjectMember)
+                .filter(ProjectMember.project_id == project_id, ProjectMember.user_id == target_user.id)
+                .first()
+            )
+            if existing:
+                return {"ok": True, "status": "already_member", "userId": target_user.id}
+
+            # Add them directly
+            member = ProjectMember(project_id=project_id, user_id=target_user.id, role=role)
+            db.add(member)
+            db.commit()
+            return {"ok": True, "status": "added", "userId": target_user.id}
+
+        # User doesn't exist yet — create a pending invitation
+        token = secrets.token_urlsafe(32)
+        invitation = Invitation(
+            organization_id=project.organization_id,
+            project_id=project_id,
+            invited_by_id=user.id,
+            email=email,
+            role=role,
+            token=token,
+            status="pending",
+        )
+        db.add(invitation)
+        db.commit()
+
+        return {"ok": True, "status": "invited", "inviteToken": token, "email": email}
+
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "error": str(e)}
+
+
+async def list_project_members_for_project(body: dict, db: Session, user: User | None) -> dict:
+    """Return all members of a specific project (for share panel display)."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        project_id = _int(body.get("projectId") or body.get("project_id"))
+        if not project_id:
+            return {"ok": False, "error": "projectId required"}
+
+        project = db.get(Project, project_id)
+        if not project:
+            return {"ok": False, "error": "Project not found"}
+
+        # Caller must be an org member
+        caller_role = (
+            db.query(OrgRole)
+            .filter(OrgRole.user_id == user.id, OrgRole.organization_id == project.organization_id)
+            .first()
+        )
+        if not caller_role:
+            return {"ok": False, "error": "Not a member of this organization"}
+
+        members = (
+            db.query(ProjectMember)
+            .filter(ProjectMember.project_id == project_id)
+            .all()
+        )
+
+        result = []
+        for m in members:
+            u = db.get(User, m.user_id)
+            result.append({
+                "id": m.id,
+                "userId": m.user_id,
+                "email": u.email if u else None,
+                "name": u.name if u else None,
+                "role": m.role,
+            })
+
+        return {"ok": True, "members": result}
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def remove_project_member(body: dict, db: Session, user: User | None) -> dict:
+    """Remove a user from an external project."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        member_id = _int(body.get("memberId") or body.get("member_id"))
+        if not member_id:
+            return {"ok": False, "error": "memberId required"}
+
+        member = db.get(ProjectMember, member_id)
+        if not member:
+            return {"ok": False, "error": "Member not found"}
+
+        project = db.get(Project, member.project_id)
+        caller_role = (
+            db.query(OrgRole)
+            .filter(OrgRole.user_id == user.id, OrgRole.organization_id == project.organization_id)
+            .first()
+        )
+        if not caller_role or caller_role.role not in ("owner", "admin"):
+            return {"ok": False, "error": "Insufficient permissions"}
+
+        db.delete(member)
+        db.commit()
+        return {"ok": True}
+
+    except Exception as e:
+        db.rollback()
+        return {"ok": False, "error": str(e)}
+
+
 async def normalize_structure(body: dict, db: Session, user: User | None) -> dict:
     """Fix topic hierarchy issues."""
     if not user:

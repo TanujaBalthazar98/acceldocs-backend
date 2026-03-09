@@ -152,20 +152,60 @@ def _set_branding_from_doc(doc: Document, db) -> None:
         pass  # non-fatal — publish with defaults
 
 
-def _publish_to_git(doc: Document, db=None) -> str | None:
-    """Convert document HTML to Markdown and publish to Git production branch.
+def _get_org_for_doc(doc: Document, db) -> Organization | None:
+    """Return the Organization for a document's project, or None."""
+    if not db or not doc.project_id:
+        return None
+    proj = db.get(Project, doc.project_id)
+    if proj and proj.organization_id:
+        return db.get(Organization, proj.organization_id)
+    return None
 
-    Uses cached content_html if available; otherwise fetches fresh from Drive.
+
+def _auto_deploy_if_public(doc: Document, db) -> None:
+    """If the document's project is public and the org has GitHub configured,
+    build with zensical and push the pre-built site to gh-pages automatically."""
+    try:
+        proj = db.get(Project, doc.project_id) if doc.project_id else None
+        if not proj or proj.visibility != "public":
+            return
+
+        org = db.get(Organization, proj.organization_id) if proj.organization_id else None
+        if not org or not org.github_repo_full_name or not org.github_token_encrypted:
+            return
+
+        from app.services.encryption import get_encryption_service
+        from app.publishing.git_publisher import deploy_to_gh_pages
+        from app.config import settings
+        from pathlib import Path
+
+        token = get_encryption_service().decrypt(org.github_token_encrypted)
+        remote_url = f"https://oauth2:{token}@github.com/{org.github_repo_full_name}.git"
+        repo_path = Path(settings.docs_repo_path)
+
+        ok = deploy_to_gh_pages(repo_path, remote_url)
+        if ok:
+            logger.info("Auto-deployed gh-pages for org %s after publishing doc %s", org.id, doc.id)
+        else:
+            logger.warning("Auto-deploy gh-pages failed for doc %s", doc.id)
+    except Exception:
+        logger.exception("Auto-deploy gh-pages raised for doc %s", doc.id)
+
+
+def _publish_to_git(doc: Document, db=None) -> str | None:
+    """Convert document HTML to Markdown and commit to Git production branch.
+
+    If the project is public and GitHub is configured, also builds the Zensical
+    site and pushes the pre-built HTML to the gh-pages branch automatically.
     """
     try:
         from app.conversion.html_to_md import convert_html_to_markdown
-        from app.publishing.git_publisher import publish_to_production, push_branch
+        from app.publishing.git_publisher import publish_to_production
 
         _set_branding_from_doc(doc, db)
 
         html = doc.published_content_html or doc.content_html
         if not html:
-            # No cached content — try fetching from Drive now
             html = _fetch_html_from_drive(doc)
         if not html:
             logger.warning("No HTML content to publish for doc %s (%s)", doc.id, doc.title)
@@ -181,30 +221,27 @@ def _publish_to_git(doc: Document, db=None) -> str | None:
         commit_sha = publish_to_production(project_slug, version_slug, section, doc_slug, markdown)
         if commit_sha:
             logger.info("Published doc %s (%s) to Git: %s", doc.id, doc.title, commit_sha[:8])
-            try:
-                push_branch("main")
-            except Exception:
-                logger.warning("Could not push to remote after publishing doc %s", doc.id)
+            # Auto-deploy to GitHub Pages for public projects
+            if db:
+                _auto_deploy_if_public(doc, db)
         return commit_sha
     except Exception:
         logger.exception("Failed to publish doc %s to Git", doc.id)
         return None
 
 
-def _unpublish_from_git(doc: Document) -> str | None:
-    """Remove document from Git production branch."""
+def _unpublish_from_git(doc: Document, db=None) -> str | None:
+    """Remove document from Git production branch and rebuild public site if needed."""
     try:
-        from app.publishing.git_publisher import unpublish_from_production, push_branch
+        from app.publishing.git_publisher import unpublish_from_production
 
         project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
 
         commit_sha = unpublish_from_production(project_slug, version_slug, section, doc_slug)
         if commit_sha:
             logger.info("Unpublished doc %s (%s) from Git: %s", doc.id, doc.title, commit_sha[:8])
-            try:
-                push_branch("main")
-            except Exception:
-                logger.warning("Could not push to remote after unpublishing doc %s", doc.id)
+            if db:
+                _auto_deploy_if_public(doc, db)
         return commit_sha
     except Exception:
         logger.exception("Failed to unpublish doc %s from Git", doc.id)
@@ -399,7 +436,7 @@ async def update_document(body: dict, db: Session, user: User | None) -> dict:
             _publish_to_git(document, db=db)
             document.last_published_at = datetime.now(timezone.utc)
         elif not will_publish and was_published:
-            _unpublish_from_git(document)
+            _unpublish_from_git(document, db=db)
 
         db.commit()
 

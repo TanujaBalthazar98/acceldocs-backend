@@ -45,12 +45,16 @@ async def invoke_function(
         "update-organization": workspace.update_organization,
         "search-organizations": workspace.search_organizations,
 
-        # Projects (5 functions)
+        # Projects
         "list-projects": projects.list_projects,
         "create-project": projects.create_project,
         "update-project-settings": projects.update_project_settings,
         "get-project-settings": projects.get_project_settings,
         "delete-project": projects.delete_project,
+        # Project member / external invite
+        "invite-to-project": projects.invite_to_project,
+        "list-project-members": projects.list_project_members_for_project,
+        "remove-project-member": projects.remove_project_member,
 
         # Versions (2 functions)
         "list-project-versions": projects.list_project_versions,

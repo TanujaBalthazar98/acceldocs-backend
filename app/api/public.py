@@ -7,8 +7,9 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.middleware.auth import get_current_user_optional
 from app.models import (
-    Organization, Project, ProjectVersion, Topic, Document,
+    Organization, Project, ProjectMember, ProjectVersion, Topic, Document, User,
 )
 
 logger = logging.getLogger(__name__)
@@ -244,11 +245,35 @@ async def list_projects_public(request: Request, db: Session = Depends(get_db)):
 # GET /api/public-content  — all published content for an org
 # ---------------------------------------------------------------------------
 
+def _content_payload(project_ids: list[int], db: Session) -> dict:
+    """Build the topics/versions/documents payload for a set of project IDs."""
+    if not project_ids:
+        return {"projects": [], "versions": [], "topics": [], "documents": []}
+
+    versions = (
+        db.query(ProjectVersion)
+        .filter(ProjectVersion.project_id.in_(project_ids), ProjectVersion.is_published == True)
+        .all()
+    )
+    topics = db.query(Topic).filter(Topic.project_id.in_(project_ids)).all()
+    documents = (
+        db.query(Document)
+        .filter(Document.project_id.in_(project_ids), Document.is_published == True)
+        .all()
+    )
+    return {
+        "versions": [_version_dict(v) for v in versions],
+        "topics": [_topic_dict(t) for t in topics],
+        "documents": [_doc_dict(d) for d in documents],
+    }
+
+
 @router.get("/api/public-content")
 async def public_content(
     organizationId: str = Query(...),
     db: Session = Depends(get_db),
 ):
+    """Return published public-visibility content for unauthenticated viewers."""
     try:
         org_id = int(organizationId)
     except (ValueError, TypeError):
@@ -258,54 +283,58 @@ async def public_content(
     if not org:
         return {"ok": False, "error": "Organization not found"}
 
-    # Published projects belonging to this org
+    # Only projects with visibility=public AND is_published
     projects = (
         db.query(Project)
-        .filter(Project.organization_id == org_id, Project.is_published == True)
-        .all()
-    )
-    project_ids = [p.id for p in projects]
-
-    if not project_ids:
-        return {
-            "ok": True,
-            "projects": [],
-            "versions": [],
-            "topics": [],
-            "documents": [],
-        }
-
-    # Versions
-    versions = (
-        db.query(ProjectVersion)
-        .filter(ProjectVersion.project_id.in_(project_ids))
-        .all()
-    )
-
-    # Topics
-    topics = (
-        db.query(Topic)
-        .filter(Topic.project_id.in_(project_ids))
-        .all()
-    )
-
-    # Published documents (public visibility)
-    documents = (
-        db.query(Document)
         .filter(
-            Document.project_id.in_(project_ids),
-            Document.is_published == True,
+            Project.organization_id == org_id,
+            Project.visibility == "public",
+            Project.is_published == True,
         )
         .all()
     )
+    project_ids = [p.id for p in projects]
+    payload = _content_payload(project_ids, db)
+    return {"ok": True, "projects": [_project_dict(p) for p in projects], **payload}
 
-    return {
-        "ok": True,
-        "projects": [_project_dict(p) for p in projects],
-        "versions": [_version_dict(v) for v in versions],
-        "topics": [_topic_dict(t) for t in topics],
-        "documents": [_doc_dict(d) for d in documents],
-    }
+
+@router.get("/api/external-content")
+async def external_content(
+    organizationId: str = Query(...),
+    request: Request = None,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_current_user_optional),
+):
+    """Return external-visibility content for authenticated invited guests."""
+    if not user:
+        return {"ok": False, "error": "Authentication required"}
+
+    try:
+        org_id = int(organizationId)
+    except (ValueError, TypeError):
+        return {"ok": False, "error": "Invalid organizationId"}
+
+    # Find external projects this user has been explicitly invited to
+    memberships = (
+        db.query(ProjectMember)
+        .filter(ProjectMember.user_id == user.id)
+        .all()
+    )
+    invited_project_ids = {m.project_id for m in memberships}
+
+    projects = (
+        db.query(Project)
+        .filter(
+            Project.organization_id == org_id,
+            Project.visibility == "external",
+            Project.is_published == True,
+            Project.id.in_(invited_project_ids),
+        )
+        .all()
+    )
+    project_ids = [p.id for p in projects]
+    payload = _content_payload(project_ids, db)
+    return {"ok": True, "projects": [_project_dict(p) for p in projects], **payload}
 
 
 # ---------------------------------------------------------------------------
@@ -491,8 +520,32 @@ async def get_document_by_id(doc_id: int, request: Request, db: Session = Depend
 # ---------------------------------------------------------------------------
 
 @router.get("/api/project-members")
-async def list_project_members(request: Request, db: Session = Depends(get_db)):
-    """Minimal project-members endpoint for the Docs page user check."""
-    # Frontend queries: /api/project-members?filters[user][id][$eq]=X&populate[project]...
-    # For now return empty — this prevents 404 and the Docs page proceeds.
-    return {"data": []}
+async def list_project_members(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_current_user_optional),
+):
+    """Return project memberships for the current user."""
+    if not user:
+        return {"data": []}
+
+    params = dict(request.query_params)
+    parsed = _parse_strapi_filters(params)
+
+    # Filter by requesting user (ignore any user filter from query — always scope to auth user)
+    memberships = (
+        db.query(ProjectMember)
+        .filter(ProjectMember.user_id == user.id)
+        .all()
+    )
+
+    result = []
+    for m in memberships:
+        result.append({
+            "id": m.id,
+            "project_id": m.project_id,
+            "user_id": m.user_id,
+            "role": m.role,
+            "project": {"data": {"id": m.project_id}},
+        })
+    return {"data": result}
