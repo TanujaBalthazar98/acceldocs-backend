@@ -8,13 +8,16 @@ Also regenerates zensical.toml after content changes.
 """
 
 import logging
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import git
 
 from app.config import settings
-from app.publishing.mkdocs_gen import write_zensical_toml, generate_mkdocs_yml_content
+from app.publishing.mkdocs_gen import write_zensical_toml
 
 # Module-level dict: callers can set branding before publishing so the
 # generated config reflects the organization's theme.
@@ -24,63 +27,6 @@ logger = logging.getLogger(__name__)
 
 PREVIEW_BRANCH = "docs-preview"
 MAIN_BRANCH = "main"
-
-# GitHub Actions workflow that builds the docs with MkDocs Material and
-# deploys to GitHub Pages via the official actions/deploy-pages action.
-_DOCS_WORKFLOW = """\
-name: Deploy Documentation
-
-on:
-  push:
-    branches: ["main"]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
-        with:
-          python-version: "3.x"
-      - name: Install MkDocs Material
-        run: pip install mkdocs-material pymdown-extensions
-      - name: Build documentation
-        run: mkdocs build
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: ./site
-
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - uses: actions/deploy-pages@v4
-        id: deployment
-"""
-
-
-def _ensure_workflow(repo_path: Path) -> list[str]:
-    """Write the GitHub Actions workflow file if absent. Returns new rel paths."""
-    wf_dir = repo_path / ".github" / "workflows"
-    wf_path = wf_dir / "deploy.yml"
-    if wf_path.exists():
-        return []
-    wf_dir.mkdir(parents=True, exist_ok=True)
-    wf_path.write_text(_DOCS_WORKFLOW, encoding="utf-8")
-    return [str(wf_path.relative_to(repo_path))]
 
 
 def get_repo() -> git.Repo:
@@ -138,20 +84,11 @@ def publish_document(
 
         cfg_path = write_zensical_toml(repo_path, **_current_branding)
 
-        # Write mkdocs.yml for GitHub Actions CI build
-        mkdocs_path = repo_path / "mkdocs.yml"
-        mkdocs_path.write_text(generate_mkdocs_yml_content(**_current_branding), encoding="utf-8")
-
-        # Write GitHub Actions workflow if not already present
-        workflow_paths = _ensure_workflow(repo_path)
-
         # Track all generated files
         files_to_add = [
             rel_path,
             str(cfg_path.relative_to(repo_path)),
-            "mkdocs.yml",
             *index_paths,
-            *workflow_paths,
         ]
         # Also add custom CSS if it was generated
         css_path = repo_path / "docs" / "stylesheets" / "extra.css"
@@ -226,6 +163,90 @@ def unpublish_from_production(
         return None
     finally:
         _restore_branch(repo if "repo" in locals() else None, active_branch)
+
+
+def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool:
+    """Build the docs site with zensical and push the HTML to the gh-pages branch.
+
+    Steps:
+      1. Run zensical.build() to generate site/ in repo_path
+      2. Clone (or init) an isolated gh-pages worktree into a temp dir
+      3. Replace its contents with site/
+      4. Commit and force-push to gh-pages on the remote
+    """
+    toml_path = repo_path / "zensical.toml"
+    if not toml_path.exists():
+        logger.error("deploy_to_gh_pages: zensical.toml not found at %s", toml_path)
+        return False
+
+    # --- 1. Build ---
+    try:
+        result = subprocess.run(
+            [
+                "python", "-c",
+                "import sys, zensical; zensical.build(sys.argv[1], True)",
+                str(toml_path),
+            ],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            logger.error("zensical build failed (rc=%s): %s", result.returncode, result.stderr)
+            return False
+        logger.info("zensical build output: %s", result.stdout.strip())
+    except Exception:
+        logger.exception("zensical build raised an exception")
+        return False
+
+    site_dir = repo_path / "site"
+    if not site_dir.exists() or not any(site_dir.iterdir()):
+        logger.error("deploy_to_gh_pages: site/ is empty after build")
+        return False
+
+    # --- 2. Clone gh-pages into a temp dir (or init fresh) ---
+    with tempfile.TemporaryDirectory(prefix="gh-pages-") as tmpdir:
+        tmp_path = Path(tmpdir)
+        try:
+            gh_repo = git.Repo.clone_from(
+                remote_url, str(tmp_path), branch="gh-pages", depth=1
+            )
+            logger.info("Cloned existing gh-pages branch into %s", tmpdir)
+            # Clear all files except .git
+            for item in list(tmp_path.iterdir()):
+                if item.name == ".git":
+                    continue
+                shutil.rmtree(item) if item.is_dir() else item.unlink()
+        except git.GitCommandError:
+            logger.info("gh-pages branch not found remotely — initialising fresh repo")
+            gh_repo = git.Repo.init(str(tmp_path))
+            gh_repo.create_remote("origin", remote_url)
+
+        # --- 3. Copy site/ contents in ---
+        for item in site_dir.iterdir():
+            dest = tmp_path / item.name
+            if item.is_dir():
+                shutil.copytree(str(item), str(dest))
+            else:
+                shutil.copy2(str(item), str(dest))
+
+        # Prevent GitHub Pages from running Jekyll on our pre-built HTML
+        (tmp_path / ".nojekyll").touch()
+
+        # --- 4. Commit and push ---
+        gh_repo.git.add("--all")
+        if not gh_repo.is_dirty(untracked_files=True):
+            logger.info("deploy_to_gh_pages: nothing changed in gh-pages")
+            return True
+        gh_repo.index.commit("Deploy documentation site")
+        try:
+            gh_repo.remotes.origin.push("HEAD:refs/heads/gh-pages", force=True)
+            logger.info("Pushed gh-pages to %s", remote_url.split("@")[-1])
+            return True
+        except Exception:
+            logger.exception("Failed to push gh-pages")
+            return False
 
 
 def push_branch(branch: str = MAIN_BRANCH) -> bool:

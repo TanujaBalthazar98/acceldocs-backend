@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session, joinedload
 from app.database import get_db
 from app.middleware.auth import get_current_user_optional
 from app.models import Document, Organization, OrgRole, Project, User
-from app.publishing.git_publisher import push_branch
+from app.publishing.git_publisher import push_branch, deploy_to_gh_pages
+from app.config import settings as _settings
 from app.services.documents import _publish_to_git
 from app.services.encryption import get_encryption_service
 
@@ -97,34 +98,45 @@ async def publish_mkdocs(
     if published > 0:
         db.commit()
 
-    # Push to GitHub so the Actions workflow builds and deploys the site
+    # Build with zensical locally and push the pre-built HTML to gh-pages
     push_ok = False
     push_error: str | None = None
     if published > 0 and org and org.github_repo_full_name and org.github_token_encrypted:
         try:
-            token = get_encryption_service().decrypt(org.github_token_encrypted)
-            # Re-stamp the remote URL with the current token before pushing
+            import requests as _req
+            from pathlib import Path as _Path
             from app.api.github_publish import _set_docs_repo_remote
-            _set_docs_repo_remote(org.github_repo_full_name, token)
-            push_ok = push_branch("main")
+
+            token = get_encryption_service().decrypt(org.github_token_encrypted)
+            full_name = org.github_repo_full_name
+            remote_url_with_token = f"https://oauth2:{token}@github.com/{full_name}.git"
+
+            # Stamp the main-branch remote with the current token so push works
+            _set_docs_repo_remote(full_name, token)
+            push_branch("main")  # push markdown source (best-effort backup)
+
+            # Build with zensical and push pre-built HTML to gh-pages
+            repo_path = _Path(_settings.docs_repo_path)
+            push_ok = deploy_to_gh_pages(repo_path, remote_url_with_token)
+
             if push_ok:
-                # Ensure GitHub Pages is set to deploy via GitHub Actions (not raw branch)
-                import requests as _req
+                # Point GitHub Pages at gh-pages / (raw HTML, no Jekyll build needed)
                 _req.put(
-                    f"https://api.github.com/repos/{org.github_repo_full_name}/pages",
+                    f"https://api.github.com/repos/{full_name}/pages",
                     headers={
                         "Authorization": f"token {token}",
                         "Accept": "application/vnd.github+json",
                         "X-GitHub-Api-Version": "2022-11-28",
                     },
-                    json={"build_type": "workflow"},
+                    json={"source": {"branch": "gh-pages", "path": "/"}},
                     timeout=10,
                 )
+                logger.info("GitHub Pages now serving from gh-pages branch for %s", full_name)
             else:
-                push_error = "Docs committed locally but push to GitHub failed."
+                push_error = "Docs built locally but push to GitHub Pages failed."
         except Exception as exc:
-            logger.warning("Push to GitHub failed: %s", exc)
-            push_error = "Docs committed but push to GitHub failed. Check your GitHub connection."
+            logger.warning("Deploy to gh-pages failed: %s", exc)
+            push_error = "Docs committed but deployment failed. Check your GitHub connection."
     elif published > 0 and not (org and org.github_repo_full_name):
         push_error = "No GitHub repository configured. Connect GitHub in Settings to publish remotely."
 
