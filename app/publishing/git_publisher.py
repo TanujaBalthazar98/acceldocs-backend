@@ -323,16 +323,17 @@ def _current_branch_name(repo: git.Repo) -> str | None:
 
 
 def _restore_branch(repo: git.Repo | None, branch_name: str | None) -> None:
+    """Always leave the repo on main after a publish operation.
+
+    The old "restore to original branch" logic caused the repo to end up on
+    'master' (git's legacy default) after publishing to 'main', making the
+    subsequent Zensical build see only the seed commit instead of doc commits.
+    """
     if repo is None:
         return
     try:
-        target = MAIN_BRANCH
-        if branch_name and branch_name in [b.name for b in repo.branches]:
-            target = branch_name
-        elif MAIN_BRANCH not in [b.name for b in repo.branches] and branch_name:
-            target = branch_name
-        if target in [b.name for b in repo.branches]:
-            repo.heads[target].checkout()
+        if MAIN_BRANCH in [b.name for b in repo.branches]:
+            repo.heads[MAIN_BRANCH].checkout()
     except Exception:
         logger.warning("Failed to restore branch after publish operation")
 
