@@ -124,8 +124,6 @@ def generate_zensical_toml(
     if docs_dir is None:
         docs_dir = Path(settings.docs_repo_path) / "docs"
 
-    nav = generate_nav(docs_dir)
-
     # Build TOML by hand (simple, no extra dependency needed)
     lines: list[str] = []
     lines.append("[project]")
@@ -139,19 +137,10 @@ def generate_zensical_toml(
         lines.append('extra_css = ["stylesheets/extra.css"]')
         lines.append("")
 
-    # Nav
-    if nav:
-        # Convert nav to TOML array-of-tables inline format
-        nav_parts: list[str] = []
-        for item in nav:
-            for label, value in item.items():
-                if isinstance(value, str):
-                    nav_parts.append(f'{{ {_toml_str(label)} = {_toml_str(value)} }}')
-                # Nested nav items are too complex for inline TOML — omit them
-                # and let Zensical auto-derive from directory structure
-        if nav_parts:
-            lines.append(f"nav = [{', '.join(nav_parts)}]")
-            lines.append("")
+    # Nav: intentionally omitted — let Zensical auto-derive navigation
+    # from the docs/ directory structure. Writing an explicit nav (even
+    # just [{"Home": "index.md"}]) overrides auto-discovery and hides
+    # all project/version/doc pages that live in subdirectories.
 
     # Theme
     lines.append("[project.theme]")
