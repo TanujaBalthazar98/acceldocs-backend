@@ -31,24 +31,23 @@ def _resolve_publish_path(doc: Document) -> tuple[str, str, str | None, str]:
         (project_slug, version_slug, section_path_or_none, doc_slug)
     """
     # --- project slug ---
+    # Use only the immediate project — not the full parent chain.
+    # Walking up to the root produces paths like docs/acceldocs/resume/...
+    # which shows the workspace name ("AccelDocs") as a top-level section in
+    # the nav instead of the user's actual project name ("Resume").
     project_slug = "default"
     if doc.project_rel:
-        # If the project is a sub-project, build path: parent-slug/child-slug
-        parts: list[str] = []
-        p: Project | None = doc.project_rel
-        while p is not None:
-            parts.append(p.slug or p.name.lower().replace(" ", "-"))
-            p = p.parent
-        parts.reverse()
-        project_slug = "/".join(parts)
+        p = doc.project_rel
+        project_slug = p.slug or p.name.lower().replace(" ", "-")
     elif doc.project:
-        # Legacy string field
         project_slug = doc.project
 
     # --- version slug ---
+    # Prefer name over slug so "v1.0" (name) is used instead of "v1-0" (slug),
+    # which prevents the folder from rendering as "V1 0" in the nav.
     version_slug = ""
     if doc.project_version:
-        version_slug = doc.project_version.slug or doc.project_version.name
+        version_slug = doc.project_version.name or doc.project_version.slug
     elif doc.version:
         version_slug = doc.version
 
