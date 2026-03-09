@@ -259,10 +259,16 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
         if not project_ids:
             return {"ok": True, "documents": []}
 
+        from sqlalchemy import or_
         documents = db.query(Document).options(
             joinedload(Document.owner)
         ).filter(
-            Document.project_id.in_(project_ids)
+            or_(
+                Document.project_id.in_(project_ids),
+                # Also return docs owned by this user with no project assigned
+                # (e.g. imported via onboarding before a project was created)
+                (Document.owner_id == user.id) & (Document.project_id.is_(None)),
+            )
         ).order_by(Document.display_order, Document.id).all()
 
         doc_list = [_serialize_document(d) for d in documents]
