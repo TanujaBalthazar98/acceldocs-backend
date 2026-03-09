@@ -141,6 +141,13 @@ async def update_project_settings(body: dict, db: Session, user: User | None) ->
         # Fields may be sent at the top level or nested under a "data" key
         fields = {**body, **body.get("data", {})}
 
+        # Check if we're transitioning to published for the first time
+        publishing_now = (
+            "is_published" in fields
+            and fields["is_published"]
+            and not project.is_published
+        )
+
         # Update fields
         updatable_fields = [
             "name", "slug", "description", "drive_folder_id", "drive_parent_id",
@@ -154,6 +161,23 @@ async def update_project_settings(body: dict, db: Session, user: User | None) ->
                 if field in ("name", "slug") and not val:
                     continue
                 setattr(project, field, val)
+
+        # When publishing a project, auto-publish all documents that have content
+        if publishing_now:
+            from app.models import Document
+            docs = (
+                db.query(Document)
+                .filter(
+                    Document.project_id == project_id,
+                    Document.content_html.isnot(None),
+                    Document.content_html != "",
+                )
+                .all()
+            )
+            for doc in docs:
+                doc.is_published = True
+                if not doc.published_content_html:
+                    doc.published_content_html = doc.content_html
 
         db.commit()
 

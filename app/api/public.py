@@ -250,15 +250,21 @@ def _content_payload(project_ids: list[int], db: Session) -> dict:
     if not project_ids:
         return {"projects": [], "versions": [], "topics": [], "documents": []}
 
+    # All versions for the project are shown — no separate version-level published gate
     versions = (
         db.query(ProjectVersion)
-        .filter(ProjectVersion.project_id.in_(project_ids), ProjectVersion.is_published == True)
+        .filter(ProjectVersion.project_id.in_(project_ids))
         .all()
     )
     topics = db.query(Topic).filter(Topic.project_id.in_(project_ids)).all()
+    # Show all documents that have content — project-level is_published is the gate
     documents = (
         db.query(Document)
-        .filter(Document.project_id.in_(project_ids), Document.is_published == True)
+        .filter(
+            Document.project_id.in_(project_ids),
+            Document.content_html.isnot(None),
+            Document.content_html != "",
+        )
         .all()
     )
     return {

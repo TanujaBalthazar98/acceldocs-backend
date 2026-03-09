@@ -65,6 +65,7 @@ async def publish_mkdocs(
     if not project_ids:
         return {"ok": True, "published": 0, "skipped": 0, "errors": 0, "pagesUrl": None}
 
+    # Publish all docs that have content — no individual approval required
     docs = (
         db.query(Document)
         .options(
@@ -74,7 +75,8 @@ async def publish_mkdocs(
         )
         .filter(
             Document.project_id.in_(project_ids),
-            Document.is_published == True,
+            Document.content_html.isnot(None),
+            Document.content_html != "",
         )
         .all()
     )
