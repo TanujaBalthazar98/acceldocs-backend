@@ -320,23 +320,35 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
                 slug_to_id[p.name.lower().replace(" ", "-")] = p.id
         logger.info("[list_documents] slug_to_id keys=%s", list(slug_to_id.keys()))
 
-        # Include all orphan docs. Backfill only maps to org-scoped projects,
-        # so there is no cross-account leak even when owner_id belongs to
-        # another member in the same organization.
+        # Scope orphan query to users in the same org(s) to prevent cross-account leaks
+        from app.models import OrgRole as _OrgRole
+        org_user_ids = {
+            r.user_id
+            for r in db.query(_OrgRole).filter(_OrgRole.organization_id.in_(user_org_ids)).all()
+        }
+
         orphans = db.query(Document).options(
             joinedload(Document.owner)
         ).filter(
             Document.project_id.is_(None),
+            Document.owner_id.in_(org_user_ids),
         ).all()
         logger.info("[list_documents] orphans found: %d — legacy strings: %s",
                      len(orphans),
                      [(d.id, d.title, d.project, d.owner_id) for d in orphans[:10]])
 
+        already_in_docs = {d.id for d in documents}
         backfilled = 0
         for d in orphans:
+            if d.id in already_in_docs:
+                continue
             if d.project and d.project.lower() in slug_to_id:
+                # Backfill via legacy project string → set FK and include
                 d.project_id = slug_to_id[d.project.lower()]
                 backfilled += 1
+                documents.append(d)
+            elif d.owner_id == user.id:
+                # Always surface orphans owned by the current user even without a project
                 documents.append(d)
         if backfilled > 0:
             try:
