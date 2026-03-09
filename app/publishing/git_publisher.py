@@ -165,7 +165,7 @@ def unpublish_from_production(
         _restore_branch(repo if "repo" in locals() else None, active_branch)
 
 
-def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool:
+def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
     """Build the docs site with zensical and push the HTML to the gh-pages branch.
 
     Steps:
@@ -218,7 +218,12 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool:
                 if item.name == ".git":
                     continue
                 shutil.rmtree(item) if item.is_dir() else item.unlink()
-        except git.GitCommandError:
+        except git.GitCommandError as clone_err:
+            err_str = str(clone_err).lower()
+            # Auth failure — don't silently fall through to init
+            if "authentication" in err_str or "403" in err_str or "401" in err_str or "could not read" in err_str:
+                logger.error("GitHub auth failed during clone: %s", clone_err)
+                return f"GitHub authentication failed. Please reconnect your GitHub account with a fresh token. ({clone_err})"
             logger.info("gh-pages branch not found remotely — initialising fresh repo")
             gh_repo = git.Repo.init(str(tmp_path))
             gh_repo.create_remote("origin", remote_url)
@@ -244,9 +249,9 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool:
             gh_repo.remotes.origin.push("HEAD:refs/heads/gh-pages", force=True)
             logger.info("Pushed gh-pages to %s", remote_url.split("@")[-1])
             return True
-        except Exception:
+        except Exception as push_err:
             logger.exception("Failed to push gh-pages")
-            return False
+            return f"Push to gh-pages failed: {push_err}"
 
 
 def push_branch(branch: str = MAIN_BRANCH) -> bool:

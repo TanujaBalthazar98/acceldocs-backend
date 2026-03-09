@@ -119,7 +119,8 @@ async def publish_mkdocs(
 
             # Build with zensical and push pre-built HTML to gh-pages
             repo_path = _Path(_settings.docs_repo_path)
-            push_ok = deploy_to_gh_pages(repo_path, remote_url_with_token)
+            deploy_result = deploy_to_gh_pages(repo_path, remote_url_with_token)
+            push_ok = deploy_result is True
 
             if push_ok:
                 # Point GitHub Pages at gh-pages / (raw HTML, no Jekyll build needed)
@@ -135,7 +136,7 @@ async def publish_mkdocs(
                 )
                 logger.info("GitHub Pages now serving from gh-pages branch for %s", full_name)
             else:
-                push_error = "Docs built locally but push to GitHub Pages failed."
+                push_error = deploy_result if isinstance(deploy_result, str) else "Docs built locally but push to GitHub Pages failed."
         except Exception as exc:
             logger.warning("Deploy to gh-pages failed: %s", exc)
             push_error = "Docs committed but deployment failed. Check your GitHub connection."
