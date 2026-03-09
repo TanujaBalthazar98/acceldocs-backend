@@ -5,7 +5,7 @@ branding (colors, fonts, logo) pulled from the Organization record.
 """
 
 import logging
-import re
+import re as _re
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +67,7 @@ def generate_nav(docs_dir: Path) -> list[dict[str, Any]]:
     ):
         project_nav = _build_folder_nav(project_dir, docs_dir)
         if project_nav:
-            label = project_dir.name.replace("-", " ").replace("_", " ").title()
+            label = _folder_title(project_dir.name)
             nav.append({label: project_nav})
 
     return nav
@@ -94,7 +94,7 @@ def _build_folder_nav(folder: Path, docs_root: Path) -> list[dict[str, Any]]:
     ):
         child_nav = _build_folder_nav(child_dir, docs_root)
         if child_nav:
-            label = child_dir.name.replace("-", " ").replace("_", " ").title()
+            label = _folder_title(child_dir.name)
             entries.append({label: child_nav})
 
     return entries
@@ -357,8 +357,20 @@ def _ensure_folder_indexes(docs_dir: Path) -> None:
         index_md.write_text(_build_index_md(folder, docs_dir, marker), encoding="utf-8")
 
 
+def _folder_title(name: str) -> str:
+    """Convert a slug folder name to a human-readable title.
+
+    Handles version slugs like 'v1-0' → 'V1.0', 'v2-1-3' → 'V2.1.3'.
+    Falls back to title-casing for everything else.
+    """
+    m = _re.match(r"^v(\d+(?:-\d+)*)$", name)
+    if m:
+        return "V" + m.group(1).replace("-", ".")
+    return name.replace("-", " ").replace("_", " ").title()
+
+
 def _build_index_md(folder: Path, docs_dir: Path, marker: str) -> str:
-    title = folder.name.replace("-", " ").replace("_", " ").title()
+    title = _folder_title(folder.name)
     rel_parts = folder.relative_to(docs_dir).parts
     depth = len(rel_parts)
 
@@ -383,14 +395,14 @@ def _build_index_md(folder: Path, docs_dir: Path, marker: str) -> str:
     if child_dirs:
         lines.append("## Folders")
         for d in child_dirs:
-            label = d.name.replace("-", " ").replace("_", " ").title()
+            label = _folder_title(d.name)
             lines.append(f"- [{label}](./{d.name}/)")
         lines.append("")
 
     if child_pages:
         lines.append("## Pages")
         for p in child_pages:
-            label = p.stem.replace("-", " ").replace("_", " ").title()
+            label = _folder_title(p.stem)
             lines.append(f"- [{label}](./{p.stem}/)")
         lines.append("")
 
