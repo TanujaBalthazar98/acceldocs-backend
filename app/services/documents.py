@@ -3,6 +3,7 @@
 import logging
 from datetime import datetime, timezone
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import User, Document, DocumentCache, Organization, Project, ProjectVersion, Topic
@@ -327,11 +328,16 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
             for r in db.query(_OrgRole).filter(_OrgRole.organization_id.in_(user_org_ids)).all()
         }
 
+        # Match orphans owned by any org member OR unowned (synced docs have
+        # owner_id=NULL).  SQL IN does not match NULL, so we need an explicit OR.
         orphans = db.query(Document).options(
             joinedload(Document.owner)
         ).filter(
             Document.project_id.is_(None),
-            Document.owner_id.in_(org_user_ids),
+            or_(
+                Document.owner_id.in_(org_user_ids),
+                Document.owner_id.is_(None),
+            ),
         ).all()
         logger.info("[list_documents] orphans found: %d — legacy strings: %s",
                      len(orphans),
