@@ -174,6 +174,19 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
       3. Replace its contents with site/
       4. Commit and force-push to gh-pages on the remote
     """
+    # Always build from the main branch so doc commits are included,
+    # not from whatever branch _restore_branch left the repo on (may be "master").
+    try:
+        _build_repo = git.Repo(repo_path)
+        if MAIN_BRANCH in [b.name for b in _build_repo.branches]:
+            _build_repo.heads[MAIN_BRANCH].checkout()
+        elif _build_repo.branches:
+            # Fallback: rename whatever branch exists to main
+            _build_repo.active_branch.rename(MAIN_BRANCH)
+            _build_repo.heads[MAIN_BRANCH].checkout()
+    except Exception as _br_err:
+        logger.warning("Could not checkout %s before build: %s", MAIN_BRANCH, _br_err)
+
     toml_path = repo_path / "zensical.toml"
     if not toml_path.exists():
         # Last-resort: generate the config now so the build doesn't fail
@@ -360,3 +373,9 @@ def _ensure_seed_commit(repo: git.Repo, repo_path: Path) -> None:
     cfg_path = write_zensical_toml(repo_path, **_current_branding)
     repo.index.add(["docs/index.md", str(cfg_path.relative_to(repo_path))])
     repo.index.commit("Initial docs structure")
+    # Ensure the branch is named "main", not "master" (git default varies by version)
+    try:
+        if repo.active_branch.name != MAIN_BRANCH:
+            repo.active_branch.rename(MAIN_BRANCH)
+    except Exception:
+        pass

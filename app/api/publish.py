@@ -263,8 +263,11 @@ async def publish_mkdocs(
             if not _branding.get("site_name"):
                 _branding["site_name"] = org.name or "Documentation"
             _repo_path = _Path(_settings.docs_repo_path)
-            _cfg = write_zensical_toml(_repo_path, **_branding)
             _repo = get_repo()
+            # Checkout main so the toml commit lands on the right branch
+            if _gp.MAIN_BRANCH in [b.name for b in _repo.branches]:
+                _repo.heads[_gp.MAIN_BRANCH].checkout()
+            _cfg = write_zensical_toml(_repo_path, **_branding)
             _repo.index.add([str(_cfg.relative_to(_repo_path))])
             if _repo.is_dirty():
                 _repo.index.commit("Update zensical.toml configuration")
