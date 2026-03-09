@@ -3,6 +3,7 @@
 import logging
 from datetime import datetime, timezone
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import User, Document, DocumentCache, Organization, Project, ProjectVersion, Topic
@@ -295,11 +296,17 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
                 slug_to_id[p.name.lower()] = p.id
                 slug_to_id[p.name.lower().replace(" ", "-")] = p.id
 
+        # Include docs owned by this user OR unowned docs (created by sync
+        # which doesn't set owner_id).  The backfill below only assigns them
+        # to org-scoped projects, so there's no cross-account leak.
         orphans = db.query(Document).options(
             joinedload(Document.owner)
         ).filter(
-            Document.owner_id == user.id,
             Document.project_id.is_(None),
+            or_(
+                Document.owner_id == user.id,
+                Document.owner_id.is_(None),
+            ),
         ).all()
 
         backfilled = 0
