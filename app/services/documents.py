@@ -249,7 +249,12 @@ def _unpublish_from_git(doc: Document, db=None) -> str | None:
 
 
 async def list_documents(body: dict, db: Session, user: User | None) -> dict:
-    """Get all documents for projects."""
+    """Get all documents for projects.
+
+    Returns documents that belong to the given project IDs (by FK or legacy
+    string match).  Only returns documents within the user's own organization
+    to prevent cross-account data leaks.
+    """
     if not user:
         return {"ok": False, "error": "Authentication required"}
 
@@ -259,35 +264,30 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
         if not project_ids:
             return {"ok": True, "documents": []}
 
-        # Build a slug→id mapping so we can also match docs by legacy string "project" field
+        # ----- Step 1: resolve org-scoped project info -----
+        from app.models import OrgRole
+        org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+        org_id = org_role.organization_id if org_role else None
+
+        # Only allow project IDs that belong to the user's organization
         projects = db.query(Project).filter(Project.id.in_(project_ids)).all()
-        project_slugs = set()
-        for p in projects:
-            if p.slug:
-                project_slugs.add(p.slug.lower())
-            if p.name:
-                project_slugs.add(p.name.lower())
-                # Also add slugified name (name with spaces replaced by dashes)
-                project_slugs.add(p.name.lower().replace(" ", "-"))
+        if org_id:
+            projects = [p for p in projects if p.organization_id == org_id]
+        scoped_project_ids = [p.id for p in projects]
 
-        from sqlalchemy import or_, func
-        conditions = [Document.project_id.in_(project_ids)]
-        # Match docs by legacy string project field (slug or name)
-        if project_slugs:
-            conditions.append(func.lower(Document.project).in_(project_slugs))
-        # Also return docs owned by this user with no project assigned
-        conditions.append(
-            (Document.owner_id == user.id) & (Document.project_id.is_(None))
-        )
+        if not scoped_project_ids:
+            return {"ok": True, "documents": []}
 
+        # ----- Step 2: query documents by FK -----
         documents = db.query(Document).options(
             joinedload(Document.owner)
         ).filter(
-            or_(*conditions)
+            Document.project_id.in_(scoped_project_ids)
         ).order_by(Document.display_order, Document.id).all()
 
-        # Backfill: link orphan docs to their project by slug matching
-        slug_to_id = {}
+        # ----- Step 3: find orphan docs (project_id is NULL) that belong to
+        #       this user and try to backfill them into scoped projects -----
+        slug_to_id: dict[str, int] = {}
         for p in projects:
             if p.slug:
                 slug_to_id[p.slug.lower()] = p.id
@@ -295,13 +295,19 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
                 slug_to_id[p.name.lower()] = p.id
                 slug_to_id[p.name.lower().replace(" ", "-")] = p.id
 
+        orphans = db.query(Document).options(
+            joinedload(Document.owner)
+        ).filter(
+            Document.owner_id == user.id,
+            Document.project_id.is_(None),
+        ).all()
+
         backfilled = 0
-        for d in documents:
-            if d.project_id is None and d.project:
-                matched_id = slug_to_id.get(d.project.lower())
-                if matched_id:
-                    d.project_id = matched_id
-                    backfilled += 1
+        for d in orphans:
+            if d.project and d.project.lower() in slug_to_id:
+                d.project_id = slug_to_id[d.project.lower()]
+                backfilled += 1
+                documents.append(d)
         if backfilled > 0:
             try:
                 db.commit()
@@ -309,11 +315,19 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
             except Exception:
                 db.rollback()
 
-        doc_list = [_serialize_document(d) for d in documents]
+        # Deduplicate (in case an orphan was already picked up by FK query)
+        seen_ids: set[int] = set()
+        unique_docs = []
+        for d in documents:
+            if d.id not in seen_ids:
+                seen_ids.add(d.id)
+                unique_docs.append(d)
 
+        doc_list = [_serialize_document(d) for d in unique_docs]
         return {"ok": True, "documents": doc_list}
 
     except Exception as e:
+        logger.exception("list_documents failed")
         return {"ok": False, "error": str(e)}
 
 
