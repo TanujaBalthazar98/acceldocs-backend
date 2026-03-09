@@ -259,17 +259,55 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
         if not project_ids:
             return {"ok": True, "documents": []}
 
-        from sqlalchemy import or_
+        # Build a slug→id mapping so we can also match docs by legacy string "project" field
+        projects = db.query(Project).filter(Project.id.in_(project_ids)).all()
+        project_slugs = set()
+        for p in projects:
+            if p.slug:
+                project_slugs.add(p.slug.lower())
+            if p.name:
+                project_slugs.add(p.name.lower())
+                # Also add slugified name (name with spaces replaced by dashes)
+                project_slugs.add(p.name.lower().replace(" ", "-"))
+
+        from sqlalchemy import or_, func
+        conditions = [Document.project_id.in_(project_ids)]
+        # Match docs by legacy string project field (slug or name)
+        if project_slugs:
+            conditions.append(func.lower(Document.project).in_(project_slugs))
+        # Also return docs owned by this user with no project assigned
+        conditions.append(
+            (Document.owner_id == user.id) & (Document.project_id.is_(None))
+        )
+
         documents = db.query(Document).options(
             joinedload(Document.owner)
         ).filter(
-            or_(
-                Document.project_id.in_(project_ids),
-                # Also return docs owned by this user with no project assigned
-                # (e.g. imported via onboarding before a project was created)
-                (Document.owner_id == user.id) & (Document.project_id.is_(None)),
-            )
+            or_(*conditions)
         ).order_by(Document.display_order, Document.id).all()
+
+        # Backfill: link orphan docs to their project by slug matching
+        slug_to_id = {}
+        for p in projects:
+            if p.slug:
+                slug_to_id[p.slug.lower()] = p.id
+            if p.name:
+                slug_to_id[p.name.lower()] = p.id
+                slug_to_id[p.name.lower().replace(" ", "-")] = p.id
+
+        backfilled = 0
+        for d in documents:
+            if d.project_id is None and d.project:
+                matched_id = slug_to_id.get(d.project.lower())
+                if matched_id:
+                    d.project_id = matched_id
+                    backfilled += 1
+        if backfilled > 0:
+            try:
+                db.commit()
+                logger.info("Backfilled project_id for %d orphan documents", backfilled)
+            except Exception:
+                db.rollback()
 
         doc_list = [_serialize_document(d) for d in documents]
 
