@@ -69,6 +69,9 @@ class Organization(Base):
     github_custom_domain: Mapped[str | None] = mapped_column(String(255))
     github_domain_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     last_published_at: Mapped[str | None] = mapped_column(String(50))
+    # Zensical / docs-site configuration
+    analytics_property_id: Mapped[str | None] = mapped_column(String(50))  # Google Analytics G-XXXXXXXX
+    copyright: Mapped[str | None] = mapped_column(String(500))
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

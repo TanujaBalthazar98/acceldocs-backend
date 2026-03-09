@@ -119,6 +119,13 @@ def generate_zensical_toml(
     font_heading: str | None = None,
     font_body: str | None = None,
     custom_css: str | None = None,
+    # Extended branding fields
+    site_url: str | None = None,
+    repo_url: str | None = None,
+    repo_name: str | None = None,
+    copyright: str | None = None,
+    analytics_property_id: str | None = None,
+    social_links: list[dict] | None = None,
 ) -> str:
     """Generate zensical.toml content with org branding."""
     if docs_dir is None:
@@ -130,6 +137,14 @@ def generate_zensical_toml(
     lines.append(f"site_name = {_toml_str(site_name)}")
     if site_description:
         lines.append(f"site_description = {_toml_str(site_description)}")
+    if site_url:
+        lines.append(f"site_url = {_toml_str(site_url)}")
+    if repo_url:
+        lines.append(f"repo_url = {_toml_str(repo_url)}")
+    if repo_name:
+        lines.append(f"repo_name = {_toml_str(repo_name)}")
+    if copyright:
+        lines.append(f"copyright = {_toml_str(copyright)}")
     lines.append("")
 
     # Extra CSS for custom branding
@@ -205,6 +220,25 @@ def generate_zensical_toml(
     lines.append("toc = {}")
     lines.append("")
 
+    # Analytics
+    if analytics_property_id:
+        lines.append("[project.extra.analytics]")
+        lines.append('provider = "google"')
+        lines.append(f"property = {_toml_str(analytics_property_id)}")
+        lines.append("")
+
+    # Social links
+    if social_links:
+        for link in social_links:
+            if link.get("link"):
+                lines.append("[[project.extra.social]]")
+                lines.append(f"link = {_toml_str(link['link'])}")
+                if link.get("icon"):
+                    lines.append(f"icon = {_toml_str(link['icon'])}")
+                if link.get("name"):
+                    lines.append(f"name = {_toml_str(link['name'])}")
+                lines.append("")
+
     return "\n".join(lines)
 
 
@@ -218,6 +252,12 @@ def write_zensical_toml(
     font_heading: str | None = None,
     font_body: str | None = None,
     custom_css: str | None = None,
+    site_url: str | None = None,
+    repo_url: str | None = None,
+    repo_name: str | None = None,
+    copyright: str | None = None,
+    analytics_property_id: str | None = None,
+    social_links: list[dict] | None = None,
 ) -> Path:
     """Generate and write zensical.toml to the repo root."""
     if repo_path is None:
@@ -235,6 +275,12 @@ def write_zensical_toml(
         font_heading=font_heading,
         font_body=font_body,
         custom_css=custom_css,
+        site_url=site_url,
+        repo_url=repo_url,
+        repo_name=repo_name,
+        copyright=copyright,
+        analytics_property_id=analytics_property_id,
+        social_links=social_links,
     )
 
     toml_path = repo_path / "zensical.toml"

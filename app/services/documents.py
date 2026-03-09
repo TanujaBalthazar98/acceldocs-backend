@@ -139,6 +139,23 @@ def _set_branding_from_doc(doc: Document, db) -> None:
             if proj and proj.organization_id:
                 org = db.get(Organization, proj.organization_id)
         if org:
+            # Parse social_links from custom_links JSON if it's a list of link objects
+            social_links = None
+            try:
+                import json as _json
+                cl = _json.loads(org.custom_links or "[]")
+                if isinstance(cl, list) and cl and isinstance(cl[0], dict) and "link" in cl[0]:
+                    social_links = cl
+            except Exception:
+                pass
+
+            # Derive repo_url / repo_name from github_repo_full_name
+            repo_url = None
+            repo_name = None
+            if org.github_repo_full_name:
+                repo_url = f"https://github.com/{org.github_repo_full_name}"
+                repo_name = org.github_repo_full_name
+
             git_publisher._current_branding = {
                 "site_name": org.name or "Documentation",
                 "site_description": org.tagline or "",
@@ -147,6 +164,12 @@ def _set_branding_from_doc(doc: Document, db) -> None:
                 "font_heading": org.font_heading or None,
                 "font_body": org.font_body or None,
                 "custom_css": org.custom_css or None,
+                "site_url": org.github_pages_url or None,
+                "repo_url": repo_url,
+                "repo_name": repo_name,
+                "copyright": getattr(org, "copyright", None),
+                "analytics_property_id": getattr(org, "analytics_property_id", None),
+                "social_links": social_links,
             }
     except Exception:
         pass  # non-fatal — publish with defaults

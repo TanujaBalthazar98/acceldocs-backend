@@ -171,6 +171,8 @@ async def get_organization(body: dict, db: Session, user: User | None) -> dict:
             "openapi_spec_json": org.openapi_spec_json,
             "openapi_spec_url": org.openapi_spec_url,
             "drive_folder_id": org.drive_folder_id,
+            "analytics_property_id": getattr(org, "analytics_property_id", None),
+            "copyright": getattr(org, "copyright", None),
             "owner_id": org.owner_id,
             "members": member_list
         }
@@ -221,7 +223,8 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
             "logo_url", "tagline", "primary_color", "secondary_color", "accent_color",
             "font_heading", "font_body", "custom_css", "hero_title", "hero_description",
             "show_search_on_landing", "show_featured_projects", "custom_links",
-            "mcp_enabled", "openapi_spec_json", "openapi_spec_url", "drive_folder_id"
+            "mcp_enabled", "openapi_spec_json", "openapi_spec_url", "drive_folder_id",
+            "analytics_property_id", "copyright",
         ]
 
         # Merge nested "data" dict into body so callers can use either format

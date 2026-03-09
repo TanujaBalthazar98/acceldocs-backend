@@ -343,10 +343,12 @@ async def publish_mkdocs(
         _rp = _P(_settings.docs_repo_path)
         _log = _sp.run(["git", "log", "--oneline", "-5"], cwd=str(_rp), capture_output=True, text=True, timeout=10)
         _files = _sp.run(["find", "docs", "-name", "*.md"], cwd=str(_rp), capture_output=True, text=True, timeout=10)
+        _toml_content = (_rp / "zensical.toml").read_text(encoding="utf-8") if (_rp / "zensical.toml").exists() else None
         result["_debug"] = {
             "docsRepoPath": str(_rp.resolve()),
             "gitLog": _log.stdout.strip().splitlines(),
             "mdFiles": _files.stdout.strip().splitlines(),
+            "zensicalToml": _toml_content,
         }
     except Exception as _dbg_e:
         result["_debug"] = {"error": str(_dbg_e)}
