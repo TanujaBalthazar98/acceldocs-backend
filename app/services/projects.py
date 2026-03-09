@@ -138,14 +138,18 @@ async def update_project_settings(body: dict, db: Session, user: User | None) ->
         if not project:
             return {"ok": False, "error": "Project not found"}
 
+        # Fields may be sent at the top level or nested under a "data" key
+        fields = {**body, **body.get("data", {})}
+
         # Update fields
         updatable_fields = [
             "name", "slug", "description", "drive_folder_id", "drive_parent_id",
-            "visibility", "default_visibility", "require_approval", "show_version_switcher"
+            "visibility", "default_visibility", "require_approval",
+            "show_version_switcher", "is_published",
         ]
         for field in updatable_fields:
-            if field in body:
-                setattr(project, field, body[field])
+            if field in fields:
+                setattr(project, field, fields[field])
 
         db.commit()
 
