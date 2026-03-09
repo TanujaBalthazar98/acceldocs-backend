@@ -3,7 +3,6 @@
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import User, Document, DocumentCache, Organization, Project, ProjectVersion, Topic
@@ -270,16 +269,18 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
 
         # ----- Step 1: resolve org-scoped project info -----
         from app.models import OrgRole
-        org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
-        org_id = org_role.organization_id if org_role else None
-        logger.info("[list_documents] org_id=%s", org_id)
+        org_roles = db.query(OrgRole).filter(OrgRole.user_id == user.id).all()
+        user_org_ids = {r.organization_id for r in org_roles}
+        logger.info("[list_documents] user_org_ids=%s", sorted(user_org_ids))
+        if not user_org_ids:
+            logger.warning("[list_documents] user has no org memberships")
+            return {"ok": True, "documents": []}
 
-        # Only allow project IDs that belong to the user's organization
+        # Only allow project IDs that belong to one of the user's organizations
         projects = db.query(Project).filter(Project.id.in_(project_ids)).all()
         logger.info("[list_documents] projects from DB: %s",
                      [(p.id, p.name, p.organization_id) for p in projects])
-        if org_id:
-            projects = [p for p in projects if p.organization_id == org_id]
+        projects = [p for p in projects if p.organization_id in user_org_ids]
         scoped_project_ids = [p.id for p in projects]
         logger.info("[list_documents] scoped_project_ids=%s", scoped_project_ids)
 
@@ -319,17 +320,13 @@ async def list_documents(body: dict, db: Session, user: User | None) -> dict:
                 slug_to_id[p.name.lower().replace(" ", "-")] = p.id
         logger.info("[list_documents] slug_to_id keys=%s", list(slug_to_id.keys()))
 
-        # Include docs owned by this user OR unowned docs (created by sync
-        # which doesn't set owner_id).  The backfill below only assigns them
-        # to org-scoped projects, so there's no cross-account leak.
+        # Include all orphan docs. Backfill only maps to org-scoped projects,
+        # so there is no cross-account leak even when owner_id belongs to
+        # another member in the same organization.
         orphans = db.query(Document).options(
             joinedload(Document.owner)
         ).filter(
             Document.project_id.is_(None),
-            or_(
-                Document.owner_id == user.id,
-                Document.owner_id.is_(None),
-            ),
         ).all()
         logger.info("[list_documents] orphans found: %d — legacy strings: %s",
                      len(orphans),
