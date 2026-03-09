@@ -149,7 +149,11 @@ async def update_project_settings(body: dict, db: Session, user: User | None) ->
         ]
         for field in updatable_fields:
             if field in fields:
-                setattr(project, field, fields[field])
+                val = fields[field]
+                # Skip NOT NULL fields if value is null/empty to avoid constraint violations
+                if field in ("name", "slug") and not val:
+                    continue
+                setattr(project, field, val)
 
         db.commit()
 
