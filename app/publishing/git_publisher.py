@@ -84,6 +84,15 @@ def publish_document(
 
         cfg_path = write_zensical_toml(repo_path, **_current_branding)
 
+        # Refresh homepage index.md if it still holds placeholder text
+        index_md_path = repo_path / "docs" / "index.md"
+        _PLACEHOLDER_HEADINGS = ("# AccelDocs", "# Documentation")
+        if index_md_path.exists():
+            current_heading = index_md_path.read_text(encoding="utf-8").splitlines()[0].strip()
+            if current_heading in _PLACEHOLDER_HEADINGS:
+                site_name = _current_branding.get("site_name") or "Documentation"
+                index_md_path.write_text(f"# {site_name}\n\nWelcome to the documentation.\n", encoding="utf-8")
+
         # Track all generated files
         files_to_add = [
             rel_path,
@@ -94,6 +103,8 @@ def publish_document(
         css_path = repo_path / "docs" / "stylesheets" / "extra.css"
         if css_path.exists():
             files_to_add.append(str(css_path.relative_to(repo_path)))
+        if index_md_path.exists():
+            files_to_add.append(str(index_md_path.relative_to(repo_path)))
 
         repo.index.add(files_to_add)
 
