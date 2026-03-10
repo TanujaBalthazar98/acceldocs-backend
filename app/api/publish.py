@@ -367,3 +367,54 @@ async def publish_mkdocs(
         result["_debug"] = {"error": str(_dbg_e)}
 
     return result
+
+
+@router.get("/publish/debug")
+async def publish_debug():
+    """Quick debug endpoint — show what's in the docs-site repo."""
+    import subprocess as _sp
+    from pathlib import Path as _P
+
+    rp = _P(_settings.docs_repo_path)
+    info: dict = {"docsRepoPath": str(rp.resolve()), "exists": rp.exists()}
+
+    if not rp.exists():
+        return info
+
+    try:
+        log = _sp.run(["git", "log", "--oneline", "-10"], cwd=str(rp),
+                       capture_output=True, text=True, timeout=10)
+        info["gitLog"] = log.stdout.strip().splitlines()
+        info["gitBranch"] = _sp.run(["git", "branch", "-a"], cwd=str(rp),
+                                     capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception as e:
+        info["gitError"] = str(e)
+
+    try:
+        md = _sp.run(["find", "docs", "-name", "*.md", "-type", "f"], cwd=str(rp),
+                      capture_output=True, text=True, timeout=10)
+        info["mdFiles"] = md.stdout.strip().splitlines()
+    except Exception:
+        info["mdFiles"] = []
+
+    toml_path = rp / "zensical.toml"
+    info["hasZensicalToml"] = toml_path.exists()
+    if toml_path.exists():
+        info["zensicalToml"] = toml_path.read_text(encoding="utf-8")[:2000]
+
+    site_dir = rp / "site"
+    info["hasSiteDir"] = site_dir.exists()
+    if site_dir.exists():
+        site_files = list(site_dir.rglob("*"))
+        info["siteFileCount"] = len(site_files)
+        info["siteFiles"] = [str(f.relative_to(site_dir)) for f in site_files[:30]]
+
+    # Test zensical import
+    try:
+        _sp.run(["python", "-c", "import zensical; print(zensical.__version__)"],
+                capture_output=True, text=True, timeout=10)
+        info["zensicalInstalled"] = True
+    except Exception:
+        info["zensicalInstalled"] = False
+
+    return info
