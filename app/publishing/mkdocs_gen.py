@@ -127,6 +127,8 @@ def generate_zensical_toml(
     copyright: str | None = None,
     analytics_property_id: str | None = None,
     social_links: list[dict] | None = None,
+    site_author: str | None = None,
+    edit_uri: str | None = None,
 ) -> str:
     """Generate zensical.toml content with org branding."""
     if docs_dir is None:
@@ -138,12 +140,16 @@ def generate_zensical_toml(
     lines.append(f"site_name = {_toml_str(site_name)}")
     if site_description:
         lines.append(f"site_description = {_toml_str(site_description)}")
+    if site_author:
+        lines.append(f"site_author = {_toml_str(site_author)}")
     if site_url:
         lines.append(f"site_url = {_toml_str(site_url)}")
     if repo_url:
         lines.append(f"repo_url = {_toml_str(repo_url)}")
     if repo_name:
         lines.append(f"repo_name = {_toml_str(repo_name)}")
+    if edit_uri:
+        lines.append(f"edit_uri = {_toml_str(edit_uri)}")
     if copyright:
         lines.append(f"copyright = {_toml_str(copyright)}")
     lines.append("")
@@ -158,8 +164,9 @@ def generate_zensical_toml(
     # just [{"Home": "index.md"}]) overrides auto-discovery and hides
     # all project/version/doc pages that live in subdirectories.
 
-    # Theme
+    # Theme — use the "modern" variant for Inter font + lucide icons
     lines.append("[project.theme]")
+    lines.append('variant = "modern"')
     lines.append('language = "en"')
     lines.append("features = [")
     for feat in [
@@ -219,20 +226,31 @@ def generate_zensical_toml(
         lines.append(f"logo = {_toml_str(logo_url)}")
         lines.append("")
 
-    # Markdown extensions
+    # Markdown extensions — full set that Zensical supports by default
     lines.append("[project.markdown_extensions]")
-    lines.append("tables = {}")
+    lines.append("abbr = {}")
     lines.append("admonition = {}")
-    lines.append("footnotes = {}")
+    lines.append('"attr_list" = {}')
     lines.append('"def_list" = {}')
-    lines.append('"pymdownx.tasklist" = {custom_checkbox = true}')
-    lines.append('"pymdownx.highlight" = {anchor_linenums = true}')
-    lines.append('"pymdownx.inlinehilite" = {}')
-    lines.append('"pymdownx.snippets" = {}')
-    lines.append('"pymdownx.superfences" = {custom_fences = [{name = "mermaid", class = "mermaid", format = "!!python/name:pymdownx.superfences.fence_code_format"}]}')
-    lines.append('"pymdownx.tabbed" = {alternate_style = true}')
-    lines.append('"pymdownx.details" = {}')
+    lines.append("footnotes = {}")
+    lines.append('"md_in_html" = {}')
+    lines.append("tables = {}")
     lines.append("toc = {permalink = true}")
+    lines.append('"pymdownx.arithmatex" = {generic = true}')
+    lines.append('"pymdownx.betterem" = {}')
+    lines.append('"pymdownx.caret" = {}')
+    lines.append('"pymdownx.details" = {}')
+    lines.append('"pymdownx.highlight" = {anchor_linenums = true, line_spans = "__span", pygments_lang_class = true}')
+    lines.append('"pymdownx.inlinehilite" = {}')
+    lines.append('"pymdownx.keys" = {}')
+    lines.append('"pymdownx.magiclink" = {}')
+    lines.append('"pymdownx.mark" = {}')
+    lines.append('"pymdownx.smartsymbols" = {}')
+    lines.append('"pymdownx.snippets" = {}')
+    lines.append('"pymdownx.superfences" = {custom_fences = [{name = "mermaid", class = "mermaid"}]}')
+    lines.append('"pymdownx.tabbed" = {alternate_style = true, combine_header_slug = true}')
+    lines.append('"pymdownx.tasklist" = {custom_checkbox = true}')
+    lines.append('"pymdownx.tilde" = {}')
     lines.append("")
 
     # Analytics
@@ -274,6 +292,8 @@ def write_zensical_toml(
     copyright: str | None = None,
     analytics_property_id: str | None = None,
     social_links: list[dict] | None = None,
+    site_author: str | None = None,
+    edit_uri: str | None = None,
 ) -> Path:
     """Generate and write zensical.toml to the repo root."""
     if repo_path is None:
@@ -298,6 +318,8 @@ def write_zensical_toml(
         copyright=copyright,
         analytics_property_id=analytics_property_id,
         social_links=social_links,
+        site_author=site_author,
+        edit_uri=edit_uri,
     )
 
     toml_path = repo_path / "zensical.toml"
