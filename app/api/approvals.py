@@ -235,10 +235,16 @@ async def perform_action(
     if body.action == "approve":
         try:
             _set_branding_from_doc(doc, db)
-            html = doc.content_html or doc.published_content_html
-            if not html:
+            html = None
+            try:
                 service = await _get_drive_service_for_doc(doc, db, fallback_user=actor)
                 html = export_doc_as_html(service, doc.google_doc_id)
+            except Exception as drive_err:
+                _log.warning("Drive fetch failed for doc %s, falling back to cache: %s", doc.id, drive_err)
+            if not html:
+                html = doc.content_html or doc.published_content_html
+            if not html:
+                raise ValueError("No content available to publish")
             markdown = convert_html_to_markdown(html)
             project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
             commit_sha = publish_to_production(
@@ -413,10 +419,16 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
     if action == "approve":
         try:
             _set_branding_from_doc(doc, db)
-            html = doc.content_html or doc.published_content_html
-            if not html:
+            html = None
+            try:
                 service = await _get_drive_service_for_doc(doc, db, fallback_user=actor)
                 html = export_doc_as_html(service, doc.google_doc_id)
+            except Exception as drive_err:
+                _log.warning("Drive fetch failed for doc %s, falling back to cache: %s", doc.id, drive_err)
+            if not html:
+                html = doc.content_html or doc.published_content_html
+            if not html:
+                return {"ok": False, "error": "No content available to publish"}
             markdown = convert_html_to_markdown(html)
             project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
             commit_sha = publish_to_production(
