@@ -65,23 +65,43 @@ def generate_nav(docs_dir: Path) -> list[dict[str, Any]]:
     and no direct pages, the child is promoted up to avoid unnecessary
     nesting (e.g. "New Project > V1.0 > Release Notes" becomes just
     "Release Notes" if each level has a single child).
+
+    When the org has only one project, the project's contents are promoted
+    directly to the top level (no wrapper section for the project name).
     """
     if not docs_dir.exists():
         return []
 
+    project_dirs = sorted(
+        p for p in docs_dir.iterdir()
+        if p.is_dir() and not p.name.startswith(".")
+    )
+
     nav: list[dict[str, Any]] = []
+
+    if len(project_dirs) == 1:
+        # Single project: promote its contents directly to the top level.
+        # No need for a "Home" entry or a wrapping project section.
+        single_dir = project_dirs[0]
+        project_nav = _build_folder_nav(single_dir, docs_dir)
+        if project_nav:
+            # Flatten any single-child wrappers (e.g. version folders)
+            _, flattened_nav = _flatten_single_child(
+                _folder_title(single_dir.name), project_nav
+            )
+            # Promote the inner items directly into the top-level nav
+            for item in flattened_nav:
+                nav.append(item)
+        return nav
+
+    # Multiple projects: use Home + project sections
     if (docs_dir / "index.md").exists():
         nav.append({"Home": "index.md"})
 
-    for project_dir in sorted(
-        p for p in docs_dir.iterdir()
-        if p.is_dir() and not p.name.startswith(".")
-    ):
+    for project_dir in project_dirs:
         project_nav = _build_folder_nav(project_dir, docs_dir)
         if project_nav:
             label = _folder_title(project_dir.name)
-            # Flatten: if this folder has exactly one child that is itself
-            # a folder section (dict with list value), promote it up.
             flattened_label, flattened_nav = _flatten_single_child(label, project_nav)
             nav.append({flattened_label: flattened_nav})
 

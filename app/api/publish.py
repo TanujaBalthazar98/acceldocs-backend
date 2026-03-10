@@ -190,6 +190,35 @@ async def publish_mkdocs(
     logger.info("Publish: found %d docs total (%d with FK, %d orphans backfilled)",
                 len(all_docs), len(docs_with_pid), backfilled)
 
+    # ----- CRITICAL: Clean docs/ directory before publishing -----
+    # The docs-site/ directory on Railway is shared across all orgs.
+    # Without cleaning, docs from a previous org's publish remain and
+    # contaminate the nav / published site of the current org.
+    try:
+        from pathlib import Path as _CleanPath
+        import shutil as _shutil
+        _docs_root = _CleanPath(_settings.docs_repo_path) / "docs"
+        if _docs_root.exists():
+            for _child in list(_docs_root.iterdir()):
+                # Keep top-level index.md (will be regenerated), remove everything else
+                if _child.name == "index.md":
+                    continue
+                if _child.is_dir():
+                    _shutil.rmtree(_child)
+                else:
+                    _child.unlink()
+            # Stage the removals in git so the clean state is committed
+            try:
+                _repo = get_repo()
+                _repo.git.add("--all")
+                if _repo.is_dirty(untracked_files=True):
+                    _repo.index.commit(f"Clean docs for org {org_id}")
+            except Exception:
+                pass
+            logger.info("Publish: cleaned docs/ directory for org %s", org_id)
+    except Exception as _clean_err:
+        logger.warning("Could not clean docs/ before publish: %s", _clean_err)
+
     # ----- Publish each doc -----
     published = 0
     skipped = 0
@@ -260,19 +289,14 @@ async def publish_mkdocs(
             from pathlib import Path as _Path
             from app.publishing import git_publisher as _gp
             _branding = dict(_gp._current_branding) if _gp._current_branding else {}
-            if not _branding.get("site_name"):
-                # Prefer the leaf project name (e.g. "Resume") over the org/workspace name.
-                # Leaf projects are those without children or those that actually have docs.
-                _leaf_projects = [p for p in projects if not p.parent_id]
-                if len(_leaf_projects) == 1:
-                    _branding["site_name"] = _leaf_projects[0].name
-                else:
-                    # Multiple top-level projects or none: use most specific name available
-                    _child_projects = [p for p in projects if p.parent_id]
-                    if _child_projects:
-                        _branding["site_name"] = _child_projects[0].name
-                    else:
-                        _branding["site_name"] = org.name or "Documentation"
+            # Site name: use the org name as the site title since this is the
+            # org's documentation site.  If the org has only one leaf project,
+            # use that project's name instead (single-project orgs).
+            _leaf_projects = [p for p in projects if not p.parent_id]
+            if len(_leaf_projects) == 1:
+                _branding["site_name"] = _leaf_projects[0].name
+            else:
+                _branding["site_name"] = org.name or "Documentation"
             logger.info("Publish: final branding site_name=%s, _current_branding=%s",
                         _branding.get("site_name"), bool(_gp._current_branding))
             _repo_path = _Path(_settings.docs_repo_path)
