@@ -187,11 +187,15 @@ def _get_org_for_doc(doc: Document, db) -> Organization | None:
 
 
 def _auto_deploy_if_public(doc: Document, db) -> None:
-    """If the document's project is public and the org has GitHub configured,
-    build with zensical and push the pre-built site to gh-pages automatically."""
+    """If the org has GitHub configured, build with Zensical and push to gh-pages.
+
+    Previously gated on proj.visibility == 'public', but this prevented
+    deployment for 'internal' and 'external' projects. Now deploys for any
+    project belonging to an org with GitHub Pages configured.
+    """
     try:
         proj = db.get(Project, doc.project_id) if doc.project_id else None
-        if not proj or proj.visibility != "public":
+        if not proj:
             return
 
         org = db.get(Organization, proj.organization_id) if proj.organization_id else None
@@ -214,6 +218,41 @@ def _auto_deploy_if_public(doc: Document, db) -> None:
             logger.warning("Auto-deploy gh-pages failed for doc %s", doc.id)
     except Exception:
         logger.exception("Auto-deploy gh-pages raised for doc %s", doc.id)
+
+
+def _publish_to_preview(doc: Document, db=None) -> str | None:
+    """Convert document HTML to Markdown and commit to Git preview branch.
+
+    Called when a document is submitted for review so that the content is
+    available for reviewers and promote_preview_to_production works on approval.
+    """
+    try:
+        from app.conversion.html_to_md import convert_html_to_markdown
+        from app.publishing.git_publisher import publish_to_preview
+
+        _set_branding_from_doc(doc, db)
+
+        html = doc.content_html or doc.published_content_html
+        if not html:
+            html = _fetch_html_from_drive(doc)
+        if not html:
+            logger.warning("No HTML content for preview of doc %s (%s)", doc.id, doc.title)
+            return None
+
+        markdown = convert_html_to_markdown(html)
+        if not markdown.strip():
+            logger.warning("Empty markdown after conversion for preview doc %s", doc.id)
+            return None
+
+        project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
+
+        commit_sha = publish_to_preview(project_slug, version_slug, section, doc_slug, markdown)
+        if commit_sha:
+            logger.info("Published preview for doc %s (%s): %s", doc.id, doc.title, commit_sha[:8])
+        return commit_sha
+    except Exception:
+        logger.exception("Failed to publish preview for doc %s", doc.id)
+        return None
 
 
 def _publish_to_git(doc: Document, db=None) -> str | None:
@@ -574,6 +613,15 @@ async def update_document(body: dict, db: Session, user: User | None) -> dict:
             document.last_published_at = datetime.now(timezone.utc)
         elif not will_publish and was_published:
             _unpublish_from_git(document, db=db)
+
+        # When submitting for review, write content to the preview branch
+        # so reviewers can preview and promote_preview_to_production works on approval
+        new_status = update_data.get("status")
+        if new_status == "review":
+            try:
+                _publish_to_preview(document, db=db)
+            except Exception as preview_err:
+                logger.warning("Failed to publish preview for doc %s: %s", document.id, preview_err)
 
         db.commit()
 
