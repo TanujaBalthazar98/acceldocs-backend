@@ -40,6 +40,7 @@ async def invoke_function(
 
     # Import service modules (lazy import to avoid circular dependencies)
     from app.services import workspace, projects, documents, drive, members
+    from app.api import approvals as approvals_mod
 
     # Function dispatch table
     handlers = {
@@ -104,6 +105,13 @@ async def invoke_function(
 
         # AI (1 function)
         "docs-ai-assistant": documents.docs_ai_assistant,
+
+        # Approvals (5 functions)
+        "approvals-pending": approvals_mod.approvals_pending_fn,
+        "approvals-count": approvals_mod.approvals_count_fn,
+        "approvals-history": approvals_mod.approvals_history_fn,
+        "approvals-my-submissions": approvals_mod.approvals_my_submissions_fn,
+        "approvals-action": approvals_mod.approvals_action_fn,
     }
 
     handler = handlers.get(function_name)
