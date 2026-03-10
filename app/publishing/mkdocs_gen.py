@@ -109,6 +109,26 @@ def _toml_str(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _nav_to_toml_inline(nav: list[dict[str, Any]]) -> str:
+    """Serialize a nav list to TOML inline-table format.
+
+    Converts a nested nav structure like:
+        [{"Home": "index.md"}, {"Resume": [{"Overview": "resume/index.md"}]}]
+    Into TOML inline:
+        [{Home = "index.md"}, {Resume = [{Overview = "resume/index.md"}]}]
+    """
+    items: list[str] = []
+    for entry in nav:
+        for key, val in entry.items():
+            escaped_key = _toml_str(key)
+            if isinstance(val, str):
+                items.append(f"{{{escaped_key} = {_toml_str(val)}}}")
+            elif isinstance(val, list):
+                inner = _nav_to_toml_inline(val)
+                items.append(f"{{{escaped_key} = [{inner}]}}")
+    return ", ".join(items)
+
+
 def generate_zensical_toml(
     docs_dir: Path | None = None,
     *,
@@ -159,10 +179,19 @@ def generate_zensical_toml(
         lines.append('extra_css = ["stylesheets/extra.css"]')
         lines.append("")
 
-    # Nav: intentionally omitted — let Zensical auto-derive navigation
-    # from the docs/ directory structure. Writing an explicit nav (even
-    # just [{"Home": "index.md"}]) overrides auto-discovery and hides
-    # all project/version/doc pages that live in subdirectories.
+    # Docs directory — explicit so Zensical always knows where to find content
+    lines.append('docs_dir = "docs"')
+    lines.append("")
+
+    # Nav: generate the FULL nav tree from the docs/ directory.
+    # Previous approach of omitting nav relied on Zensical auto-discovery,
+    # but that proved unreliable. Including the complete tree ensures every
+    # committed document appears in the site navigation.
+    nav = generate_nav(docs_dir)
+    if nav:
+        toml_nav = _nav_to_toml_inline(nav)
+        lines.append(f"nav = [{toml_nav}]")
+        lines.append("")
 
     # Theme — use the "modern" variant for Inter font + lucide icons
     lines.append("[project.theme]")

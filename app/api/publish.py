@@ -261,7 +261,20 @@ async def publish_mkdocs(
             from app.publishing import git_publisher as _gp
             _branding = dict(_gp._current_branding) if _gp._current_branding else {}
             if not _branding.get("site_name"):
-                _branding["site_name"] = org.name or "Documentation"
+                # Prefer the leaf project name (e.g. "Resume") over the org/workspace name.
+                # Leaf projects are those without children or those that actually have docs.
+                _leaf_projects = [p for p in projects if not p.parent_id]
+                if len(_leaf_projects) == 1:
+                    _branding["site_name"] = _leaf_projects[0].name
+                else:
+                    # Multiple top-level projects or none: use most specific name available
+                    _child_projects = [p for p in projects if p.parent_id]
+                    if _child_projects:
+                        _branding["site_name"] = _child_projects[0].name
+                    else:
+                        _branding["site_name"] = org.name or "Documentation"
+            logger.info("Publish: final branding site_name=%s, _current_branding=%s",
+                        _branding.get("site_name"), bool(_gp._current_branding))
             _repo_path = _Path(_settings.docs_repo_path)
             _repo = get_repo()
             # Checkout main so the toml commit lands on the right branch

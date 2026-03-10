@@ -134,10 +134,17 @@ def _set_branding_from_doc(doc: Document, db) -> None:
     try:
         from app.publishing import git_publisher
         org = None
+        proj = None
         if doc.project_id:
             proj = db.get(Project, doc.project_id) if db else None
             if proj and proj.organization_id:
                 org = db.get(Organization, proj.organization_id)
+        logger.info(
+            "_set_branding_from_doc: doc=%s project_id=%s proj=%s org=%s",
+            doc.id, doc.project_id,
+            proj.name if proj else None,
+            org.name if org else None,
+        )
         if org:
             # Parse social_links from custom_links JSON if it's a list of link objects
             social_links = None
@@ -173,7 +180,7 @@ def _set_branding_from_doc(doc: Document, db) -> None:
                 "social_links": social_links,
             }
     except Exception:
-        pass  # non-fatal — publish with defaults
+        logger.exception("_set_branding_from_doc failed for doc %s", doc.id)
 
 
 def _get_org_for_doc(doc: Document, db) -> Organization | None:
