@@ -14,7 +14,7 @@ from app.ingestion.drive import _get_service, export_doc_as_html
 from app.middleware.auth import AuthUser, require_auth, require_role
 from app.models import Approval, Document, OrgRole, Project, User
 from app.publishing.git_publisher import promote_preview_to_production, publish_to_production, unpublish_from_production
-from app.services.documents import _resolve_publish_path, _set_branding_from_doc
+from app.services.documents import _resolve_publish_path, _set_branding_from_doc, _auto_deploy_if_public
 
 router = APIRouter()
 
@@ -325,6 +325,9 @@ async def perform_action(
     db.add(approval)
     db.commit()
 
+    # Rebuild and deploy the Zensical site for public projects
+    _auto_deploy_if_public(doc, db)
+
     return {"status": "ok", "document_status": doc.status}
 
 
@@ -535,5 +538,8 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
 
     db.add(Approval(document_id=doc_id, user_id=actor.id, action=action, comment=comment))
     db.commit()
+
+    # Rebuild and deploy the Zensical site for public projects
+    _auto_deploy_if_public(doc, db)
 
     return {"ok": True, "document_status": doc.status}
