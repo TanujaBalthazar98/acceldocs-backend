@@ -23,13 +23,33 @@ import logging as _logging
 _log = _logging.getLogger(__name__)
 
 
-async def _get_drive_service_for_doc(doc: Document, db: Session, fallback_user: User | None = None):
+async def _get_drive_service_for_doc(
+    doc: Document,
+    db: Session,
+    fallback_user: User | None = None,
+    access_token: str | None = None,
+):
     """Build a Drive API service using stored OAuth credentials.
 
-    Tries in order: doc owner → fallback_user (approver) → global service account / ADC.
+    Tries in order:
+    1. Browser-passed access token (freshest, no stored creds needed)
+    2. Doc owner's stored refresh token
+    3. Fallback user (approver) stored refresh token
+    4. Global service account / ADC
     """
     from app.services.drive import GoogleDriveService
+    from google.oauth2.credentials import Credentials
 
+    # 1. Try the browser-passed access token directly — most current credentials
+    if access_token:
+        try:
+            creds = Credentials(token=access_token)
+            _log.info("Using browser-passed access token to export doc %s", doc.id)
+            return _gdrive_build("drive", "v3", credentials=creds, cache_discovery=False)
+        except Exception as e:
+            _log.warning("Failed to use passed access token for doc %s: %s", doc.id, e)
+
+    # 2 & 3. Try stored refresh tokens for doc owner then approver
     candidates: list[User] = []
     if doc.owner_id:
         owner = db.get(User, doc.owner_id)
@@ -48,6 +68,7 @@ async def _get_drive_service_for_doc(doc: Document, db: Session, fallback_user: 
         except Exception as e:
             _log.warning("Failed to get credentials for user %s: %s", user.email, e)
 
+    # 4. Last resort: service account / ADC
     _log.warning("No per-user credentials found for doc %s, falling back to ADC/_get_service()", doc.id)
     return _get_service()
 
@@ -419,6 +440,7 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
         return {"ok": False, "error": "action must be 'approve' or 'reject'"}
 
     comment = body.get("comment")
+    google_access_token = body.get("_google_access_token")
 
     doc = db.get(Document, doc_id)
     if not doc:
@@ -433,10 +455,36 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
             _set_branding_from_doc(doc, db)
             project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
 
-            # Primary path: promote the preview-branch file (synced from Drive) to main.
-            commit_sha, _ = promote_preview_to_production(project_slug, version_slug, section, doc_slug)
+            commit_sha = None
 
-            # Fallback: build markdown from HTML if no preview file exists yet.
+            # Primary path when browser token available: fetch latest content directly from Drive.
+            # This guarantees we publish whatever is currently in the Google Doc, not stale preview.
+            if google_access_token and doc.google_doc_id:
+                try:
+                    service = await _get_drive_service_for_doc(
+                        doc, db, fallback_user=actor, access_token=google_access_token
+                    )
+                    html = export_doc_as_html(service, doc.google_doc_id)
+                    if html:
+                        markdown = convert_html_to_markdown(html)
+                        commit_sha = publish_to_production(
+                            project=project_slug,
+                            version=version_slug,
+                            section=section,
+                            slug=doc_slug,
+                            markdown=markdown,
+                        )
+                        _log.info("Published doc %s from Drive via browser token", doc.id)
+                except Exception as drive_err:
+                    _log.warning("Drive fetch with browser token failed for doc %s: %s", doc.id, drive_err)
+
+            # Secondary path: promote the preview-branch file (synced from Drive) to main.
+            if not commit_sha:
+                commit_sha, _ = promote_preview_to_production(project_slug, version_slug, section, doc_slug)
+                if commit_sha:
+                    _log.info("Promoted preview branch content for doc %s", doc.id)
+
+            # Tertiary fallback: stored HTML content.
             if not commit_sha:
                 html = None
                 try:

@@ -35,6 +35,7 @@ async def invoke_function(
         "google-drive", "discover-drive-structure",
         "import-markdown", "convert-markdown-to-gdoc",
         "create-document", "create-topic", "create-project",
+        "approvals-action",
     ):
         body["_google_access_token"] = google_token
 
