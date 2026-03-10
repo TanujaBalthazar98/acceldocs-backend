@@ -673,15 +673,91 @@ async def google_drive_handler(body: dict, db: Session, user: User | None) -> di
 
 # Keep other existing functions for backward compatibility
 async def convert_markdown_to_gdoc(body: dict, db: Session, user: User | None) -> dict:
-    """Convert Markdown to Google Doc."""
+    """Convert Markdown content to a new Google Doc in the specified Drive folder.
+
+    Accepts markdown, converts it to HTML, then uploads via the Drive API
+    using multipart upload with mimeType conversion (text/html → Google Docs).
+
+    Returns the created Google Doc's ID so the caller can link it to a
+    Document record.
+    """
     if not user:
         return {"ok": False, "error": "Authentication required"}
 
-    # TODO: Implement markdown conversion using Drive API
-    return {
-        "ok": False,
-        "error": "Not yet implemented"
-    }
+    markdown_content = body.get("markdownContent", "")
+    title = body.get("title", "Untitled")
+    folder_id = body.get("folderId")
+    access_token = body.get("accessToken") or body.get("_google_access_token")
+
+    if not access_token:
+        return {"ok": False, "error": "Google access token required"}
+
+    if not markdown_content.strip():
+        return {"ok": False, "error": "No markdown content provided"}
+
+    try:
+        import markdown as _md
+        import json as _json
+
+        # Convert markdown → HTML
+        html_body = _md.markdown(
+            markdown_content,
+            extensions=["tables", "fenced_code", "codehilite", "toc", "attr_list"],
+        )
+        # Wrap in a minimal HTML document so Drive renders it properly
+        html_content = (
+            f"<!DOCTYPE html><html><head>"
+            f"<meta charset='utf-8'><title>{title}</title></head>"
+            f"<body>{html_body}</body></html>"
+        )
+
+        # Build multipart upload request for Drive API
+        # Metadata part
+        metadata = {
+            "name": title,
+            "mimeType": "application/vnd.google-apps.document",
+        }
+        if folder_id:
+            metadata["parents"] = [folder_id]
+
+        import requests
+
+        boundary = "----DocspeareBoundary"
+        body_parts = (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{_json.dumps(metadata)}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: text/html; charset=UTF-8\r\n\r\n"
+            f"{html_content}\r\n"
+            f"--{boundary}--"
+        )
+
+        resp = requests.post(
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": f"multipart/related; boundary={boundary}",
+            },
+            data=body_parts.encode("utf-8"),
+            timeout=30,
+        )
+
+        if resp.status_code not in (200, 201):
+            logger.error("Drive API error creating doc: %s %s", resp.status_code, resp.text[:500])
+            return {"ok": False, "error": f"Drive API error: {resp.status_code}"}
+
+        created = resp.json()
+        doc_id = created.get("id")
+        if not doc_id:
+            return {"ok": False, "error": "Drive returned no file ID"}
+
+        logger.info("Created Google Doc '%s' (id=%s) in folder %s", title, doc_id, folder_id)
+        return {"ok": True, "documentId": doc_id, "googleDocId": doc_id}
+
+    except Exception as exc:
+        logger.exception("convert_markdown_to_gdoc failed for '%s'", title)
+        return {"ok": False, "error": str(exc)}
 
 
 async def discover_drive_structure(body: dict, db: Session, user: User | None) -> dict:
