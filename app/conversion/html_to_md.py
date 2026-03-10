@@ -105,6 +105,11 @@ def convert_html_to_markdown(
     # or proper --- delimited blocks that survived HTML conversion.
     md = _strip_md_frontmatter(md)
 
+    # Strip leading number prefixes from the first H1 heading.
+    # Doc tools often prefix titles with ordering numbers like "5 version 4.7.0"
+    # which should display as "Version 4.7.0".
+    md = re.sub(r"^(#{1,2}\s+)\d+[-_\s]+", r"\1", md, count=1)
+
     return md
 
 

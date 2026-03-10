@@ -58,6 +58,9 @@ def _slug_to_label(slug: str) -> str:
     return " ".join(result).title()
 
 
+_SKIP_DIRS = {"assets", "static", "images", "img", "css", "js", "fonts", "stylesheets"}
+
+
 def generate_nav(docs_dir: Path) -> list[dict[str, Any]]:
     """Build nav tree from the docs/ directory structure.
 
@@ -75,6 +78,7 @@ def generate_nav(docs_dir: Path) -> list[dict[str, Any]]:
     project_dirs = sorted(
         p for p in docs_dir.iterdir()
         if p.is_dir() and not p.name.startswith(".")
+        and p.name.lower() not in _SKIP_DIRS
     )
 
     nav: list[dict[str, Any]] = []
@@ -153,6 +157,7 @@ def _build_folder_nav(folder: Path, docs_root: Path) -> list[dict[str, Any]]:
     for child_dir in sorted(
         p for p in folder.iterdir()
         if p.is_dir() and not p.name.startswith(".")
+        and p.name.lower() not in _SKIP_DIRS
     ):
         child_nav = _build_folder_nav(child_dir, docs_root)
         if child_nav:
