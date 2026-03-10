@@ -99,6 +99,83 @@ def convert_html_to_markdown(
     md = re.sub(r"\n{3,}", "\n\n", md)
     md = md.strip()
 
+    # Strip any remaining frontmatter in the markdown output.
+    # Google Docs sometimes renders YAML frontmatter as body text,
+    # producing lines like "type: page title: Version 4.7.0 listed: true ..."
+    # or proper --- delimited blocks that survived HTML conversion.
+    md = _strip_md_frontmatter(md)
+
+    return md
+
+
+# Frontmatter keys commonly found in documentation tools
+_FM_KEYS = {
+    "type", "title", "listed", "slug", "description", "index_title",
+    "hidden", "keywords", "tags", "published", "date", "weight",
+    "draft", "layout", "permalink", "categories", "author", "order",
+    "sidebar_position", "sidebar_label", "page_title", "nav_title",
+}
+
+# Matches a line like "key: value" or "key:" for known frontmatter keys
+_FM_LINE_RE = re.compile(
+    r"^(" + "|".join(re.escape(k) for k in _FM_KEYS) + r")\s*:\s*.*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_md_frontmatter(md: str) -> str:
+    """Strip frontmatter that leaked into markdown as body text.
+
+    Handles two cases:
+    1. Proper YAML frontmatter: ---\\n...\\n---
+    2. Loose frontmatter: lines of "key: value" at the start (from Google Docs
+       rendering frontmatter as regular text without --- delimiters)
+    """
+    if not md:
+        return md
+
+    # Case 1: standard YAML frontmatter (---...---)
+    fm_match = re.match(r"^---\s*\n([\s\S]*?\n)---\s*\n?", md)
+    if fm_match:
+        md = md[fm_match.end():]
+
+    # Case 2: loose frontmatter — key:value lines at the very start
+    # Also handles single-line "type: page title: Version ... ---published"
+    lines = md.split("\n")
+    strip_until = 0
+    found_fm = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            # Blank line: if we already found frontmatter, this ends the block
+            if found_fm:
+                strip_until = i + 1
+                break
+            continue
+        # Also match concatenated frontmatter on a single line
+        # e.g. "type: page title: Version 4.7.0 listed: true slug: ..."
+        fm_key_count = sum(1 for k in _FM_KEYS if re.search(rf"\b{k}\s*:", stripped, re.I))
+        if fm_key_count >= 2:
+            strip_until = i + 1
+            found_fm = True
+            continue
+        # Check if line contains a single frontmatter key:value pair
+        if _FM_LINE_RE.match(stripped) and not found_fm:
+            # Only match single-key lines if they're at the very start
+            strip_until = i + 1
+            found_fm = True
+            continue
+        # Check for "---published" or "--- published" (closing frontmatter marker)
+        if stripped.startswith("---") and found_fm:
+            strip_until = i + 1
+            break
+        break
+
+    if strip_until > 0:
+        remaining = "\n".join(lines[strip_until:]).strip()
+        if remaining:
+            md = remaining
+
     return md
 
 

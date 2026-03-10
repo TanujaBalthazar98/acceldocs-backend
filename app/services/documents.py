@@ -43,11 +43,21 @@ def _resolve_publish_path(doc: Document) -> tuple[str, str, str | None, str]:
         project_slug = doc.project
 
     # --- version slug ---
-    # Prefer name over slug so "v1.0" (name) is used instead of "v1-0" (slug),
-    # which prevents the folder from rendering as "V1 0" in the nav.
+    # Skip the version folder entirely when the project has only one version
+    # (avoids unnecessary "V1.0" nesting in the nav). Also prefer name over
+    # slug so "v1.0" is used instead of "v1-0".
     version_slug = ""
     if doc.project_version:
-        version_slug = doc.project_version.name or doc.project_version.slug
+        # Check if this is the only version — if so, flatten it out.
+        # This avoids unnecessary "V1.0" nesting in single-version projects.
+        try:
+            project_for_version = doc.project_rel
+            version_count = len(project_for_version.versions) if project_for_version else 0
+        except Exception:
+            version_count = 2  # assume multiple on error → include version
+        if version_count != 1:
+            version_slug = doc.project_version.name or doc.project_version.slug
+        # else: single version → skip the version folder
     elif doc.version:
         version_slug = doc.version
 
@@ -173,8 +183,8 @@ def _set_branding_from_doc(doc: Document, db) -> None:
                 "font_body": org.font_body or None,
                 "custom_css": org.custom_css or None,
                 "site_url": org.github_pages_url or None,
-                "repo_url": repo_url,
-                "repo_name": repo_name,
+                # Intentionally omit repo_url / repo_name so the published
+                # site doesn't show a GitHub link in the header.
                 "copyright": getattr(org, "copyright", None),
                 "analytics_property_id": getattr(org, "analytics_property_id", None),
                 "social_links": social_links,

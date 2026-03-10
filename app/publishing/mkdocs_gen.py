@@ -26,8 +26,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _slug_to_label(slug: str) -> str:
-    """Convert 'version-4-10-0' → 'Version 4.10.0'."""
-    text = slug.replace("-", " ").replace("_", " ")
+    """Convert 'version-4-10-0' → 'Version 4.10.0'.
+
+    Also strips leading numeric ordering prefixes that documentation tools
+    add for sorting (e.g. '2-version-4-10-0' → 'Version 4.10.0').
+    """
+    # Strip leading number prefix used for ordering (e.g. "2-version" → "version")
+    text = _re.sub(r"^\d+[-_]\s*", "", slug)
+    text = text.replace("-", " ").replace("_", " ")
     parts = text.split()
     result: list[str] = []
     i = 0
@@ -53,7 +59,13 @@ def _slug_to_label(slug: str) -> str:
 
 
 def generate_nav(docs_dir: Path) -> list[dict[str, Any]]:
-    """Build nav tree from the docs/ directory structure."""
+    """Build nav tree from the docs/ directory structure.
+
+    Applies smart flattening: if a folder has exactly one child folder
+    and no direct pages, the child is promoted up to avoid unnecessary
+    nesting (e.g. "New Project > V1.0 > Release Notes" becomes just
+    "Release Notes" if each level has a single child).
+    """
     if not docs_dir.exists():
         return []
 
@@ -68,9 +80,39 @@ def generate_nav(docs_dir: Path) -> list[dict[str, Any]]:
         project_nav = _build_folder_nav(project_dir, docs_dir)
         if project_nav:
             label = _folder_title(project_dir.name)
-            nav.append({label: project_nav})
+            # Flatten: if this folder has exactly one child that is itself
+            # a folder section (dict with list value), promote it up.
+            flattened_label, flattened_nav = _flatten_single_child(label, project_nav)
+            nav.append({flattened_label: flattened_nav})
 
     return nav
+
+
+def _flatten_single_child(label: str, nav_items: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """Recursively flatten single-child wrapper folders.
+
+    If a nav section contains only one entry and that entry is a sub-section
+    (not a page), replace the parent with the child. Repeat until there's
+    more than one child or the child is a page.
+
+    Example: "New Project" > [{"V1.0": [{"Release Notes": [...]}]}]
+    becomes: "Release Notes" > [...]
+    """
+    # Filter out index/overview entries — they don't count as "real" children
+    real_items = [
+        item for item in nav_items
+        if not any(k.lower() in ("overview", "home") and isinstance(v, str)
+                   for k, v in item.items())
+    ]
+
+    if len(real_items) == 1:
+        entry = real_items[0]
+        for child_label, child_val in entry.items():
+            if isinstance(child_val, list):
+                # This child is a folder — promote it and recurse
+                return _flatten_single_child(child_label, child_val)
+
+    return label, nav_items
 
 
 def _build_folder_nav(folder: Path, docs_root: Path) -> list[dict[str, Any]]:
