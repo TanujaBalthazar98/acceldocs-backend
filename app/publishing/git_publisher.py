@@ -67,6 +67,8 @@ def publish_document(
     slug: str,
     markdown_content: str,
     branch: str = MAIN_BRANCH,
+    *,
+    product: str | None = None,
 ) -> str | None:
     """Write a Markdown file to docs repo on the specified branch."""
     active_branch: str | None = None
@@ -76,7 +78,7 @@ def publish_document(
         active_branch = _current_branch_name(repo)
 
         _ensure_branch(repo, branch)
-        rel_path = _document_rel_path(project, version, section, slug)
+        rel_path = _document_rel_path(project, version, section, slug, product=product)
         full_path = repo_path / rel_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(markdown_content, encoding="utf-8")
@@ -124,19 +126,24 @@ def publish_document(
 
 
 def publish_to_preview(
-    project: str, version: str, section: str | None, slug: str, markdown: str
+    project: str, version: str, section: str | None, slug: str, markdown: str,
+    *, product: str | None = None,
 ) -> str | None:
-    return publish_document(project, version, section, slug, markdown, branch=PREVIEW_BRANCH)
+    return publish_document(project, version, section, slug, markdown, branch=PREVIEW_BRANCH,
+                            product=product)
 
 
 def publish_to_production(
-    project: str, version: str, section: str | None, slug: str, markdown: str
+    project: str, version: str, section: str | None, slug: str, markdown: str,
+    *, product: str | None = None,
 ) -> str | None:
-    return publish_document(project, version, section, slug, markdown, branch=MAIN_BRANCH)
+    return publish_document(project, version, section, slug, markdown, branch=MAIN_BRANCH,
+                            product=product)
 
 
 def promote_preview_to_production(
-    project: str, version: str, section: str | None, slug: str
+    project: str, version: str, section: str | None, slug: str,
+    *, product: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Read the markdown from docs-preview branch and publish it to main.
 
@@ -149,7 +156,7 @@ def promote_preview_to_production(
         repo = get_repo()
         repo_path = Path(settings.docs_repo_path)
         active_branch = _current_branch_name(repo)
-        rel_path = _document_rel_path(project, version, section, slug)
+        rel_path = _document_rel_path(project, version, section, slug, product=product)
 
         # Read markdown from preview branch
         _ensure_branch(repo, PREVIEW_BRANCH)
@@ -171,7 +178,8 @@ def promote_preview_to_production(
 
 
 def unpublish_from_production(
-    project: str, version: str, section: str | None, slug: str
+    project: str, version: str, section: str | None, slug: str,
+    *, product: str | None = None,
 ) -> str | None:
     """Remove a published document from production branch and regenerate nav."""
     active_branch: str | None = None
@@ -181,7 +189,7 @@ def unpublish_from_production(
         active_branch = _current_branch_name(repo)
         _ensure_branch(repo, MAIN_BRANCH)
 
-        rel_path = _document_rel_path(project, version, section, slug)
+        rel_path = _document_rel_path(project, version, section, slug, product=product)
         full_path = repo_path / rel_path
         if full_path.exists():
             full_path.unlink()
@@ -214,28 +222,80 @@ def unpublish_from_production(
 def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
     """Build the docs site with zensical and push the HTML to the gh-pages branch.
 
+    Supports two modes:
+    - **Single site** (no product directories): builds once → site/
+    - **Multi-product** (docs/{product}/{project}/…): builds each product
+      into site/{product}/ and generates a root product-picker index.html.
+
     Steps:
-      1. Run zensical.build() to generate site/ in repo_path
-      2. Clone (or init) an isolated gh-pages worktree into a temp dir
-      3. Replace its contents with site/
-      4. Commit and force-push to gh-pages on the remote
+      1. Detect whether multi-product layout is in use
+      2. Build each product (or the single site) with zensical
+      3. Clone (or init) an isolated gh-pages worktree into a temp dir
+      4. Replace its contents with the combined site output
+      5. Commit and force-push to gh-pages on the remote
     """
-    # Always build from the main branch so doc commits are included,
-    # not from whatever branch _restore_branch left the repo on (may be "master").
+    # Always build from the main branch so doc commits are included.
     try:
         _build_repo = git.Repo(repo_path)
         if MAIN_BRANCH in [b.name for b in _build_repo.branches]:
             _build_repo.heads[MAIN_BRANCH].checkout()
         elif _build_repo.branches:
-            # Fallback: rename whatever branch exists to main
             _build_repo.active_branch.rename(MAIN_BRANCH)
             _build_repo.heads[MAIN_BRANCH].checkout()
     except Exception as _br_err:
         logger.warning("Could not checkout %s before build: %s", MAIN_BRANCH, _br_err)
 
+    docs_dir = repo_path / "docs"
+    skip_dirs = {"assets", "static", "images", "img", "css", "js", "fonts", "stylesheets"}
+
+    # Detect multi-product layout:
+    # A product directory contains sub-project directories (which contain .md files),
+    # rather than having .md files directly.
+    product_dirs = _detect_product_dirs(docs_dir, skip_dirs)
+
+    if product_dirs:
+        return _deploy_multi_product(repo_path, remote_url, product_dirs)
+    else:
+        return _deploy_single_site(repo_path, remote_url)
+
+
+def _detect_product_dirs(docs_dir: Path, skip_dirs: set[str]) -> list[Path]:
+    """Detect product directories under docs/.
+
+    A directory is a "product" if it contains subdirectories that themselves
+    contain .md files (i.e. it's docs/{product}/{project}/…), NOT if it
+    directly contains .md files (that's a project, not a product).
+    """
+    if not docs_dir.exists():
+        return []
+
+    product_dirs: list[Path] = []
+    for child in sorted(docs_dir.iterdir()):
+        if not child.is_dir() or child.name.startswith(".") or child.name.lower() in skip_dirs:
+            continue
+        # Check: does this dir have sub-dirs that contain .md files?
+        has_subproject_dirs = False
+        has_direct_md = any(child.glob("*.md"))
+        for subdir in child.iterdir():
+            if subdir.is_dir() and not subdir.name.startswith(".") and subdir.name.lower() not in skip_dirs:
+                if any(subdir.rglob("*.md")):
+                    has_subproject_dirs = True
+                    break
+        # It's a product dir if it has sub-project dirs but no direct content .md
+        # (index.md is OK, but real content pages would mean it's a project)
+        direct_content_pages = [
+            f for f in child.glob("*.md") if f.name != "index.md"
+        ]
+        if has_subproject_dirs and not direct_content_pages:
+            product_dirs.append(child)
+
+    return product_dirs
+
+
+def _deploy_single_site(repo_path: Path, remote_url: str) -> bool | str:
+    """Build and deploy a single documentation site (no product subdivision)."""
     toml_path = repo_path / "zensical.toml"
     if not toml_path.exists():
-        # Last-resort: generate the config now so the build doesn't fail
         logger.warning("zensical.toml missing at %s — generating now", repo_path)
         try:
             write_zensical_toml(repo_path)
@@ -244,16 +304,93 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
         if not toml_path.exists():
             return f"zensical.toml not found at {repo_path} — docs repo may not be initialised"
 
-    # --- 1. Build ---
-    # IMPORTANT: pass just the filename since cwd is already repo_path
+    build_err = _run_zensical_build(repo_path, "zensical.toml")
+    if build_err:
+        return build_err
+
+    site_dir = repo_path / "site"
+    if not site_dir.exists() or not any(site_dir.iterdir()):
+        return "site/ directory is empty after build — nothing to deploy"
+
+    return _push_site_to_gh_pages(site_dir, remote_url)
+
+
+def _deploy_multi_product(
+    repo_path: Path, remote_url: str, product_dirs: list[Path],
+) -> bool | str:
+    """Build each product as a separate site and combine into site/{product}/."""
+    from app.publishing.mkdocs_gen import generate_zensical_toml, _ensure_folder_indexes, _folder_title
+
+    docs_dir = repo_path / "docs"
+    combined_site = repo_path / "site"
+    if combined_site.exists():
+        shutil.rmtree(combined_site)
+    combined_site.mkdir(parents=True, exist_ok=True)
+
+    branding = dict(_current_branding) if _current_branding else {}
+
+    for product_path in product_dirs:
+        product_slug = product_path.name
+        product_label = _folder_title(product_slug)
+        logger.info("Building product site: %s (%s)", product_label, product_slug)
+
+        # Create a temporary build directory for this product
+        with tempfile.TemporaryDirectory(prefix=f"product-{product_slug}-") as tmp_build:
+            tmp_build_path = Path(tmp_build)
+            tmp_docs = tmp_build_path / "docs"
+
+            # Copy only this product's docs (sub-projects) into tmp_docs/
+            shutil.copytree(str(product_path), str(tmp_docs))
+
+            # Generate indexes and config for this product
+            _ensure_folder_indexes(tmp_docs)
+
+            product_branding = dict(branding)
+            product_branding["site_name"] = product_label
+
+            toml_content = generate_zensical_toml(
+                tmp_docs, **product_branding,
+            )
+            toml_path = tmp_build_path / "zensical.toml"
+            toml_path.write_text(toml_content, encoding="utf-8")
+
+            # Copy custom CSS if it exists
+            css_src = docs_dir / "stylesheets"
+            if css_src.exists():
+                shutil.copytree(str(css_src), str(tmp_docs / "stylesheets"))
+
+            # Build
+            build_err = _run_zensical_build(tmp_build_path, "zensical.toml")
+            if build_err:
+                logger.error("Build failed for product %s: %s", product_slug, build_err)
+                continue
+
+            # Copy output to combined site/{product}/
+            product_site = tmp_build_path / "site"
+            if product_site.exists() and any(product_site.iterdir()):
+                dest = combined_site / product_slug
+                shutil.copytree(str(product_site), str(dest))
+                logger.info("Built product %s → site/%s/", product_label, product_slug)
+
+    # Generate root product picker index.html
+    _generate_product_picker_html(combined_site, product_dirs, branding)
+
+    if not any(combined_site.iterdir()):
+        return "No product sites were built — nothing to deploy"
+
+    return _push_site_to_gh_pages(combined_site, remote_url)
+
+
+def _run_zensical_build(build_dir: Path, toml_filename: str) -> str | None:
+    """Run zensical.build() in the given directory. Returns error string or None."""
     try:
         result = subprocess.run(
             [
                 "python", "-c",
                 "import sys, zensical; zensical.build(sys.argv[1], True)",
-                "zensical.toml",
+                toml_filename,
             ],
-            cwd=str(repo_path),
+            cwd=str(build_dir),
             capture_output=True,
             text=True,
             timeout=120,
@@ -261,18 +398,16 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
         if result.returncode != 0:
             full_err = (result.stderr or result.stdout or "no output")
             logger.error("zensical build failed (rc=%s):\n%s", result.returncode, full_err)
-            # Return last 600 chars so we capture the actual exception type/message
             return f"Zensical build failed (rc={result.returncode}): {full_err[-600:]}"
         logger.info("zensical build output: %s", result.stdout.strip())
+        return None
     except Exception as build_exc:
         logger.exception("zensical build raised an exception")
         return f"Zensical build error: {build_exc}"
 
-    site_dir = repo_path / "site"
-    if not site_dir.exists() or not any(site_dir.iterdir()):
-        return "site/ directory is empty after build — nothing to deploy"
 
-    # --- 2. Clone gh-pages into a temp dir (or init fresh) ---
+def _push_site_to_gh_pages(site_dir: Path, remote_url: str) -> bool | str:
+    """Push the contents of site_dir to the gh-pages branch on the remote."""
     with tempfile.TemporaryDirectory(prefix="gh-pages-") as tmpdir:
         tmp_path = Path(tmpdir)
         try:
@@ -280,14 +415,12 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
                 remote_url, str(tmp_path), branch="gh-pages", depth=1
             )
             logger.info("Cloned existing gh-pages branch into %s", tmpdir)
-            # Clear all files except .git
             for item in list(tmp_path.iterdir()):
                 if item.name == ".git":
                     continue
                 shutil.rmtree(item) if item.is_dir() else item.unlink()
         except git.GitCommandError as clone_err:
             err_str = str(clone_err).lower()
-            # Auth failure — don't silently fall through to init
             if "authentication" in err_str or "403" in err_str or "401" in err_str or "could not read" in err_str:
                 logger.error("GitHub auth failed during clone: %s", clone_err)
                 return f"GitHub authentication failed. Please reconnect your GitHub account with a fresh token. ({clone_err})"
@@ -295,7 +428,7 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
             gh_repo = git.Repo.init(str(tmp_path))
             gh_repo.create_remote("origin", remote_url)
 
-        # --- 3. Copy site/ contents in ---
+        # Copy site contents
         for item in site_dir.iterdir():
             dest = tmp_path / item.name
             if item.is_dir():
@@ -303,10 +436,8 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
             else:
                 shutil.copy2(str(item), str(dest))
 
-        # Prevent GitHub Pages from running Jekyll on our pre-built HTML
         (tmp_path / ".nojekyll").touch()
 
-        # --- 4. Commit and push ---
         gh_repo.git.add("--all")
         if not gh_repo.is_dirty(untracked_files=True):
             logger.info("deploy_to_gh_pages: nothing changed in gh-pages")
@@ -315,12 +446,71 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
         try:
             gh_repo.remotes.origin.push("HEAD:refs/heads/gh-pages", force=True)
             logger.info("Pushed gh-pages to %s", remote_url.split("@")[-1])
-            # Ensure GitHub Pages serves from gh-pages (not main)
             _configure_pages_source(remote_url)
             return True
         except Exception as push_err:
             logger.exception("Failed to push gh-pages")
             return f"Push to gh-pages failed: {push_err}"
+
+
+def _generate_product_picker_html(
+    site_dir: Path, product_dirs: list[Path], branding: dict,
+) -> None:
+    """Generate a root index.html that acts as a product picker / landing page."""
+    from app.publishing.mkdocs_gen import _folder_title
+
+    site_name = branding.get("site_name", "Documentation")
+    primary_color = branding.get("primary_color", "#1a73e8")
+
+    cards_html = ""
+    for pdir in product_dirs:
+        label = _folder_title(pdir.name)
+        slug = pdir.name
+        page_count = sum(1 for _ in pdir.rglob("*.md"))
+        cards_html += f"""
+        <a href="{slug}/" class="card">
+            <h2>{label}</h2>
+            <p>{page_count} page{"s" if page_count != 1 else ""}</p>
+        </a>
+"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{site_name}</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+               background: #f5f5f5; min-height: 100vh; }}
+        .header {{ background: {primary_color}; color: white; padding: 2rem; text-align: center; }}
+        .header h1 {{ font-size: 2rem; margin-bottom: 0.5rem; }}
+        .header p {{ opacity: 0.9; }}
+        .container {{ max-width: 900px; margin: 2rem auto; padding: 0 1rem;
+                     display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+                     gap: 1.5rem; }}
+        .card {{ background: white; border-radius: 8px; padding: 1.5rem;
+                text-decoration: none; color: inherit; box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+                transition: box-shadow 0.2s, transform 0.2s; }}
+        .card:hover {{ box-shadow: 0 4px 12px rgba(0,0,0,0.15); transform: translateY(-2px); }}
+        .card h2 {{ color: {primary_color}; margin-bottom: 0.5rem; font-size: 1.25rem; }}
+        .card p {{ color: #666; font-size: 0.9rem; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>{site_name}</h1>
+        <p>Select a product to view its documentation</p>
+    </div>
+    <div class="container">
+{cards_html}
+    </div>
+</body>
+</html>"""
+
+    (site_dir / "index.html").write_text(html, encoding="utf-8")
+    logger.info("Generated product picker landing page at site/index.html")
 
 
 def _configure_pages_source(remote_url: str) -> None:
@@ -414,8 +604,14 @@ def _safe_path(name: str) -> str:
     return name.replace(" ", "-").replace("/", "-").lower().strip("-")
 
 
-def _document_rel_path(project: str, version: str, section: str | None, slug: str) -> str:
-    rel_parts = ["docs", _safe_path(project)]
+def _document_rel_path(
+    project: str, version: str, section: str | None, slug: str,
+    *, product: str | None = None,
+) -> str:
+    rel_parts = ["docs"]
+    if product:
+        rel_parts.append(_safe_path(product))
+    rel_parts.append(_safe_path(project))
     if version:
         rel_parts.append(_safe_path(version))
     if section:

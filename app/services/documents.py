@@ -21,24 +21,29 @@ def _int(val) -> int | None:
         return None
 
 
-def _resolve_publish_path(doc: Document) -> tuple[str, str, str | None, str]:
+def _resolve_publish_path(doc: Document) -> tuple[str, str, str | None, str, str | None]:
     """Resolve a document's publish path from FK relationships, falling back to string fields.
 
     Walks the FK chain:  doc → project_rel → slug,  doc → project_version → slug,
     doc → topic → (walk parent chain for nested section path).
 
     Returns:
-        (project_slug, version_slug, section_path_or_none, doc_slug)
+        (project_slug, version_slug, section_path_or_none, doc_slug, product_slug_or_none)
+
+    When the project has a parent (i.e. it's a sub-project of a "product"),
+    ``product_slug`` is set to the parent project's slug.  This causes the
+    document to be placed under ``docs/{product}/{project}/…`` so that each
+    product can be built as a separate documentation site.
     """
-    # --- project slug ---
-    # Use only the immediate project — not the full parent chain.
-    # Walking up to the root produces paths like docs/acceldocs/resume/...
-    # which shows the workspace name ("AccelDocs") as a top-level section in
-    # the nav instead of the user's actual project name ("Resume").
+    # --- product & project slug ---
+    product_slug: str | None = None
     project_slug = "default"
     if doc.project_rel:
         p = doc.project_rel
         project_slug = p.slug or p.name.lower().replace(" ", "-")
+        # If the project has a parent → that parent is the "product"
+        if p.parent:
+            product_slug = p.parent.slug or p.parent.name.lower().replace(" ", "-")
     elif doc.project:
         project_slug = doc.project
 
@@ -77,7 +82,7 @@ def _resolve_publish_path(doc: Document) -> tuple[str, str, str | None, str]:
     # --- doc slug ---
     doc_slug = doc.slug or f"doc-{doc.id}"
 
-    return project_slug, version_slug, section, doc_slug
+    return project_slug, version_slug, section, doc_slug, product_slug
 
 
 def _serialize_document(d: Document, include_content: bool = False) -> dict:
@@ -263,9 +268,10 @@ def _publish_to_preview(doc: Document, db=None) -> str | None:
             logger.warning("Empty markdown after conversion for preview doc %s", doc.id)
             return None
 
-        project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
+        project_slug, version_slug, section, doc_slug, product_slug = _resolve_publish_path(doc)
 
-        commit_sha = publish_to_preview(project_slug, version_slug, section, doc_slug, markdown)
+        commit_sha = publish_to_preview(project_slug, version_slug, section, doc_slug, markdown,
+                                        product=product_slug)
         if commit_sha:
             logger.info("Published preview for doc %s (%s): %s", doc.id, doc.title, commit_sha[:8])
         return commit_sha
@@ -308,9 +314,10 @@ def _publish_to_git(doc: Document, db=None, *, skip_deploy: bool = False) -> str
             logger.warning("Empty markdown after conversion for doc %s", doc.id)
             return None
 
-        project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
+        project_slug, version_slug, section, doc_slug, product_slug = _resolve_publish_path(doc)
 
-        commit_sha = publish_to_production(project_slug, version_slug, section, doc_slug, markdown)
+        commit_sha = publish_to_production(project_slug, version_slug, section, doc_slug, markdown,
+                                           product=product_slug)
         if commit_sha:
             logger.info("Published doc %s (%s) to Git: %s", doc.id, doc.title, commit_sha[:8])
             # Auto-deploy to GitHub Pages for public projects
@@ -328,9 +335,10 @@ def _unpublish_from_git(doc: Document, db=None) -> str | None:
     try:
         from app.publishing.git_publisher import unpublish_from_production
 
-        project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
+        project_slug, version_slug, section, doc_slug, product_slug = _resolve_publish_path(doc)
 
-        commit_sha = unpublish_from_production(project_slug, version_slug, section, doc_slug)
+        commit_sha = unpublish_from_production(project_slug, version_slug, section, doc_slug,
+                                               product=product_slug)
         if commit_sha:
             logger.info("Unpublished doc %s (%s) from Git: %s", doc.id, doc.title, commit_sha[:8])
             if db:
