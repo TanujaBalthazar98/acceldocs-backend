@@ -248,7 +248,9 @@ async def create_github_repo(
         html_url = repo_data["html_url"]
         default_branch = repo_data.get("default_branch", "main")
 
-        # Enable GitHub Pages from the default branch
+        # Enable GitHub Pages — initially from default branch (gh-pages doesn't
+        # exist yet). After the first publish, deploy_to_gh_pages will
+        # reconfigure to serve from gh-pages via _configure_pages_source().
         pages_resp = requests.post(
             f"{GITHUB_API}/repos/{full_name}/pages",
             headers=_gh_headers(token),

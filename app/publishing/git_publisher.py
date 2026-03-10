@@ -315,10 +315,77 @@ def deploy_to_gh_pages(repo_path: Path, remote_url: str) -> bool | str:
         try:
             gh_repo.remotes.origin.push("HEAD:refs/heads/gh-pages", force=True)
             logger.info("Pushed gh-pages to %s", remote_url.split("@")[-1])
+            # Ensure GitHub Pages serves from gh-pages (not main)
+            _configure_pages_source(remote_url)
             return True
         except Exception as push_err:
             logger.exception("Failed to push gh-pages")
             return f"Push to gh-pages failed: {push_err}"
+
+
+def _configure_pages_source(remote_url: str) -> None:
+    """Ensure GitHub Pages is configured to serve from the gh-pages branch.
+
+    After the first successful push to gh-pages, the Pages source may still
+    point to 'main' (set during repo creation). This calls the GitHub API to
+    update it so the built HTML is actually served.
+    """
+    try:
+        import re
+        import requests as _req
+
+        # Extract token and repo from the remote URL
+        # Format: https://oauth2:{token}@github.com/{owner}/{repo}.git
+        m = re.match(r"https://oauth2:([^@]+)@github\.com/(.+?)(?:\.git)?$", remote_url)
+        if not m:
+            logger.debug("_configure_pages_source: could not parse remote_url")
+            return
+        token, full_name = m.group(1), m.group(2)
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+        # Check current Pages config
+        check = _req.get(f"https://api.github.com/repos/{full_name}/pages",
+                         headers=headers, timeout=10)
+
+        if check.status_code == 200:
+            current_source = check.json().get("source", {})
+            if current_source.get("branch") == "gh-pages":
+                logger.debug("GitHub Pages already configured for gh-pages")
+                return
+            # Update existing Pages configuration
+            resp = _req.put(
+                f"https://api.github.com/repos/{full_name}/pages",
+                headers=headers,
+                json={"source": {"branch": "gh-pages", "path": "/"}},
+                timeout=10,
+            )
+            if resp.status_code in (200, 204):
+                logger.info("Updated GitHub Pages source to gh-pages for %s", full_name)
+            else:
+                logger.warning("Failed to update Pages source (status %s): %s",
+                               resp.status_code, resp.text[:300])
+        elif check.status_code == 404:
+            # Pages not enabled yet — create it
+            resp = _req.post(
+                f"https://api.github.com/repos/{full_name}/pages",
+                headers=headers,
+                json={"source": {"branch": "gh-pages", "path": "/"}},
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Enabled GitHub Pages from gh-pages for %s", full_name)
+            else:
+                logger.warning("Failed to enable Pages (status %s): %s",
+                               resp.status_code, resp.text[:300])
+        else:
+            logger.debug("Could not check Pages config (status %s)", check.status_code)
+    except Exception:
+        logger.exception("_configure_pages_source failed (non-fatal)")
 
 
 def push_branch(branch: str = MAIN_BRANCH) -> bool:
