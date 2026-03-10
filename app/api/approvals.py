@@ -244,6 +244,11 @@ async def perform_action(
             if not html:
                 html = doc.content_html or doc.published_content_html
             if not html:
+                from app.models import DocumentCache
+                cache = db.query(DocumentCache).filter(DocumentCache.document_id == doc.id).first()
+                if cache:
+                    html = cache.published_content_html_encrypted or cache.content_html_encrypted
+            if not html:
                 raise ValueError("No content available to publish")
             markdown = convert_html_to_markdown(html)
             project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
@@ -427,6 +432,11 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
                 _log.warning("Drive fetch failed for doc %s, falling back to cache: %s", doc.id, drive_err)
             if not html:
                 html = doc.content_html or doc.published_content_html
+            if not html:
+                from app.models import DocumentCache
+                cache = db.query(DocumentCache).filter(DocumentCache.document_id == doc.id).first()
+                if cache:
+                    html = cache.published_content_html_encrypted or cache.content_html_encrypted
             if not html:
                 return {"ok": False, "error": "No content available to publish"}
             markdown = convert_html_to_markdown(html)

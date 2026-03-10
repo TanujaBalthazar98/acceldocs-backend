@@ -229,6 +229,12 @@ def _publish_to_git(doc: Document, db=None) -> str | None:
         _set_branding_from_doc(doc, db)
 
         html = doc.published_content_html or doc.content_html
+        # Fallback: check DocumentCache (populated whenever the doc is opened in the dashboard)
+        if not html and db:
+            from app.models import DocumentCache
+            cache = db.query(DocumentCache).filter(DocumentCache.document_id == doc.id).first()
+            if cache:
+                html = cache.published_content_html_encrypted or cache.content_html_encrypted
         if not html:
             html = _fetch_html_from_drive(doc)
         if not html:
