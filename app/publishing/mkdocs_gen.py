@@ -62,15 +62,17 @@ _SKIP_DIRS = {"assets", "static", "images", "img", "css", "js", "fonts", "styles
 
 
 def generate_nav(docs_dir: Path) -> list[dict[str, Any]]:
-    """Build nav tree from the docs/ directory structure.
+    """Build a tab-based nav tree from the docs/ directory structure.
 
-    Applies smart flattening: if a folder has exactly one child folder
-    and no direct pages, the child is promoted up to avoid unnecessary
-    nesting (e.g. "New Project > V1.0 > Release Notes" becomes just
-    "Release Notes" if each level has a single child).
+    Hierarchy:
+        - Each **project** folder becomes a **tab** in the top bar.
+        - Each **topic** subfolder becomes a **section** in the left sidebar.
+        - **Pages** (.md files) appear flat under their topic section.
 
-    When the org has only one project, the project's contents are promoted
-    directly to the top level (no wrapper section for the project name).
+    Single-child wrapper folders (e.g. a lone version folder) are
+    automatically flattened so they don't create redundant nesting.
+
+    A root ``index.md`` is always listed first as the landing / home tab.
     """
     if not docs_dir.exists():
         return []
@@ -83,37 +85,46 @@ def generate_nav(docs_dir: Path) -> list[dict[str, Any]]:
 
     nav: list[dict[str, Any]] = []
 
-    if len(project_dirs) == 1:
-        # Single project: promote its contents directly to the top level.
-        # No need for a "Home" entry or a wrapping project section.
-        single_dir = project_dirs[0]
-        project_label = _folder_title(single_dir.name)
-        project_nav = _build_folder_nav(single_dir, docs_dir)
-        if project_nav:
-            # Flatten any single-child wrappers (e.g. version folders)
-            _, flattened_nav = _flatten_single_child(project_label, project_nav)
-            # Promote the inner items directly into the top-level nav.
-            # Rename "Overview" to the project name so it reads as
-            # "Release Notes" instead of a generic "Overview".
-            for item in flattened_nav:
-                for key in list(item.keys()):
-                    if key.lower() == "overview" and isinstance(item[key], str):
-                        item[project_label] = item.pop(key)
-                nav.append(item)
-        return nav
-
-    # Multiple projects: use Home + project sections
+    # Landing page — always first tab (Home)
     if (docs_dir / "index.md").exists():
         nav.append({"Home": "index.md"})
 
     for project_dir in project_dirs:
+        project_label = _folder_title(project_dir.name)
+
+        # Build the raw nav for this project
         project_nav = _build_folder_nav(project_dir, docs_dir)
-        if project_nav:
-            label = _folder_title(project_dir.name)
-            flattened_label, flattened_nav = _flatten_single_child(label, project_nav)
-            nav.append({flattened_label: flattened_nav})
+        if not project_nav:
+            continue
+
+        # Flatten single-child wrappers (e.g. "New Project > V1 > Release Notes")
+        flattened_label, flattened_nav = _flatten_single_child(project_label, project_nav)
+
+        # Build the tab entry: the project is a top-level tab.
+        # Inside the tab, topics become sections, pages are flat items.
+        tab_items = _build_tab_items(flattened_nav, flattened_label)
+        nav.append({flattened_label: tab_items})
 
     return nav
+
+
+def _build_tab_items(
+    nav_items: list[dict[str, Any]], project_label: str
+) -> list[dict[str, Any]]:
+    """Structure nav items for a project tab.
+
+    - Renames 'Overview' entries to the project label.
+    - Keeps sections (topics) and pages in their natural order.
+    """
+    items: list[dict[str, Any]] = []
+    for entry in nav_items:
+        for key, val in entry.items():
+            if key.lower() == "overview" and isinstance(val, str):
+                # Rename Overview → project label so it reads e.g. "Release Notes"
+                items.append({project_label: val})
+            else:
+                items.append({key: val})
+    return items
 
 
 def _flatten_single_child(label: str, nav_items: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
@@ -280,6 +291,7 @@ def generate_zensical_toml(
         "navigation.instant.progress",
         "navigation.path",
         "navigation.sections",
+        "navigation.tabs",
         "navigation.top",
         "navigation.tracking",
         "search.highlight",
@@ -475,6 +487,7 @@ def generate_mkdocs_yml_content(
         '    - navigation.instant.prefetch',
         '    - navigation.path',
         '    - navigation.sections',
+        '    - navigation.tabs',
         '    - navigation.top',
         '    - navigation.tracking',
         '    - search.highlight',
@@ -514,16 +527,73 @@ def generate_mkdocs_yml_content(
 
 
 # ---------------------------------------------------------------------------
-# Index generation (unchanged)
+# Landing page & index generation
 # ---------------------------------------------------------------------------
 
+def _ensure_landing_page(docs_dir: Path, marker: str) -> None:
+    """Generate a root ``docs/index.md`` landing page with project cards.
+
+    The landing page is shown when the user clicks the org name / logo.
+    It lists all projects as clickable cards that navigate to the
+    corresponding tab.
+    """
+    index_md = docs_dir / "index.md"
+
+    # Don't overwrite a user-authored landing page
+    if index_md.exists():
+        existing = index_md.read_text(encoding="utf-8")
+        if marker not in existing and "Auto-generated index page" not in existing:
+            return
+
+    project_dirs = sorted(
+        p for p in docs_dir.iterdir()
+        if p.is_dir() and not p.name.startswith(".")
+        and p.name.lower() not in _SKIP_DIRS
+    )
+
+    lines = [marker, "# Welcome", ""]
+    lines.append("Browse the documentation by selecting a project below.")
+    lines.append("")
+
+    if project_dirs:
+        lines.append('<div class="grid cards" markdown>')
+        lines.append("")
+        for pdir in project_dirs:
+            label = _folder_title(pdir.name)
+            # Link to the project's index page (first page in the tab)
+            project_index = pdir / "index.md"
+            if project_index.exists():
+                rel = str(project_index.relative_to(docs_dir))
+            else:
+                # Find first .md file in the project
+                first_md = next(pdir.rglob("*.md"), None)
+                rel = str(first_md.relative_to(docs_dir)) if first_md else f"{pdir.name}/"
+            lines.append(f"-   :material-book-open-variant: **[{label}]({rel})**")
+            lines.append("")
+            # Count pages for a subtitle
+            page_count = sum(1 for _ in pdir.rglob("*.md"))
+            lines.append(f"    {page_count} page{'s' if page_count != 1 else ''}")
+            lines.append("")
+        lines.append("</div>")
+        lines.append("")
+
+    index_md.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    logger.debug("Generated landing page: %s", index_md)
+
 def _ensure_folder_indexes(docs_dir: Path) -> None:
-    """Ensure each content folder has a generated index page."""
+    """Ensure each content folder has a generated index page.
+
+    Also generates a root landing page (``docs/index.md``) with cards
+    linking to each project tab if one doesn't already exist.
+    """
     if not docs_dir.exists():
         return
 
     skip_names = {"assets", "static", "images", "img", "css", "js", "fonts", "stylesheets"}
     marker = "<!-- auto-generated-index -->"
+
+    # Root landing page — always regenerate (it lists project cards)
+    _ensure_landing_page(docs_dir, marker)
 
     for folder in sorted(p for p in docs_dir.rglob("*") if p.is_dir()):
         if folder == docs_dir:
@@ -559,21 +629,13 @@ def _folder_title(name: str) -> str:
 
 def _build_index_md(folder: Path, docs_dir: Path, marker: str) -> str:
     title = _folder_title(folder.name)
-    rel_parts = folder.relative_to(docs_dir).parts
-    depth = len(rel_parts)
 
     lines = [marker, f"# {title}", ""]
-    if depth == 1:
-        lines.append("Project home.")
-    elif depth == 2:
-        lines.append("Version home.")
-    else:
-        lines.append("Section home.")
-    lines.append("")
 
     child_dirs = sorted(
         d for d in folder.iterdir()
         if d.is_dir() and any(d.rglob("*.md")) and not d.name.startswith(".")
+        and d.name.lower() not in _SKIP_DIRS
     )
     child_pages = sorted(
         p for p in folder.glob("*.md")
@@ -581,14 +643,12 @@ def _build_index_md(folder: Path, docs_dir: Path, marker: str) -> str:
     )
 
     if child_dirs:
-        lines.append("## Folders")
         for d in child_dirs:
             label = _folder_title(d.name)
             lines.append(f"- [{label}](./{d.name}/)")
         lines.append("")
 
     if child_pages:
-        lines.append("## Pages")
         for p in child_pages:
             label = _slug_to_label(p.stem)
             lines.append(f"- [{label}](./{p.stem}/)")
