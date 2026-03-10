@@ -289,14 +289,8 @@ async def publish_mkdocs(
             from pathlib import Path as _Path
             from app.publishing import git_publisher as _gp
             _branding = dict(_gp._current_branding) if _gp._current_branding else {}
-            # Site name: use the org name as the site title since this is the
-            # org's documentation site.  If the org has only one leaf project,
-            # use that project's name instead (single-project orgs).
-            _leaf_projects = [p for p in projects if not p.parent_id]
-            if len(_leaf_projects) == 1:
-                _branding["site_name"] = _leaf_projects[0].name
-            else:
-                _branding["site_name"] = org.name or "Documentation"
+            # Always use the organization name as the site title.
+            _branding["site_name"] = org.name or "Documentation"
             logger.info("Publish: final branding site_name=%s, _current_branding=%s",
                         _branding.get("site_name"), bool(_gp._current_branding))
             _repo_path = _Path(_settings.docs_repo_path)

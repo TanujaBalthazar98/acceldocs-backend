@@ -537,12 +537,15 @@ def _folder_title(name: str) -> str:
     """Convert a slug folder name to a human-readable title.
 
     Handles version slugs like 'v1-0' → 'V1.0', 'v2-1-3' → 'V2.1.3'.
+    Strips leading numeric ordering prefixes (e.g. '2-release-notes' → 'Release Notes').
     Falls back to title-casing for everything else.
     """
-    m = _re.match(r"^v(\d+(?:-\d+)*)$", name)
+    # Strip leading number prefix used for ordering
+    cleaned = _re.sub(r"^\d+[-_]\s*", "", name)
+    m = _re.match(r"^v(\d+(?:-\d+)*)$", cleaned)
     if m:
         return "V" + m.group(1).replace("-", ".")
-    return name.replace("-", " ").replace("_", " ").title()
+    return cleaned.replace("-", " ").replace("_", " ").title()
 
 
 def _build_index_md(folder: Path, docs_dir: Path, marker: str) -> str:
@@ -578,7 +581,7 @@ def _build_index_md(folder: Path, docs_dir: Path, marker: str) -> str:
     if child_pages:
         lines.append("## Pages")
         for p in child_pages:
-            label = _folder_title(p.stem)
+            label = _slug_to_label(p.stem)
             lines.append(f"- [{label}](./{p.stem}/)")
         lines.append("")
 

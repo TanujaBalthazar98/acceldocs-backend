@@ -174,7 +174,9 @@ def _set_branding_from_doc(doc: Document, db) -> None:
                 repo_name = org.github_repo_full_name
 
             git_publisher._current_branding = {
-                "site_name": (proj.name if proj else None) or org.name or "Documentation",
+                # Always use the organization name as the site title.
+                # The project name appears in the nav, not the site header.
+                "site_name": org.name or "Documentation",
                 "site_description": org.tagline or "",
                 "primary_color": org.primary_color or None,
                 "accent_color": org.accent_color or None,
