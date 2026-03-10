@@ -192,6 +192,7 @@ def _sync_one_doc(
         existing.tags = tags
         existing.drive_modified_at = doc_file.modified_time
         existing.last_synced_at = now
+        existing.content_html = html  # keep cache current for approval fallback
 
         db.add(SyncLog(document_id=existing.id, action="sync"))
         result = "updated"
@@ -209,6 +210,7 @@ def _sync_one_doc(
             is_published=(status == "approved"),
             description=description,
             tags=tags,
+            content_html=html,  # keep cache current for approval fallback
             drive_modified_at=doc_file.modified_time,
             last_synced_at=now,
         )
