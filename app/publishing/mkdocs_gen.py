@@ -87,14 +87,18 @@ def generate_nav(docs_dir: Path) -> list[dict[str, Any]]:
         # Single project: promote its contents directly to the top level.
         # No need for a "Home" entry or a wrapping project section.
         single_dir = project_dirs[0]
+        project_label = _folder_title(single_dir.name)
         project_nav = _build_folder_nav(single_dir, docs_dir)
         if project_nav:
             # Flatten any single-child wrappers (e.g. version folders)
-            _, flattened_nav = _flatten_single_child(
-                _folder_title(single_dir.name), project_nav
-            )
-            # Promote the inner items directly into the top-level nav
+            _, flattened_nav = _flatten_single_child(project_label, project_nav)
+            # Promote the inner items directly into the top-level nav.
+            # Rename "Overview" to the project name so it reads as
+            # "Release Notes" instead of a generic "Overview".
             for item in flattened_nav:
+                for key in list(item.keys()):
+                    if key.lower() == "overview" and isinstance(item[key], str):
+                        item[project_label] = item.pop(key)
                 nav.append(item)
         return nav
 

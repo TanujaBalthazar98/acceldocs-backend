@@ -256,6 +256,12 @@ async def publish_mkdocs(
                     doc_details.append(detail)
                     continue
 
+            # Log content length for diagnostics
+            content_len = len(doc.content_html or "") + len(doc.published_content_html or "")
+            detail["content_len"] = content_len
+            logger.info("Publishing doc %s (%s): content_len=%d has_html=%s has_pub=%s gdoc=%s",
+                        doc.id, doc.title, content_len, has_html, has_pub_html, doc.google_doc_id)
+
             commit_sha = _publish_to_git(doc, db=db, skip_deploy=True)
             if commit_sha:
                 doc.is_published = True
@@ -268,6 +274,8 @@ async def publish_mkdocs(
             else:
                 skipped += 1
                 detail["status"] = "skipped_no_changes"
+                logger.warning("Doc %s (%s) returned no commit — check if content was empty or unchanged",
+                               doc.id, doc.title)
         except Exception as e:
             logger.error("Failed to publish doc %s: %s", doc.id, e)
             errors += 1
