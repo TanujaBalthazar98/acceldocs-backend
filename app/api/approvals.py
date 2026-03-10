@@ -13,7 +13,7 @@ from app.database import get_db
 from app.ingestion.drive import _get_service, export_doc_as_html
 from app.middleware.auth import AuthUser, require_auth, require_role
 from app.models import Approval, Document, OrgRole, Project, User
-from app.publishing.git_publisher import publish_to_production, unpublish_from_production
+from app.publishing.git_publisher import promote_preview_to_production, publish_to_production, unpublish_from_production
 from app.services.documents import _resolve_publish_path, _set_branding_from_doc
 
 router = APIRouter()
@@ -235,30 +235,37 @@ async def perform_action(
     if body.action == "approve":
         try:
             _set_branding_from_doc(doc, db)
-            html = None
-            try:
-                service = await _get_drive_service_for_doc(doc, db, fallback_user=actor)
-                html = export_doc_as_html(service, doc.google_doc_id)
-            except Exception as drive_err:
-                _log.warning("Drive fetch failed for doc %s, falling back to cache: %s", doc.id, drive_err)
-            if not html:
-                html = doc.content_html or doc.published_content_html
-            if not html:
-                from app.models import DocumentCache
-                cache = db.query(DocumentCache).filter(DocumentCache.document_id == doc.id).first()
-                if cache:
-                    html = cache.published_content_html_encrypted or cache.content_html_encrypted
-            if not html:
-                raise ValueError("No content available to publish")
-            markdown = convert_html_to_markdown(html)
             project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
-            commit_sha = publish_to_production(
-                project=project_slug,
-                version=version_slug,
-                section=section,
-                slug=doc_slug,
-                markdown=markdown,
-            )
+
+            # Primary path: promote the preview-branch file (synced from Drive) to main.
+            # This avoids needing Drive credentials in the web-server process.
+            commit_sha, _ = promote_preview_to_production(project_slug, version_slug, section, doc_slug)
+
+            # Fallback: build markdown from HTML if no preview file exists yet.
+            if not commit_sha:
+                html = None
+                try:
+                    service = await _get_drive_service_for_doc(doc, db, fallback_user=actor)
+                    html = export_doc_as_html(service, doc.google_doc_id)
+                except Exception as drive_err:
+                    _log.warning("Drive fetch failed for doc %s: %s", doc.id, drive_err)
+                if not html:
+                    html = doc.content_html or doc.published_content_html
+                if not html:
+                    from app.models import DocumentCache
+                    cache = db.query(DocumentCache).filter(DocumentCache.document_id == doc.id).first()
+                    if cache:
+                        html = cache.published_content_html_encrypted or cache.content_html_encrypted
+                if not html:
+                    raise ValueError("No content available to publish")
+                markdown = convert_html_to_markdown(html)
+                commit_sha = publish_to_production(
+                    project=project_slug,
+                    version=version_slug,
+                    section=section,
+                    slug=doc_slug,
+                    markdown=markdown,
+                )
 
             doc.status = "approved"
             doc.is_published = True
@@ -424,30 +431,36 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
     if action == "approve":
         try:
             _set_branding_from_doc(doc, db)
-            html = None
-            try:
-                service = await _get_drive_service_for_doc(doc, db, fallback_user=actor)
-                html = export_doc_as_html(service, doc.google_doc_id)
-            except Exception as drive_err:
-                _log.warning("Drive fetch failed for doc %s, falling back to cache: %s", doc.id, drive_err)
-            if not html:
-                html = doc.content_html or doc.published_content_html
-            if not html:
-                from app.models import DocumentCache
-                cache = db.query(DocumentCache).filter(DocumentCache.document_id == doc.id).first()
-                if cache:
-                    html = cache.published_content_html_encrypted or cache.content_html_encrypted
-            if not html:
-                return {"ok": False, "error": "No content available to publish"}
-            markdown = convert_html_to_markdown(html)
             project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
-            commit_sha = publish_to_production(
-                project=project_slug,
-                version=version_slug,
-                section=section,
-                slug=doc_slug,
-                markdown=markdown,
-            )
+
+            # Primary path: promote the preview-branch file (synced from Drive) to main.
+            commit_sha, _ = promote_preview_to_production(project_slug, version_slug, section, doc_slug)
+
+            # Fallback: build markdown from HTML if no preview file exists yet.
+            if not commit_sha:
+                html = None
+                try:
+                    service = await _get_drive_service_for_doc(doc, db, fallback_user=actor)
+                    html = export_doc_as_html(service, doc.google_doc_id)
+                except Exception as drive_err:
+                    _log.warning("Drive fetch failed for doc %s: %s", doc.id, drive_err)
+                if not html:
+                    html = doc.content_html or doc.published_content_html
+                if not html:
+                    from app.models import DocumentCache
+                    cache = db.query(DocumentCache).filter(DocumentCache.document_id == doc.id).first()
+                    if cache:
+                        html = cache.published_content_html_encrypted or cache.content_html_encrypted
+                if not html:
+                    return {"ok": False, "error": "No content available to publish"}
+                markdown = convert_html_to_markdown(html)
+                commit_sha = publish_to_production(
+                    project=project_slug,
+                    version=version_slug,
+                    section=section,
+                    slug=doc_slug,
+                    markdown=markdown,
+                )
             doc.status = "approved"
             doc.is_published = True
             doc.last_published_at = datetime.now(timezone.utc).isoformat()

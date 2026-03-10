@@ -135,6 +135,41 @@ def publish_to_production(
     return publish_document(project, version, section, slug, markdown, branch=MAIN_BRANCH)
 
 
+def promote_preview_to_production(
+    project: str, version: str, section: str | None, slug: str
+) -> tuple[str | None, str | None]:
+    """Read the markdown from docs-preview branch and publish it to main.
+
+    Returns (commit_sha, markdown) — markdown is None if preview file not found.
+    This lets approval publish exactly what the reviewer saw in preview,
+    without needing any Drive credentials.
+    """
+    active_branch: str | None = None
+    try:
+        repo = get_repo()
+        repo_path = Path(settings.docs_repo_path)
+        active_branch = _current_branch_name(repo)
+        rel_path = _document_rel_path(project, version, section, slug)
+
+        # Read markdown from preview branch
+        _ensure_branch(repo, PREVIEW_BRANCH)
+        preview_file = repo_path / rel_path
+        if not preview_file.exists():
+            logger.warning("No preview file found at %s on %s", rel_path, PREVIEW_BRANCH)
+            return None, None
+
+        markdown = preview_file.read_text(encoding="utf-8")
+    except Exception:
+        logger.exception("Failed to read preview file for %s/%s/%s", project, version, slug)
+        return None, None
+    finally:
+        _restore_branch(repo if "repo" in locals() else None, active_branch)
+
+    # Now publish that markdown to production
+    commit_sha = publish_document(project, version, section, slug, markdown, branch=MAIN_BRANCH)
+    return commit_sha, markdown
+
+
 def unpublish_from_production(
     project: str, version: str, section: str | None, slug: str
 ) -> str | None:
