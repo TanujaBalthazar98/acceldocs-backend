@@ -108,7 +108,13 @@ def convert_html_to_markdown(
     # Strip leading number prefixes from the first H1 heading.
     # Doc tools often prefix titles with ordering numbers like "5 version 4.7.0"
     # which should display as "Version 4.7.0".
-    md = re.sub(r"^(#{1,2}\s+)\d+[-_\s]+", r"\1", md, count=1)
+    def _strip_num_prefix(m: re.Match) -> str:
+        hashes = m.group(1)  # "# " or "## "
+        rest = m.group(2)
+        # Capitalize first letter after stripping number
+        return hashes + (rest[0].upper() + rest[1:] if rest else rest)
+
+    md = re.sub(r"^(#{1,2}\s+)\d+[-_\s]+(.)", _strip_num_prefix, md, count=1)
 
     return md
 
@@ -131,10 +137,11 @@ _FM_LINE_RE = re.compile(
 def _strip_md_frontmatter(md: str) -> str:
     """Strip frontmatter that leaked into markdown as body text.
 
-    Handles two cases:
+    Handles three cases:
     1. Proper YAML frontmatter: ---\\n...\\n---
-    2. Loose frontmatter: lines of "key: value" at the start (from Google Docs
-       rendering frontmatter as regular text without --- delimiters)
+    2. Loose frontmatter at the very start of the document
+    3. Loose frontmatter appearing right after the first heading
+       (Google Docs renders the doc title as H1, then frontmatter as body text)
     """
     if not md:
         return md
@@ -144,42 +151,40 @@ def _strip_md_frontmatter(md: str) -> str:
     if fm_match:
         md = md[fm_match.end():]
 
-    # Case 2: loose frontmatter — key:value lines at the very start
-    # Also handles single-line "type: page title: Version ... ---published"
+    # Case 2 & 3: loose frontmatter — scan ALL lines, removing any that
+    # look like frontmatter key:value pairs or concatenated frontmatter.
+    # Skip headings and blank lines, only strip matching fm lines.
     lines = md.split("\n")
-    strip_until = 0
-    found_fm = False
+    keep: list[int] = []  # indices of lines to remove
     for i, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
-            # Blank line: if we already found frontmatter, this ends the block
-            if found_fm:
-                strip_until = i + 1
-                break
             continue
-        # Also match concatenated frontmatter on a single line
+        # Skip markdown headings
+        if stripped.startswith("#"):
+            continue
+        # Concatenated frontmatter on a single line
         # e.g. "type: page title: Version 4.7.0 listed: true slug: ..."
         fm_key_count = sum(1 for k in _FM_KEYS if re.search(rf"\b{k}\s*:", stripped, re.I))
         if fm_key_count >= 2:
-            strip_until = i + 1
-            found_fm = True
+            keep.append(i)
             continue
-        # Check if line contains a single frontmatter key:value pair
-        if _FM_LINE_RE.match(stripped) and not found_fm:
-            # Only match single-key lines if they're at the very start
-            strip_until = i + 1
-            found_fm = True
+        # Single frontmatter key:value that starts the non-heading content
+        if _FM_LINE_RE.match(stripped):
+            keep.append(i)
             continue
-        # Check for "---published" or "--- published" (closing frontmatter marker)
-        if stripped.startswith("---") and found_fm:
-            strip_until = i + 1
-            break
+        # "---published" or similar closing marker
+        if stripped.startswith("---") and keep:
+            keep.append(i)
+            continue
+        # Stop scanning once we hit real content (not a heading, blank, or fm)
         break
 
-    if strip_until > 0:
-        remaining = "\n".join(lines[strip_until:]).strip()
-        if remaining:
-            md = remaining
+    if keep:
+        result_lines = [lines[i] for i in range(len(lines)) if i not in set(keep)]
+        cleaned = "\n".join(result_lines).strip()
+        if cleaned:
+            md = cleaned
 
     return md
 

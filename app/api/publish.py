@@ -256,7 +256,7 @@ async def publish_mkdocs(
                     doc_details.append(detail)
                     continue
 
-            commit_sha = _publish_to_git(doc, db=db)
+            commit_sha = _publish_to_git(doc, db=db, skip_deploy=True)
             if commit_sha:
                 doc.is_published = True
                 doc.last_published_at = datetime.now(timezone.utc).isoformat()

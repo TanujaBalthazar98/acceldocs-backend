@@ -274,11 +274,15 @@ def _publish_to_preview(doc: Document, db=None) -> str | None:
         return None
 
 
-def _publish_to_git(doc: Document, db=None) -> str | None:
+def _publish_to_git(doc: Document, db=None, *, skip_deploy: bool = False) -> str | None:
     """Convert document HTML to Markdown and commit to Git production branch.
 
     If the project is public and GitHub is configured, also builds the Zensical
     site and pushes the pre-built HTML to the gh-pages branch automatically.
+
+    Args:
+        skip_deploy: If True, skip the per-doc auto-deploy to gh-pages.
+            Used during bulk publish where a single deploy happens at the end.
     """
     try:
         from app.conversion.html_to_md import convert_html_to_markdown
@@ -310,7 +314,8 @@ def _publish_to_git(doc: Document, db=None) -> str | None:
         if commit_sha:
             logger.info("Published doc %s (%s) to Git: %s", doc.id, doc.title, commit_sha[:8])
             # Auto-deploy to GitHub Pages for public projects
-            if db:
+            # (skip during bulk publish — the caller handles a single deploy at the end)
+            if db and not skip_deploy:
                 _auto_deploy_if_public(doc, db)
         return commit_sha
     except Exception:
