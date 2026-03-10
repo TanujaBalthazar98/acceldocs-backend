@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
+from googleapiclient.discovery import build as _gdrive_build
+
 from app.conversion.html_to_md import convert_html_to_markdown
 from app.database import get_db
 from app.ingestion.drive import _get_service, export_doc_as_html
@@ -15,6 +17,39 @@ from app.publishing.git_publisher import publish_to_production, unpublish_from_p
 from app.services.documents import _resolve_publish_path, _set_branding_from_doc
 
 router = APIRouter()
+
+
+import logging as _logging
+_log = _logging.getLogger(__name__)
+
+
+async def _get_drive_service_for_doc(doc: Document, db: Session, fallback_user: User | None = None):
+    """Build a Drive API service using stored OAuth credentials.
+
+    Tries in order: doc owner → fallback_user (approver) → global service account / ADC.
+    """
+    from app.services.drive import GoogleDriveService
+
+    candidates: list[User] = []
+    if doc.owner_id:
+        owner = db.get(User, doc.owner_id)
+        if owner:
+            candidates.append(owner)
+    if fallback_user and (not candidates or candidates[0].id != fallback_user.id):
+        candidates.append(fallback_user)
+
+    for user in candidates:
+        try:
+            svc = GoogleDriveService(db, user)
+            creds = await svc.get_credentials(None)
+            if creds:
+                _log.info("Using OAuth credentials for user %s to export doc %s", user.email, doc.id)
+                return _gdrive_build("drive", "v3", credentials=creds, cache_discovery=False)
+        except Exception as e:
+            _log.warning("Failed to get credentials for user %s: %s", user.email, e)
+
+    _log.warning("No per-user credentials found for doc %s, falling back to ADC/_get_service()", doc.id)
+    return _get_service()
 
 
 class ApprovalAction(BaseModel):
@@ -200,8 +235,10 @@ async def perform_action(
     if body.action == "approve":
         try:
             _set_branding_from_doc(doc, db)
-            service = _get_service()
-            html = export_doc_as_html(service, doc.google_doc_id)
+            html = doc.content_html or doc.published_content_html
+            if not html:
+                service = await _get_drive_service_for_doc(doc, db, fallback_user=actor)
+                html = export_doc_as_html(service, doc.google_doc_id)
             markdown = convert_html_to_markdown(html)
             project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
             commit_sha = publish_to_production(
@@ -376,8 +413,10 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
     if action == "approve":
         try:
             _set_branding_from_doc(doc, db)
-            service = _get_service()
-            html = export_doc_as_html(service, doc.google_doc_id)
+            html = doc.content_html or doc.published_content_html
+            if not html:
+                service = await _get_drive_service_for_doc(doc, db, fallback_user=actor)
+                html = export_doc_as_html(service, doc.google_doc_id)
             markdown = convert_html_to_markdown(html)
             project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
             commit_sha = publish_to_production(

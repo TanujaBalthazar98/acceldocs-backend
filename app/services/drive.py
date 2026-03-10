@@ -765,13 +765,50 @@ async def discover_drive_structure(body: dict, db: Session, user: User | None) -
 
         # Separate into categories for easier frontend consumption
         projects = [i for i in all_items if i["type"] == "project"]
-        subprojects = [i for i in all_items if i["type"] == "subproject"]
-        topics = [i for i in all_items if i["type"] == "topic"]
-        documents = [i for i in all_items if i["type"] == "document"]
+        subprojects_raw = [i for i in all_items if i["type"] == "subproject"]
+        topics_raw = [i for i in all_items if i["type"] == "topic"]
+        documents_raw = [i for i in all_items if i["type"] == "document"]
+
+        # Build lookup: folder_id → count of direct child docs
+        doc_count_by_parent: dict[str, int] = {}
+        for d in documents_raw:
+            pid = d["parentDriveId"]
+            doc_count_by_parent[pid] = doc_count_by_parent.get(pid, 0) + 1
+
+        # Shape subprojects and documents in the format DriveDiscoveryDialog expects
+        subprojects = [
+            {
+                "id": s["id"],
+                "name": s["name"],
+                "docCount": doc_count_by_parent.get(s["id"], 0),
+            }
+            for s in subprojects_raw
+        ]
+        documents = [
+            {
+                "id": d["id"],
+                "name": d["name"],
+                "folderId": d["parentDriveId"],
+            }
+            for d in documents_raw
+        ]
+        topics = [
+            {
+                "id": t["id"],
+                "name": t["name"],
+                "parentId": t.get("parentDriveId"),
+                "driveParentId": t["parentDriveId"],
+                "docCount": doc_count_by_parent.get(t["id"], 0),
+            }
+            for t in topics_raw
+        ]
 
         return {
             "ok": True,
             "rootFolderId": folder_id,
+            "subprojects": subprojects,
+            "documents": documents,
+            "topics": topics,
             "items": all_items,
             "summary": {
                 "projects": len(projects),

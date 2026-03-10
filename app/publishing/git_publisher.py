@@ -370,7 +370,7 @@ def _ensure_seed_commit(repo: git.Repo, repo_path: Path) -> None:
     docs_dir.mkdir(exist_ok=True)
     index_md = docs_dir / "index.md"
     if not index_md.exists():
-        index_md.write_text("# AccelDocs\n\nWelcome to the documentation.\n")
+        index_md.write_text("# Documentation\n\nWelcome to the documentation.\n")
     cfg_path = write_zensical_toml(repo_path, **_current_branding)
     repo.index.add(["docs/index.md", str(cfg_path.relative_to(repo_path))])
     repo.index.commit("Initial docs structure")
