@@ -98,8 +98,8 @@ async def publish_mkdocs(
     )
     if not org_role:
         return {"ok": False, "error": "Not a member of this organization"}
-    if org_role.role not in ("owner", "admin"):
-        return {"ok": False, "error": "Only owners and admins can publish"}
+    if org_role.role not in ("owner", "admin", "editor"):
+        return {"ok": False, "error": "Only owners, admins, and editors can publish"}
 
     # Get the org for site metadata
     org = db.get(Organization, org_id)
