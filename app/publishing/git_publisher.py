@@ -724,7 +724,10 @@ def _ensure_seed_commit(repo: git.Repo, repo_path: Path) -> None:
     docs_dir.mkdir(exist_ok=True)
     index_md = docs_dir / "index.md"
     if not index_md.exists():
-        index_md.write_text("# Documentation\n\nWelcome to the documentation.\n")
+        # Include the auto-generated marker so _ensure_landing_page will
+        # replace this placeholder with proper project-card content on first publish.
+        site_name = _current_branding.get("site_name") or "Documentation"
+        index_md.write_text(f"<!-- auto-generated-index -->\n# {site_name}\n\nWelcome to the documentation.\n")
     cfg_path = write_zensical_toml(repo_path, **_current_branding)
     repo.index.add(["docs/index.md", str(cfg_path.relative_to(repo_path))])
     repo.index.commit("Initial docs structure")
