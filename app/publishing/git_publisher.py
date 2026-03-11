@@ -315,6 +315,8 @@ def _detect_product_dirs(docs_dir: Path, skip_dirs: set[str]) -> list[Path]:
 
 def _deploy_single_site(repo_path: Path, remote_url: str) -> bool | str:
     """Build and deploy a single documentation site (no product subdivision)."""
+    from app.publishing.mkdocs_gen import _folder_title
+
     toml_path = repo_path / "zensical.toml"
     if not toml_path.exists():
         logger.warning("zensical.toml missing at %s — generating now", repo_path)
@@ -332,6 +334,21 @@ def _deploy_single_site(repo_path: Path, remote_url: str) -> bool | str:
     site_dir = repo_path / "site"
     if not site_dir.exists() or not any(site_dir.iterdir()):
         return "site/ directory is empty after build — nothing to deploy"
+
+    # Derive a project label from branding or from the first project folder name
+    branding = dict(_current_branding) if _current_branding else {}
+    project_label = branding.get("product_display_name") or ""
+    if not project_label:
+        docs_dir = repo_path / "docs"
+        proj_dirs = sorted(
+            d for d in docs_dir.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+        ) if docs_dir.exists() else []
+        if proj_dirs:
+            dn = proj_dirs[0] / ".display-name"
+            project_label = dn.read_text(encoding="utf-8").strip() if dn.exists() else _folder_title(proj_dirs[0].name)
+
+    _inject_org_navbar(site_dir, project_label, branding)
 
     return _push_site_to_gh_pages(site_dir, remote_url)
 

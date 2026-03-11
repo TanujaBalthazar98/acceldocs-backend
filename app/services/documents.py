@@ -220,11 +220,15 @@ def _set_branding_from_doc(doc: Document, db) -> None:
                 repo_url = f"https://github.com/{org.github_repo_full_name}"
                 repo_name = org.github_repo_full_name
 
-            # Determine the product (parent project) display name so the
-            # published site can show "Org Name | Project Name" in the navbar.
+            # Determine the project/product display name for the published navbar.
+            # Use parent project name when present (e.g. "ADOC"), otherwise fall
+            # back to the project's own name (e.g. "Release Notes").
             product_display_name: str | None = None
-            if doc.project_rel and doc.project_rel.parent:
-                product_display_name = doc.project_rel.parent.name
+            if doc.project_rel:
+                if doc.project_rel.parent:
+                    product_display_name = doc.project_rel.parent.name
+                else:
+                    product_display_name = doc.project_rel.name
 
             git_publisher._current_branding = {
                 # Always use the organization name as the site title.
