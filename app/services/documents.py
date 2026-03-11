@@ -1,6 +1,7 @@
 """Document management and cache functions."""
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import or_
@@ -9,6 +10,14 @@ from sqlalchemy.orm import Session, joinedload
 from app.models import User, Document, DocumentCache, Organization, Project, ProjectVersion, Topic
 
 logger = logging.getLogger(__name__)
+
+_PLACEHOLDER_PROJECT_SLUGS = {
+    "new-project",
+    "new-sub-project",
+    "new-subproject",
+    "project",
+    "untitled",
+}
 
 
 def _int(val) -> int | None:
@@ -19,6 +28,31 @@ def _int(val) -> int | None:
         return int(val)
     except (ValueError, TypeError):
         return None
+
+
+def _slugify_name(value: str | None) -> str:
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    return text.strip("-")
+
+
+def _project_slug_for_publish(project: Project | None) -> str:
+    """Resolve a stable publish slug for a project.
+
+    Placeholder slugs like ``new-project`` are treated as defaults and replaced
+    with a slug generated from the current project name.
+    """
+    if not project:
+        return ""
+    stored = (project.slug or "").strip().lower()
+    from_name = _slugify_name(project.name)
+    if not stored:
+        return from_name or "default"
+    if stored in _PLACEHOLDER_PROJECT_SLUGS and from_name and from_name != stored:
+        return from_name
+    return stored
 
 
 def _resolve_publish_path(doc: Document) -> tuple[str, str, str | None, str, str | None]:
@@ -40,14 +74,13 @@ def _resolve_publish_path(doc: Document) -> tuple[str, str, str | None, str, str
     project_slug = "default"
     if doc.project_rel:
         p = doc.project_rel
-        project_slug = p.slug or p.name.lower().replace(" ", "-")
+        project_slug = _project_slug_for_publish(p) or "default"
         # If the project has a parent → that parent is the "product"
         if p.parent:
-            # Derive from name rather than stored slug — stored slugs are often
-            # auto-generated defaults ("new-project") that don't reflect the actual name.
-            product_slug = (p.parent.name or "").lower().replace(" ", "-") or p.parent.slug
+            # Derive product slug with placeholder fallback (e.g. "new-project" → "adoc").
+            product_slug = _project_slug_for_publish(p.parent)
     elif doc.project:
-        project_slug = doc.project
+        project_slug = _slugify_name(doc.project) or doc.project
 
     # --- version slug ---
     # Skip the version folder entirely when the project has only one version
@@ -314,6 +347,33 @@ def _cleanup_stale_product_dir(doc: Document, new_product_slug: str | None) -> N
         logger.debug("Stale product dir cleanup skipped (%s → %s): %s", old_slug, new_product_slug, e)
 
 
+def _cleanup_stale_project_dir(doc: Document, new_project_slug: str, product_slug: str | None) -> None:
+    """Remove old project directory when stored slug differs from computed publish slug."""
+    if not (doc.project_rel and new_project_slug):
+        return
+
+    old_slug = (doc.project_rel.slug or "").strip().lower()
+    if not old_slug or old_slug == new_project_slug:
+        return
+
+    try:
+        from app.publishing.git_publisher import remove_stale_project_dir
+        remove_stale_project_dir(old_slug, product=product_slug)
+        logger.info(
+            "Cleaned up stale project dir: docs/%s%s → %s",
+            f"{product_slug}/" if product_slug else "",
+            old_slug,
+            new_project_slug,
+        )
+    except Exception as e:
+        logger.debug(
+            "Stale project dir cleanup skipped (%s → %s): %s",
+            old_slug,
+            new_project_slug,
+            e,
+        )
+
+
 def _publish_to_git(doc: Document, db=None, *, skip_deploy: bool = False) -> str | None:
     """Convert document HTML to Markdown and commit to Git production branch.
 
@@ -353,6 +413,7 @@ def _publish_to_git(doc: Document, db=None, *, skip_deploy: bool = False) -> str
         # Remove old product dir when the name-based slug differs from the stored slug
         # (e.g. parent project "ADOC" had stored slug "new-project" → clean up docs/new-project/)
         _cleanup_stale_product_dir(doc, product_slug)
+        _cleanup_stale_project_dir(doc, project_slug, product_slug)
 
         commit_sha = publish_to_production(project_slug, version_slug, section, doc_slug, markdown,
                                            product=product_slug)

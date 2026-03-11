@@ -1,7 +1,17 @@
 """Project, version, and topic management functions."""
 
+import re
+
 from sqlalchemy.orm import Session
 from app.models import User, Project, ProjectVersion, Topic, OrgRole, ProjectMember, Organization
+
+_PLACEHOLDER_PROJECT_SLUGS = {
+    "new-project",
+    "new-sub-project",
+    "new-subproject",
+    "project",
+    "untitled",
+}
 
 
 def _int(val) -> int | None:
@@ -12,6 +22,13 @@ def _int(val) -> int | None:
         return int(val)
     except (ValueError, TypeError):
         return None
+
+
+def _slugify_name(value: str | None) -> str:
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
 
 
 async def list_projects(body: dict, db: Session, user: User | None) -> dict:
@@ -76,9 +93,18 @@ async def create_project(body: dict, db: Session, user: User | None) -> dict:
 
         # Create project
         parent_id = body.get("parent_id") or body.get("parentId")
+        name = body.get("name", "New Project")
+        incoming_slug = (body.get("slug") or "").strip().lower()
+        derived_slug = _slugify_name(name)
+        slug = (
+            incoming_slug
+            if incoming_slug and incoming_slug not in _PLACEHOLDER_PROJECT_SLUGS
+            else (derived_slug or "new-project")
+        )
+
         project = Project(
-            name=body.get("name", "New Project"),
-            slug=body.get("slug", "new-project"),
+            name=name,
+            slug=slug,
             description=body.get("description"),
             drive_folder_id=body.get("drive_folder_id") or body.get("driveFolderId"),
             drive_parent_id=body.get("drive_parent_id") or body.get("driveParentId"),
@@ -154,12 +180,18 @@ async def update_project_settings(body: dict, db: Session, user: User | None) ->
             "visibility", "default_visibility", "require_approval",
             "show_version_switcher", "is_published",
         ]
+        incoming_name = fields.get("name", project.name)
         for field in updatable_fields:
             if field in fields:
                 val = fields[field]
                 # Skip NOT NULL fields if value is null/empty to avoid constraint violations
                 if field in ("name", "slug") and not val:
                     continue
+                if field == "slug":
+                    raw = str(val).strip().lower()
+                    if raw in _PLACEHOLDER_PROJECT_SLUGS:
+                        replacement = _slugify_name(str(incoming_name))
+                        val = replacement or raw
                 setattr(project, field, val)
 
         # When publishing a project, auto-publish all documents that have content

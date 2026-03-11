@@ -127,6 +127,19 @@ def _build_tab_items(
     return items
 
 
+def _first_page_ref(nav_items: list[dict[str, Any]]) -> str | None:
+    """Return the first markdown path found in a nav tree."""
+    for entry in nav_items:
+        for _, val in entry.items():
+            if isinstance(val, str):
+                return val
+            if isinstance(val, list):
+                nested = _first_page_ref(val)
+                if nested:
+                    return nested
+    return None
+
+
 def _flatten_single_child(label: str, nav_items: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
     """Recursively flatten single-child wrapper folders.
 
@@ -557,13 +570,15 @@ def _ensure_landing_page(docs_dir: Path, marker: str) -> None:
 
     if project_dirs:
         for pdir in project_dirs:
-            label = _folder_title(pdir.name)
-            # Link to the project's index page (first page in the tab)
-            project_index = pdir / "index.md"
-            if project_index.exists():
-                rel = str(project_index.relative_to(docs_dir))
-            else:
-                # Find first .md file in the project
+            raw_label = _folder_title(pdir.name)
+            raw_nav = _build_folder_nav(pdir, docs_dir)
+            label, flattened_nav = _flatten_single_child(raw_label, raw_nav)
+
+            # Link to the first page in the flattened view so wrappers such as
+            # "New Project > Release Notes" land directly on "Release Notes".
+            rel = _first_page_ref(flattened_nav)
+            if not rel:
+                # Fallback: first markdown file in the folder tree.
                 first_md = next(pdir.rglob("*.md"), None)
                 rel = str(first_md.relative_to(docs_dir)) if first_md else f"{pdir.name}/"
             # Count non-index pages for the subtitle

@@ -626,6 +626,48 @@ def remove_stale_product_dir(old_product_slug: str) -> None:
         _restore_branch(repo if "repo" in locals() else None, active_branch)
 
 
+def remove_stale_project_dir(old_project_slug: str, *, product: str | None = None) -> None:
+    """Remove a stale project directory from main.
+
+    Supports both layouts:
+      - docs/{project}/...
+      - docs/{product}/{project}/...
+    """
+    active_branch: str | None = None
+    try:
+        repo = get_repo()
+        repo_path = _get_repo_path()
+        active_branch = _current_branch_name(repo)
+        _ensure_branch(repo, MAIN_BRANCH)
+
+        stale_dir = repo_path / "docs"
+        if product:
+            stale_dir = stale_dir / _safe_path(product)
+        stale_dir = stale_dir / _safe_path(old_project_slug)
+
+        if not stale_dir.exists():
+            return
+
+        shutil.rmtree(stale_dir)
+        try:
+            rel = str(stale_dir.relative_to(repo_path))
+            repo.git.rm("-r", "--cached", "--ignore-unmatch", rel)
+        except Exception:
+            pass
+
+        repo.git.add("-A")
+        if repo.is_dirty(untracked_files=True):
+            repo.index.commit(
+                f"Remove stale project dir: {old_project_slug}"
+                + (f" (product: {product})" if product else "")
+            )
+            logger.info("Removed stale project dir %s", stale_dir)
+    except Exception:
+        logger.exception("Failed to remove stale project dir: %s", old_project_slug)
+    finally:
+        _restore_branch(repo if "repo" in locals() else None, active_branch)
+
+
 def push_branch(branch: str = MAIN_BRANCH) -> bool:
     try:
         repo = get_repo()
