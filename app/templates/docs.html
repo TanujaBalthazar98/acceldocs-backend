@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ page_title }} — {{ org_name }}</title>
+  <meta name="description" content="{{ page_title }} documentation" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,600;0,700;1,500&display=swap" rel="stylesheet" />
+
+  <style>
+    :root {
+      --accent: {{ primary_color }};
+      --sidebar-w: 272px;
+      --topbar-h: 56px;
+      --bg: #FFFFFF;
+      --bg-sidebar: #F8F7F4;
+      --bg-hover: #F0EEE9;
+      --border: #E8E6E0;
+      --text: #0D0D0C;
+      --text-2: #5C5A55;
+      --text-3: #9B9890;
+      --radius: 8px;
+      --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+      --shadow-md: 0 4px 16px rgba(0,0,0,0.08), 0 2px 6px rgba(0,0,0,0.04);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-size: 15px; -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    /* ── Topbar ───────────────────────────────────────────────────── */
+    .topbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: var(--topbar-h);
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      background: rgba(255,255,255,0.88);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      z-index: 200;
+    }
+
+    .topbar-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.875rem;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.01em;
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      padding-right: 20px;
+    }
+
+    .brand-avatar {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      flex-shrink: 0;
+    }
+
+    .brand-avatar img {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      object-fit: contain;
+    }
+
+    .topbar-right {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+    }
+
+    .search-box {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 13px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      font-size: 0.8rem;
+      color: var(--text-3);
+      cursor: pointer;
+      background: var(--bg-sidebar);
+      width: 210px;
+      transition: border-color 0.15s, background 0.15s;
+    }
+
+    .search-box:hover { border-color: #D0CEC8; background: var(--bg); }
+
+    .search-box svg { width: 13px; height: 13px; flex-shrink: 0; opacity: 0.6; }
+
+    .search-kbd {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 5px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 10px;
+      font-family: inherit;
+      color: var(--text-3);
+      background: white;
+    }
+
+    /* ── Layout ───────────────────────────────────────────────────── */
+    .layout {
+      display: grid;
+      grid-template-columns: var(--sidebar-w) 1fr;
+      min-height: 100vh;
+      padding-top: var(--topbar-h);
+    }
+
+    /* ── Sidebar ──────────────────────────────────────────────────── */
+    .sidebar {
+      position: sticky;
+      top: var(--topbar-h);
+      height: calc(100vh - var(--topbar-h));
+      overflow-y: auto;
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border);
+      padding: 24px 0 48px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    .sidebar::-webkit-scrollbar { width: 3px; }
+    .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .sidebar-section { margin-bottom: 4px; }
+
+    .sidebar-section-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 18px 5px 20px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      cursor: pointer;
+      user-select: none;
+      transition: color 0.15s;
+    }
+
+    .sidebar-section-label:hover { color: var(--text-2); }
+
+    .sidebar-chevron {
+      width: 10px;
+      height: 10px;
+      transition: transform 0.2s ease;
+      opacity: 0.5;
+    }
+
+    .sidebar-section.collapsed .sidebar-chevron { transform: rotate(-90deg); }
+    .sidebar-section.collapsed .sidebar-items { display: none; }
+
+    .sidebar-page {
+      display: block;
+      padding: 5px 18px 5px 24px;
+      font-size: 0.845rem;
+      color: var(--text-2);
+      transition: color 0.12s;
+      position: relative;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border-left: 2px solid transparent;
+      margin-left: 4px;
+    }
+
+    .sidebar-page:hover { color: var(--text); background: var(--bg-hover); }
+
+    .sidebar-page.active {
+      color: var(--accent);
+      font-weight: 600;
+      border-left-color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+    }
+
+    /* ── Main content ─────────────────────────────────────────────── */
+    .main { min-width: 0; }
+
+    .content-wrap {
+      max-width: 720px;
+      padding: 48px 56px 100px;
+      animation: fadeUp 0.3s ease both;
+    }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Breadcrumb ───────────────────────────────────────────────── */
+    .breadcrumb {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 36px;
+      font-size: 0.775rem;
+      color: var(--text-3);
+    }
+
+    .breadcrumb a { transition: color 0.15s; }
+    .breadcrumb a:hover { color: var(--text-2); }
+    .breadcrumb-sep { opacity: 0.35; font-size: 0.9em; }
+    .breadcrumb span:last-child { color: var(--text-2); }
+
+    /* ── Page content ─────────────────────────────────────────────── */
+    .page-content {
+      font-size: 0.955rem;
+      line-height: 1.82;
+      color: #2A2925;
+    }
+
+    .page-content h1 {
+      font-family: 'Playfair Display', Georgia, serif;
+      font-size: 2.05rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      margin-bottom: 20px;
+      line-height: 1.2;
+    }
+
+    .page-content h2 {
+      font-size: 1.18rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-top: 2.75rem;
+      margin-bottom: 0.75rem;
+      letter-spacing: -0.012em;
+      padding-bottom: 0.6rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .page-content h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-top: 2rem;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.005em;
+    }
+
+    .page-content h4, .page-content h5, .page-content h6 {
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--text-3);
+      margin-top: 1.5rem;
+      margin-bottom: 0.4rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+    }
+
+    .page-content p { margin-bottom: 1.1rem; }
+
+    .page-content ul, .page-content ol {
+      margin: 0.5rem 0 1.1rem 1.35rem;
+    }
+
+    .page-content li { margin-bottom: 0.35rem; }
+
+    .page-content code {
+      font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+      font-size: 0.81em;
+      background: #F2F0EC;
+      border: 1px solid #E5E3DC;
+      border-radius: 5px;
+      padding: 0.1em 0.4em;
+      color: #1C1C1A;
+    }
+
+    .page-content pre {
+      background: #18181A;
+      border-radius: 10px;
+      padding: 20px 24px;
+      overflow-x: auto;
+      margin: 1.5rem 0;
+      border: 1px solid #2C2C30;
+    }
+
+    .page-content pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      color: #D4D4CE;
+      font-size: 0.83rem;
+      line-height: 1.7;
+    }
+
+    .page-content blockquote {
+      border-left: 2px solid var(--accent);
+      padding: 12px 20px;
+      margin: 1.5rem 0;
+      background: color-mix(in srgb, var(--accent) 5%, transparent);
+      border-radius: 0 8px 8px 0;
+      color: var(--text-2);
+      font-style: italic;
+    }
+
+    .page-content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.5rem 0;
+      font-size: 0.875rem;
+    }
+
+    .page-content th {
+      text-align: left;
+      padding: 9px 14px;
+      background: var(--bg-sidebar);
+      border: 1px solid var(--border);
+      font-weight: 700;
+      font-size: 0.78rem;
+      color: var(--text-2);
+      letter-spacing: 0.02em;
+    }
+
+    .page-content td {
+      padding: 9px 14px;
+      border: 1px solid var(--border);
+      color: var(--text-2);
+    }
+
+    .page-content tr:nth-child(even) td { background: #FAFAF8; }
+
+    .page-content img {
+      max-width: 100%;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      margin: 1.25rem 0;
+    }
+
+    .page-content a {
+      color: var(--accent);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      text-decoration-thickness: 1px;
+    }
+
+    .page-content a:hover { opacity: 0.75; }
+
+    .page-content hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2.5rem 0;
+    }
+
+    /* ── Landing ──────────────────────────────────────────────────── */
+    .landing { padding-top: 8px; }
+
+    .landing-eyebrow {
+      display: inline-block;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 14px;
+      opacity: 0.85;
+    }
+
+    .landing-title {
+      font-family: 'Playfair Display', Georgia, serif;
+      font-size: 2.6rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: var(--text);
+      margin-bottom: 14px;
+      line-height: 1.15;
+    }
+
+    .landing-tagline {
+      font-size: 1rem;
+      color: var(--text-2);
+      max-width: 460px;
+      line-height: 1.7;
+      margin-bottom: 48px;
+    }
+
+    .section-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));
+      gap: 14px;
+    }
+
+    .section-card {
+      display: block;
+      padding: 22px 20px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--bg);
+      cursor: pointer;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s;
+    }
+
+    .section-card:hover {
+      transform: translateY(-2px);
+      border-color: #D0CEC8;
+      box-shadow: var(--shadow-md);
+    }
+
+    .section-card-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--accent) 12%, #F8F7F4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 14px;
+      color: var(--accent);
+    }
+
+    .section-card-icon svg { width: 18px; height: 18px; }
+
+    .section-card-name {
+      font-size: 0.88rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 4px;
+      letter-spacing: -0.01em;
+    }
+
+    .section-card-count {
+      font-size: 0.77rem;
+      color: var(--text-3);
+    }
+
+    /* ── Search modal ─────────────────────────────────────────────── */
+    .search-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      z-index: 400;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding-top: 72px;
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      animation: overlayIn 0.15s ease;
+    }
+
+    @keyframes overlayIn {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+
+    .search-overlay.hidden { display: none; }
+
+    .search-dialog {
+      width: 560px;
+      max-width: calc(100vw - 32px);
+      background: #fff;
+      border-radius: 14px;
+      box-shadow: 0 24px 80px rgba(0,0,0,0.18), 0 4px 16px rgba(0,0,0,0.08);
+      overflow: hidden;
+      animation: dialogIn 0.18s ease;
+    }
+
+    @keyframes dialogIn {
+      from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .search-input-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .search-input-row svg { width: 16px; height: 16px; color: var(--text-3); flex-shrink: 0; }
+
+    .search-input-row input {
+      flex: 1;
+      border: none;
+      outline: none;
+      font-size: 0.95rem;
+      font-family: inherit;
+      color: var(--text);
+      background: transparent;
+    }
+
+    .search-input-row input::placeholder { color: var(--text-3); }
+
+    .search-esc {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 7px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      font-size: 11px;
+      font-family: inherit;
+      color: var(--text-3);
+      background: var(--bg-sidebar);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .search-results { max-height: 380px; overflow-y: auto; padding: 8px; }
+
+    .search-result {
+      display: block;
+      padding: 10px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.1s;
+      text-decoration: none;
+    }
+
+    .search-result:hover { background: var(--bg-hover); }
+
+    .search-result-title {
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--text);
+    }
+
+    .search-result-title mark {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      color: var(--accent);
+      border-radius: 2px;
+      padding: 0 1px;
+      font-style: normal;
+    }
+
+    .search-result-section {
+      font-size: 0.77rem;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .search-empty, .search-loading {
+      padding: 28px 16px;
+      text-align: center;
+      font-size: 0.875rem;
+      color: var(--text-3);
+    }
+
+    /* ── Google Docs HTML reset ───────────────────────────────────── */
+    .page-content [style*="font-size"] { font-size: inherit !important; }
+    .page-content [style*="font-family"] { font-family: inherit !important; }
+    .page-content span[style] { background: none !important; }
+    .page-content [style*="color: #000"] { color: inherit !important; }
+    .page-content [style*="color:#000"] { color: inherit !important; }
+
+    /* ── Mobile ───────────────────────────────────────────────────── */
+    @media (max-width: 780px) {
+      .layout { grid-template-columns: 1fr; }
+
+      .sidebar {
+        position: static;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 16px 0;
+        max-height: 260px;
+      }
+
+      .topbar-brand { width: auto; }
+      .content-wrap { padding: 28px 20px 64px; }
+      .landing-title { font-size: 1.9rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Topbar -->
+  <header class="topbar">
+    <a href="/docs/{{ org_slug }}" class="topbar-brand">
+      {% if org_logo %}
+        <div class="brand-avatar"><img src="{{ org_logo }}" alt="{{ org_name }}" /></div>
+      {% else %}
+        <div class="brand-avatar">{{ org_initials }}</div>
+      {% endif %}
+      <span>{{ org_name }}</span>
+    </a>
+    <div class="topbar-right">
+      <div class="search-box">
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/>
+          <path stroke-linecap="round" d="M21 21l-4.35-4.35"/>
+        </svg>
+        Search docs…
+        <span class="search-kbd">⌘K</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Search modal -->
+  <div id="searchOverlay" class="search-overlay hidden" role="dialog" aria-label="Search">
+    <div class="search-dialog">
+      <div class="search-input-row">
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/>
+          <path stroke-linecap="round" d="M21 21l-4.35-4.35"/>
+        </svg>
+        <input id="searchInput" type="text" placeholder="Search documentation…" autocomplete="off" spellcheck="false" />
+        <button class="search-esc" onclick="closeSearch()">Esc</button>
+      </div>
+      <div id="searchResults" class="search-results"></div>
+    </div>
+  </div>
+
+  <div class="layout">
+
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      {% for section in nav_sections %}
+        <div class="sidebar-section" id="sec-{{ section.id }}">
+          {% if section.name %}
+            <div class="sidebar-section-label" onclick="toggleSection('sec-{{ section.id }}')">
+              {{ section.name }}
+              <svg class="sidebar-chevron" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </div>
+          {% endif %}
+          <div class="sidebar-items">
+            {% for page in section.pages %}
+              <a href="/docs/{{ org_slug }}/{{ page.slug }}"
+                 class="sidebar-page {% if page.slug == current_page_slug %}active{% endif %}">
+                {{ page.title }}
+              </a>
+            {% endfor %}
+          </div>
+        </div>
+      {% endfor %}
+    </nav>
+
+    <!-- Main -->
+    <main class="main">
+      <div class="content-wrap">
+
+        {% if current_page %}
+          <!-- Breadcrumb -->
+          <nav class="breadcrumb" aria-label="Breadcrumb">
+            <a href="/docs/{{ org_slug }}">{{ org_name }}</a>
+            {% if current_page.section_name %}
+              <span class="breadcrumb-sep">›</span>
+              <span>{{ current_page.section_name }}</span>
+            {% endif %}
+            <span class="breadcrumb-sep">›</span>
+            <span>{{ current_page.title }}</span>
+          </nav>
+
+          <article class="page-content">
+            {{ page_html | safe }}
+          </article>
+
+        {% else %}
+          <!-- Landing -->
+          <div class="landing">
+            <span class="landing-eyebrow">Documentation</span>
+            <h1 class="landing-title">{{ org_name }}</h1>
+            <p class="landing-tagline">{{ org_tagline or "Browse the sections below to get started." }}</p>
+
+            {% if top_sections %}
+              <div class="section-grid">
+                {% for section in top_sections %}
+                  <a href="/docs/{{ org_slug }}/{{ section.first_page_slug or '#' }}" class="section-card">
+                    <div class="section-card-icon">
+                      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                          d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/>
+                      </svg>
+                    </div>
+                    <div class="section-card-name">{{ section.name }}</div>
+                    <div class="section-card-count">{{ section.page_count }} page{% if section.page_count != 1 %}s{% endif %}</div>
+                  </a>
+                {% endfor %}
+              </div>
+            {% else %}
+              <p style="color: var(--text-3); font-size: 0.9rem;">No published content yet.</p>
+            {% endif %}
+          </div>
+        {% endif %}
+
+      </div>
+    </main>
+
+  </div>
+
+  <script>
+    // ── Sidebar collapse ──────────────────────────────────────────
+    function toggleSection(id) {
+      document.getElementById(id).classList.toggle('collapsed');
+    }
+
+    // ── Search ────────────────────────────────────────────────────
+    const ORG_SLUG = {{ org_slug | tojson }};
+    const overlay  = document.getElementById('searchOverlay');
+    const input    = document.getElementById('searchInput');
+    const results  = document.getElementById('searchResults');
+    let   timer    = null;
+
+    document.querySelector('.search-box').addEventListener('click', openSearch);
+
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); openSearch(); }
+      if (e.key === 'Escape') closeSearch();
+    });
+
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSearch(); });
+
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      const q = input.value.trim();
+      if (!q) { results.innerHTML = ''; return; }
+      timer = setTimeout(() => doSearch(q), 220);
+    });
+
+    function openSearch() {
+      overlay.classList.remove('hidden');
+      input.focus();
+      input.select();
+    }
+
+    function closeSearch() {
+      overlay.classList.add('hidden');
+      input.value = '';
+      results.innerHTML = '';
+    }
+
+    async function doSearch(q) {
+      results.innerHTML = '<div class="search-loading">Searching…</div>';
+      try {
+        const res  = await fetch(`/docs/${ORG_SLUG}/search?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        renderResults(data.results, q);
+      } catch {
+        results.innerHTML = '<div class="search-empty">Search unavailable</div>';
+      }
+    }
+
+    function renderResults(items, q) {
+      if (!items.length) {
+        results.innerHTML = `<div class="search-empty">No results for <strong>"${esc(q)}"</strong></div>`;
+        return;
+      }
+      results.innerHTML = items.map(r => `
+        <a href="/docs/${ORG_SLUG}/${r.slug}" class="search-result" onclick="closeSearch()">
+          <div class="search-result-title">${highlight(r.title, q)}</div>
+          ${r.section_name ? `<div class="search-result-section">${esc(r.section_name)}</div>` : ''}
+        </a>
+      `).join('');
+    }
+
+    function highlight(text, q) {
+      const i = text.toLowerCase().indexOf(q.toLowerCase());
+      if (i < 0) return esc(text);
+      return esc(text.slice(0, i)) + '<mark>' + esc(text.slice(i, i + q.length)) + '</mark>' + esc(text.slice(i + q.length));
+    }
+
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+  </script>
+
+</body>
+</html>

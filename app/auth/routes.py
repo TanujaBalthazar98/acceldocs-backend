@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
+from app.lib.slugify import to_slug as slugify
 from app.models import GoogleToken, Organization, OrgRole, User
 from app.services.encryption import get_encryption_service
 
@@ -403,6 +404,7 @@ async def callback(
 
             organization = Organization(
                 name=org_name,
+                slug=slugify(org_name) if org_name else None,
                 drive_folder_id=drive_folder_id,
                 domain=claimed_domain,
                 owner_id=user.id
@@ -445,7 +447,7 @@ async def callback(
                 if not domain_in_use:
                     claimed_domain = inferred_domain
 
-            organization = Organization(name=default_name, domain=claimed_domain, owner_id=user.id)
+            organization = Organization(name=default_name, slug=slugify(default_name), domain=claimed_domain, owner_id=user.id)
             db.add(organization)
             db.flush()
 

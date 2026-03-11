@@ -412,3 +412,72 @@ class GoogleToken(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "organization_id", name="unique_user_org_token"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Clean architecture models — sections and pages replace the old
+# Project / Topic / Document hierarchy.
+# ---------------------------------------------------------------------------
+
+class Section(Base):
+    """A section groups related pages. Sections can nest (parent_id for sub-sections).
+
+    Top-level sections map to "products" or "books"; sub-sections map to chapters/topics.
+    Each section can optionally be backed by a Google Drive folder.
+    """
+    __tablename__ = "sections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("sections.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    drive_folder_id: Mapped[str | None] = mapped_column(String(255))
+    display_order: Mapped[int] = mapped_column(Integer, default=0)
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    organization: Mapped["Organization"] = relationship("Organization", foreign_keys=[organization_id])
+    parent: Mapped["Section | None"] = relationship("Section", remote_side=[id], back_populates="children")
+    children: Mapped[list["Section"]] = relationship("Section", back_populates="parent", order_by="Section.display_order")
+    pages: Mapped[list["Page"]] = relationship(back_populates="section", cascade="all, delete-orphan", order_by="Page.display_order")
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "parent_id", "slug", name="uq_section_slug_within_parent"),
+    )
+
+
+class Page(Base):
+    """A single documentation page, sourced from a Google Doc.
+
+    html_content is updated on every Drive sync.
+    published_html is a snapshot taken when the page is published — it is what
+    end-users see and is never modified by sync.
+    """
+    __tablename__ = "pages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    section_id: Mapped[int | None] = mapped_column(ForeignKey("sections.id", ondelete="SET NULL"))
+    google_doc_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    slug: Mapped[str] = mapped_column(String(500), nullable=False)
+    html_content: Mapped[str | None] = mapped_column(Text)          # latest synced from Drive
+    published_html: Mapped[str | None] = mapped_column(Text)        # snapshot at publish time
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(50), default="draft")  # draft | published
+    display_order: Mapped[int] = mapped_column(Integer, default=0)
+    drive_modified_at: Mapped[str | None] = mapped_column(String(50))
+    last_synced_at: Mapped[str | None] = mapped_column(String(50))
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    organization: Mapped["Organization"] = relationship("Organization", foreign_keys=[organization_id])
+    section: Mapped["Section | None"] = relationship(back_populates="pages")
+    owner: Mapped["User | None"] = relationship("User", foreign_keys=[owner_id])
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "google_doc_id", name="uq_page_google_doc_per_org"),
+    )

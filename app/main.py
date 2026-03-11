@@ -1,4 +1,4 @@
-"""AccelDocs backend — FastAPI application entry point."""
+"""AccelDocs backend — clean architecture entry point."""
 
 import logging
 from contextlib import asynccontextmanager
@@ -9,20 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import Base, engine
 from app.services.encryption import init_encryption_service
+
+# New clean-arch routers
 from app.api.health import router as health_router
-from app.api.documents import router as documents_router
-from app.api.sync import router as sync_router
-from app.api.approvals import router as approvals_router
-from app.api.users import router as users_router
-from app.api.settings import router as settings_router
-from app.api.projects import router as projects_router
+from app.api.org import router as org_router
+from app.api.sections import router as sections_router
+from app.api.pages import router as pages_router
 from app.api.drive import router as drive_router
-from app.api.analytics import router as analytics_router
-from app.api.ui import router as ui_router
-from app.api.functions import router as functions_router
-from app.api.publish import router as publish_router
 from app.api.public import router as public_router
-from app.api.github_publish import router as github_router
 from app.auth.routes import router as auth_router
 
 logging.basicConfig(
@@ -32,18 +26,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _ensure_missing_columns(eng):
-    """Add any columns present in ORM models but missing from the live DB.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Initializing AccelDocs (clean-arch)…")
+    init_encryption_service(settings.secret_key)
 
-    SQLAlchemy's create_all() only creates new tables; it never alters existing
-    ones.  This helper inspects every mapped table and issues ALTER TABLE ADD
-    COLUMN for anything that doesn't exist yet — safe to run on every startup.
-    """
+    if settings.auto_create_schema:
+        logger.info("Creating / updating database schema…")
+        Base.metadata.create_all(bind=engine)
+        _add_missing_columns()
+
+    logger.info("AccelDocs backend ready on %s:%s", settings.host, settings.port)
+    yield
+
+
+def _add_missing_columns() -> None:
+    """Best-effort: ALTER TABLE for any ORM column not yet in the live DB."""
     from sqlalchemy import inspect as sa_inspect, text
 
     try:
-        inspector = sa_inspect(eng)
-        with eng.begin() as conn:
+        inspector = sa_inspect(engine)
+        with engine.begin() as conn:
             for table in Base.metadata.sorted_tables:
                 try:
                     if not inspector.has_table(table.name):
@@ -55,42 +58,20 @@ def _ensure_missing_columns(eng):
                     if col.name in existing:
                         continue
                     try:
-                        col_type = col.type.compile(dialect=eng.dialect)
-                        # Always add as nullable to avoid issues with existing rows
+                        col_type = col.type.compile(dialect=engine.dialect)
                         stmt = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col_type}'
                         logger.info("Adding missing column: %s", stmt)
                         conn.execute(text(stmt))
-                    except Exception as col_err:
-                        logger.warning("Could not add column %s.%s: %s",
-                                       table.name, col.name, col_err)
+                    except Exception as err:
+                        logger.warning("Could not add %s.%s: %s", table.name, col.name, err)
     except Exception as e:
-        logger.error("_ensure_missing_columns failed (non-fatal): %s", e)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Initialize encryption service for Google token storage
-    logger.info("Initializing encryption service...")
-    logger.info("SECRET_KEY length: %d, AUTO_CREATE_SCHEMA: %s, ALLOWED_ORIGINS: %s",
-                len(settings.secret_key), settings.auto_create_schema, settings.allowed_origins)
-    init_encryption_service(settings.secret_key)
-
-    if settings.auto_create_schema:
-        logger.info("AUTO_CREATE_SCHEMA enabled: creating database tables...")
-        Base.metadata.create_all(bind=engine)
-        # create_all only creates NEW tables — it won't add columns to existing
-        # tables.  Run a lightweight migration to add any missing columns.
-        _ensure_missing_columns(engine)
-    else:
-        logger.info("AUTO_CREATE_SCHEMA disabled: expecting schema to be managed by migrations")
-    logger.info("AccelDocs backend started on %s:%s", settings.host, settings.port)
-    yield
+        logger.error("_add_missing_columns failed (non-fatal): %s", e)
 
 
 app = FastAPI(
-    title="AccelDocs Backend",
-    description="Google Docs → Zensical publishing pipeline",
-    version="0.1.0",
+    title="AccelDocs",
+    description="Google Docs → Professional documentation, served directly.",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -102,19 +83,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routes — public endpoints first (Strapi-compatible queries for docs viewer)
+# Public docs site — no auth prefix, matched first
 app.include_router(public_router)
-app.include_router(ui_router)
+
+# API routes
 app.include_router(health_router)
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
-app.include_router(functions_router, tags=["functions"])  # RPC-style functions (no prefix, handles /api/functions/* internally)
-app.include_router(documents_router, prefix="/api/documents", tags=["documents"])
-app.include_router(sync_router, prefix="/api/sync", tags=["sync"])
-app.include_router(approvals_router, prefix="/api/approvals", tags=["approvals"])
-app.include_router(users_router, prefix="/api/users", tags=["users"])
-app.include_router(settings_router, prefix="/api/settings", tags=["settings"])
-app.include_router(projects_router, prefix="/api/projects", tags=["projects"])
+app.include_router(org_router, prefix="/api/org", tags=["org"])
+app.include_router(sections_router, prefix="/api/sections", tags=["sections"])
+app.include_router(pages_router, prefix="/api/pages", tags=["pages"])
 app.include_router(drive_router, prefix="/api/drive", tags=["drive"])
-app.include_router(analytics_router, prefix="/api/analytics", tags=["analytics"])
-app.include_router(publish_router, tags=["publish"])
-app.include_router(github_router, prefix="/api", tags=["github"])
