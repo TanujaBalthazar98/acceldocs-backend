@@ -256,11 +256,12 @@ async def perform_action(
     if body.action == "approve":
         try:
             _set_branding_from_doc(doc, db)
-            project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
+            project_slug, version_slug, section, doc_slug, product_slug = _resolve_publish_path(doc)
 
             # Primary path: promote the preview-branch file (synced from Drive) to main.
             # This avoids needing Drive credentials in the web-server process.
-            commit_sha, _ = promote_preview_to_production(project_slug, version_slug, section, doc_slug)
+            commit_sha, _ = promote_preview_to_production(project_slug, version_slug, section, doc_slug,
+                                                           product=product_slug)
 
             # Fallback: build markdown from HTML if no preview file exists yet.
             if not commit_sha:
@@ -286,6 +287,7 @@ async def perform_action(
                     section=section,
                     slug=doc_slug,
                     markdown=markdown,
+                    product=product_slug,
                 )
 
             doc.status = "approved"
@@ -307,12 +309,13 @@ async def perform_action(
     else:
         doc.status = "draft"
         doc.is_published = False
-        p_slug, v_slug, sec, d_slug = _resolve_publish_path(doc)
+        p_slug, v_slug, sec, d_slug, prod_slug = _resolve_publish_path(doc)
         unpublish_from_production(
             project=p_slug,
             version=v_slug,
             section=sec,
             slug=d_slug,
+            product=prod_slug,
         )
         doc.last_published_at = None
 
@@ -456,7 +459,7 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
     if action == "approve":
         try:
             _set_branding_from_doc(doc, db)
-            project_slug, version_slug, section, doc_slug = _resolve_publish_path(doc)
+            project_slug, version_slug, section, doc_slug, product_slug = _resolve_publish_path(doc)
 
             commit_sha = None
 
@@ -476,6 +479,7 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
                             section=section,
                             slug=doc_slug,
                             markdown=markdown,
+                            product=product_slug,
                         )
                         _log.info("Published doc %s from Drive via browser token", doc.id)
                 except Exception as drive_err:
@@ -483,7 +487,8 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
 
             # Secondary path: promote the preview-branch file (synced from Drive) to main.
             if not commit_sha:
-                commit_sha, _ = promote_preview_to_production(project_slug, version_slug, section, doc_slug)
+                commit_sha, _ = promote_preview_to_production(project_slug, version_slug, section, doc_slug,
+                                                               product=product_slug)
                 if commit_sha:
                     _log.info("Promoted preview branch content for doc %s", doc.id)
 
@@ -511,6 +516,7 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
                     section=section,
                     slug=doc_slug,
                     markdown=markdown,
+                    product=product_slug,
                 )
             doc.status = "approved"
             doc.is_published = True
@@ -530,8 +536,9 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
         doc.status = "draft"
         doc.is_published = False
         try:
-            p_slug, v_slug, sec, d_slug = _resolve_publish_path(doc)
-            unpublish_from_production(project=p_slug, version=v_slug, section=sec, slug=d_slug)
+            p_slug, v_slug, sec, d_slug, prod_slug = _resolve_publish_path(doc)
+            unpublish_from_production(project=p_slug, version=v_slug, section=sec, slug=d_slug,
+                                      product=prod_slug)
         except Exception:
             pass
         doc.last_published_at = None

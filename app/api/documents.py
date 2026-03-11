@@ -209,12 +209,13 @@ async def update_document_status(
     doc.status = body.status
     doc.is_published = body.status == "approved"
     if body.status in {"draft", "rejected"}:
-        _p, _v, _s, _d = _resolve_publish_path(doc)
+        _p, _v, _s, _d, _prod = _resolve_publish_path(doc)
         unpublish_from_production(
             project=_p,
             version=_v,
             section=_s,
             slug=_d,
+            product=_prod,
         )
         doc.last_published_at = None
     db.commit()
@@ -256,9 +257,9 @@ async def bulk_action(
                         _publish_to_git(doc, db=db)
                         doc.last_published_at = datetime.now(timezone.utc).isoformat()
                     elif body.value in {"draft", "rejected"}:
-                        _p, _v, _s, _d = _resolve_publish_path(doc)
+                        _p, _v, _s, _d, _prod = _resolve_publish_path(doc)
                         unpublish_from_production(
-                            project=_p, version=_v, section=_s, slug=_d,
+                            project=_p, version=_v, section=_s, slug=_d, product=_prod,
                         )
                         doc.last_published_at = None
                     success_count += 1
@@ -282,9 +283,9 @@ async def bulk_action(
             for doc in docs:
                 try:
                     # Unpublish first
-                    _p, _v, _s, _d = _resolve_publish_path(doc)
+                    _p, _v, _s, _d, _prod = _resolve_publish_path(doc)
                     unpublish_from_production(
-                        project=_p, version=_v, section=_s, slug=_d,
+                        project=_p, version=_v, section=_s, slug=_d, product=_prod,
                     )
                     db.delete(doc)
                     success_count += 1
@@ -308,9 +309,9 @@ async def bulk_action(
             for doc in docs:
                 try:
                     doc.status = "rejected"
-                    _p, _v, _s, _d = _resolve_publish_path(doc)
+                    _p, _v, _s, _d, _prod = _resolve_publish_path(doc)
                     unpublish_from_production(
-                        project=_p, version=_v, section=_s, slug=_d,
+                        project=_p, version=_v, section=_s, slug=_d, product=_prod,
                     )
                     doc.last_published_at = None
                     success_count += 1

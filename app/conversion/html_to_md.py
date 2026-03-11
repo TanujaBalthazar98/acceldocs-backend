@@ -122,7 +122,7 @@ def convert_html_to_markdown(
 # Frontmatter keys commonly found in documentation tools
 _FM_KEYS = {
     "type", "title", "listed", "slug", "description", "index_title",
-    "hidden", "keywords", "tags", "published", "date", "weight",
+    "hidden", "keywords", "tags", "weight",
     "draft", "layout", "permalink", "categories", "author", "order",
     "sidebar_position", "sidebar_label", "page_title", "nav_title",
 }
