@@ -5,6 +5,7 @@ import tempfile
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.config import settings
 
@@ -26,9 +27,10 @@ engine_kwargs: dict = {
     "echo": False,
 }
 if not settings.is_sqlite:
-    engine_kwargs["pool_size"] = 5
-    engine_kwargs["max_overflow"] = 10
-    engine_kwargs["pool_pre_ping"] = True  # detect stale connections
+    # Use NullPool in serverless environments (Vercel); connection pooling is
+    # handled at the DB level (e.g. Neon's built-in PgBouncer pooler URL).
+    engine_kwargs["poolclass"] = NullPool
+    engine_kwargs["pool_pre_ping"] = True
 
 engine = create_engine(database_url, **engine_kwargs)
 
