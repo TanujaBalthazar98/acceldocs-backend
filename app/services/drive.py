@@ -619,7 +619,7 @@ async def google_drive_handler(body: dict, db: Session, user: User | None) -> di
 
     elif action == "create_folder":
         name = body.get("name")
-        parent_id = body.get("parentId", "root")
+        parent_id = body.get("parentId") or body.get("parentFolderId") or "root"
         if not name:
             return {"ok": False, "error": "Folder name required"}
         return await service.create_folder(name, parent_id)
