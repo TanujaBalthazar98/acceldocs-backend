@@ -244,6 +244,7 @@ def generate_zensical_toml(
     social_links: list[dict] | None = None,
     site_author: str | None = None,
     edit_uri: str | None = None,
+    **_extra: object,  # absorb future/unknown branding keys (e.g. product_display_name)
 ) -> str:
     """Generate zensical.toml content with org branding."""
     if docs_dir is None:
@@ -419,6 +420,7 @@ def write_zensical_toml(
     social_links: list[dict] | None = None,
     site_author: str | None = None,
     edit_uri: str | None = None,
+    **_extra: object,  # absorb future/unknown branding keys
 ) -> Path:
     """Generate and write zensical.toml to the repo root."""
     if repo_path is None:

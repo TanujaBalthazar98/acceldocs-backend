@@ -93,6 +93,16 @@ def publish_document(
         full_path = repo_path / rel_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(markdown_content, encoding="utf-8")
+
+        # Persist the product's human-readable display name so _deploy_multi_product
+        # can show "Org | ADOC" instead of "Org | Adoc" in the injected navbar.
+        if product and branch == MAIN_BRANCH:
+            _display_name = _current_branding.get("product_display_name") or ""
+            if _display_name:
+                dn_file = repo_path / "docs" / _safe_path(product) / ".display-name"
+                dn_file.parent.mkdir(parents=True, exist_ok=True)
+                dn_file.write_text(_display_name, encoding="utf-8")
+
         index_paths = _ensure_parent_indexes(repo_path, full_path)
 
         cfg_path = write_zensical_toml(repo_path, **_current_branding)
@@ -342,7 +352,10 @@ def _deploy_multi_product(
 
     for product_path in product_dirs:
         product_slug = product_path.name
-        product_label = _folder_title(product_slug)
+        # Prefer the persisted display name written during publish so we show
+        # "ADOC" instead of "Adoc" (the slug-derived title-case fallback).
+        dn_file = product_path / ".display-name"
+        product_label = dn_file.read_text(encoding="utf-8").strip() if dn_file.exists() else _folder_title(product_slug)
         logger.info("Building product site: %s (%s)", product_label, product_slug)
 
         # Create a temporary build directory for this product
@@ -385,8 +398,10 @@ def _deploy_multi_product(
                 dest = combined_site / product_slug
                 shutil.copytree(str(product_site), str(dest))
                 logger.info("Built product %s → site/%s/", product_label, product_slug)
+                # Inject org + project navbar into every HTML page of this site
+                _inject_org_navbar(dest, product_label, branding)
 
-    # Generate root product picker index.html
+    # Root index: auto-redirect for a single product, picker for multiple
     _generate_product_picker_html(combined_site, product_dirs, branding)
 
     if not any(combined_site.iterdir()):
@@ -467,20 +482,134 @@ def _push_site_to_gh_pages(site_dir: Path, remote_url: str) -> bool | str:
             return f"Push to gh-pages failed: {push_err}"
 
 
+def _inject_org_navbar(site_dir: Path, project_label: str, branding: dict) -> None:
+    """Post-process Zensical-built HTML files to prepend a fixed org + project navbar.
+
+    The navbar sits above the Zensical (MkDocs Material) sticky header and shows:
+        [Logo]  Org Name  |  Project Name
+
+    CSS pushes the page body down by the navbar height so nothing is obscured.
+    """
+    import re as _re
+
+    org_name = branding.get("site_name") or "Documentation"
+    primary_color = branding.get("primary_color") or "#1a73e8"
+    logo_url = (branding.get("logo_url") or "").strip()
+
+    logo_html = (
+        f'<img src="{logo_url}" alt="{org_name}" '
+        'style="height:22px;vertical-align:middle;margin-right:2px;">'
+        if logo_url else ""
+    )
+
+    css = f"""<style id="adoc-topbar-css">
+/* AccelDocs top navbar — org logo + name + project name */
+#adoc-topbar {{
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 44px;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 1.25rem;
+  background: {primary_color};
+  box-shadow: 0 1px 4px rgba(0,0,0,.25);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}}
+.adoc-tb-org {{
+  color: #fff;
+  font-weight: 700;
+  font-size: .9rem;
+  letter-spacing: .01em;
+  white-space: nowrap;
+}}
+.adoc-tb-sep {{
+  color: rgba(255,255,255,.4);
+  font-size: .85rem;
+}}
+.adoc-tb-proj {{
+  color: rgba(255,255,255,.82);
+  font-size: .85rem;
+  white-space: nowrap;
+}}
+/* Push MkDocs Material sticky header below our banner */
+body {{ padding-top: 44px !important; }}
+.md-header {{ top: 44px !important; }}
+</style>"""
+
+    nav_html = (
+        f'<div id="adoc-topbar">'
+        f'{logo_html}'
+        f'<span class="adoc-tb-org">{org_name}</span>'
+        f'<span class="adoc-tb-sep">|</span>'
+        f'<span class="adoc-tb-proj">{project_label}</span>'
+        f'</div>'
+    )
+
+    injected = 0
+    for html_file in site_dir.rglob("*.html"):
+        try:
+            content = html_file.read_text(encoding="utf-8", errors="replace")
+            if "adoc-topbar" in content:
+                continue  # already injected
+            # Inject CSS before </head>
+            if "</head>" in content:
+                content = content.replace("</head>", css + "\n</head>", 1)
+            # Inject navbar right after opening <body …>
+            content = _re.sub(
+                r"(<body[^>]*>)",
+                lambda m: m.group(1) + "\n" + nav_html,
+                content,
+                count=1,
+            )
+            html_file.write_text(content, encoding="utf-8")
+            injected += 1
+        except Exception as exc:
+            logger.warning("Navbar injection skipped for %s: %s", html_file.name, exc)
+
+    logger.info("Injected org navbar into %d HTML pages in %s", injected, site_dir.name)
+
+
 def _generate_product_picker_html(
     site_dir: Path, product_dirs: list[Path], branding: dict,
 ) -> None:
-    """Generate a root index.html that acts as a product picker / landing page."""
+    """Generate a root index.html: auto-redirect (1 product) or org-branded picker (many)."""
     from app.publishing.mkdocs_gen import _folder_title
 
     site_name = branding.get("site_name", "Documentation")
-    primary_color = branding.get("primary_color", "#1a73e8")
+    primary_color = branding.get("primary_color") or "#1a73e8"
+    logo_url = (branding.get("logo_url") or "").strip()
+
+    # Build product list with display names
+    products: list[tuple[str, str, int]] = []  # (slug, label, page_count)
+    for pdir in product_dirs:
+        slug = pdir.name
+        dn_file = pdir / ".display-name"
+        label = dn_file.read_text(encoding="utf-8").strip() if dn_file.exists() else _folder_title(slug)
+        page_count = sum(1 for _ in pdir.rglob("*.md") if not _.name.startswith("."))
+        products.append((slug, label, page_count))
+
+    # Single product → instant redirect, no picker needed
+    if len(products) == 1:
+        first_slug = products[0][0]
+        html = (
+            f'<!DOCTYPE html><html><head><meta charset="utf-8">'
+            f'<meta http-equiv="refresh" content="0;url={first_slug}/">'
+            f'<title>{site_name}</title></head>'
+            f'<body><p>Redirecting to <a href="{first_slug}/">{products[0][1]}</a>…</p></body></html>'
+        )
+        (site_dir / "index.html").write_text(html, encoding="utf-8")
+        logger.info("Single product — generated redirect to site/%s/", first_slug)
+        return
+
+    logo_html = (
+        f'<img src="{logo_url}" alt="{site_name}" style="height:26px;vertical-align:middle;">'
+        if logo_url else ""
+    )
 
     cards_html = ""
-    for pdir in product_dirs:
-        label = _folder_title(pdir.name)
-        slug = pdir.name
-        page_count = sum(1 for _ in pdir.rglob("*.md"))
+    for slug, label, page_count in products:
         cards_html += f"""
         <a href="{slug}/" class="card">
             <h2>{label}</h2>
@@ -498,33 +627,41 @@ def _generate_product_picker_html(
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                background: #f5f5f5; min-height: 100vh; }}
-        .header {{ background: {primary_color}; color: white; padding: 2rem; text-align: center; }}
-        .header h1 {{ font-size: 2rem; margin-bottom: 0.5rem; }}
-        .header p {{ opacity: 0.9; }}
-        .container {{ max-width: 900px; margin: 2rem auto; padding: 0 1rem;
-                     display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-                     gap: 1.5rem; }}
-        .card {{ background: white; border-radius: 8px; padding: 1.5rem;
-                text-decoration: none; color: inherit; box-shadow: 0 1px 3px rgba(0,0,0,0.12);
-                transition: box-shadow 0.2s, transform 0.2s; }}
-        .card:hover {{ box-shadow: 0 4px 12px rgba(0,0,0,0.15); transform: translateY(-2px); }}
-        .card h2 {{ color: {primary_color}; margin-bottom: 0.5rem; font-size: 1.25rem; }}
-        .card p {{ color: #666; font-size: 0.9rem; }}
+        #adoc-topbar {{
+            position: sticky; top: 0; height: 52px; z-index: 100;
+            background: {primary_color};
+            display: flex; align-items: center; gap: 0.75rem; padding: 0 1.5rem;
+            box-shadow: 0 1px 4px rgba(0,0,0,.2);
+        }}
+        .adoc-tb-org {{ color: #fff; font-weight: 700; font-size: 1rem; }}
+        .container {{ max-width: 960px; margin: 3rem auto; padding: 0 1.5rem; }}
+        .container h2 {{ color: #444; font-size: 1rem; font-weight: 500; margin-bottom: 1.5rem; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1.25rem; }}
+        .card {{ background: white; border-radius: 10px; padding: 1.5rem;
+                text-decoration: none; color: inherit;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                transition: box-shadow 0.18s, transform 0.18s; }}
+        .card:hover {{ box-shadow: 0 6px 18px rgba(0,0,0,0.13); transform: translateY(-2px); }}
+        .card h2 {{ color: {primary_color}; margin-bottom: 0.4rem; font-size: 1.15rem; }}
+        .card p {{ color: #777; font-size: 0.875rem; }}
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>{site_name}</h1>
-        <p>Select a product to view its documentation</p>
+    <div id="adoc-topbar">
+        {logo_html}
+        <span class="adoc-tb-org">{site_name}</span>
     </div>
     <div class="container">
+        <h2>Choose a product to view its documentation</h2>
+        <div class="grid">
 {cards_html}
+        </div>
     </div>
 </body>
 </html>"""
 
     (site_dir / "index.html").write_text(html, encoding="utf-8")
-    logger.info("Generated product picker landing page at site/index.html")
+    logger.info("Generated product picker for %d products at site/index.html", len(products))
 
 
 def _configure_pages_source(remote_url: str) -> None:
