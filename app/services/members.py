@@ -120,7 +120,19 @@ async def update_member_role(body: dict, db: Session, user: User | None) -> dict
 
         # Check if requester is owner/admin
         requester_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
-        if not requester_role or requester_role.role not in ["owner", "admin"]:
+        if not requester_role:
+            return {"ok": False, "error": "Insufficient permissions"}
+
+        # If the org has no owner at all, allow any member to claim ownership
+        # (fixes orphaned orgs where the first user was auto-joined as viewer)
+        org_has_owner = db.query(OrgRole).filter(
+            OrgRole.organization_id == requester_role.organization_id,
+            OrgRole.role == "owner",
+        ).first()
+        if not org_has_owner and member_id == user.id and new_role == "owner":
+            # Self-promotion to owner when org is ownerless — allowed
+            pass
+        elif requester_role.role not in ["owner", "admin"]:
             return {"ok": False, "error": "Insufficient permissions"}
 
         # Update member role

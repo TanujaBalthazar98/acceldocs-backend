@@ -378,11 +378,18 @@ async def callback(
             if not organization:
                 raise HTTPException(status_code=400, detail="Organization not found")
 
-            org_role = OrgRole(organization_id=organization.id, user_id=user.id, role="viewer")
+            # First member to join an ownerless org becomes the owner;
+            # otherwise default to editor so teammates can contribute.
+            existing_members = db.query(OrgRole).filter(OrgRole.organization_id == organization.id).count()
+            if existing_members == 0:
+                join_role = "owner"
+            else:
+                join_role = "editor"
+            org_role = OrgRole(organization_id=organization.id, user_id=user.id, role=join_role)
             db.add(org_role)
             db.flush()
             organization_id = organization.id
-            logger.info(f"Added user {user.email} to organization {organization.name}")
+            logger.info(f"Added user {user.email} to organization {organization.name} as {join_role}")
 
         elif action == "create":
             org_name = signup_info.get("org_name")
@@ -420,11 +427,15 @@ async def callback(
             existing_org = db.query(Organization).filter(Organization.domain == inferred_domain).first()
 
         if existing_org:
-            org_role = OrgRole(organization_id=existing_org.id, user_id=user.id, role="viewer")
+            # First member of an ownerless org becomes owner;
+            # otherwise auto-joined teammates get editor role.
+            existing_count = db.query(OrgRole).filter(OrgRole.organization_id == existing_org.id).count()
+            auto_role = "owner" if existing_count == 0 else "editor"
+            org_role = OrgRole(organization_id=existing_org.id, user_id=user.id, role=auto_role)
             db.add(org_role)
             db.flush()
             organization_id = existing_org.id
-            logger.info(f"Auto-joined {user.email} to organization {existing_org.name} via domain {inferred_domain}")
+            logger.info(f"Auto-joined {user.email} to organization {existing_org.name} via domain {inferred_domain} as {auto_role}")
         else:
             # Create default workspace — dashboard onboarding will guide setup
             default_name = f"{user.name}'s Workspace" if user.name else f"{user.email}'s Workspace"
