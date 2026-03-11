@@ -357,7 +357,10 @@ def _deploy_multi_product(
             _ensure_folder_indexes(tmp_docs)
 
             product_branding = dict(branding)
-            product_branding["site_name"] = product_label
+            # Keep the org's site_name (e.g. "Acceldata") — the product label is
+            # already visible via the Zensical nav tabs, so overriding site_name
+            # with the product slug label caused the header to show "ADOC" instead
+            # of the organisation name.
 
             toml_content = generate_zensical_toml(
                 tmp_docs, **product_branding,
