@@ -556,8 +556,6 @@ def _ensure_landing_page(docs_dir: Path, marker: str) -> None:
     lines.append("")
 
     if project_dirs:
-        lines.append('<div class="grid cards" markdown>')
-        lines.append("")
         for pdir in project_dirs:
             label = _folder_title(pdir.name)
             # Link to the project's index page (first page in the tab)
@@ -568,14 +566,12 @@ def _ensure_landing_page(docs_dir: Path, marker: str) -> None:
                 # Find first .md file in the project
                 first_md = next(pdir.rglob("*.md"), None)
                 rel = str(first_md.relative_to(docs_dir)) if first_md else f"{pdir.name}/"
-            lines.append(f"-   :material-book-open-variant: **[{label}]({rel})**")
+            # Count non-index pages for the subtitle
+            page_count = sum(1 for p in pdir.rglob("*.md") if p.name != "index.md")
+            lines.append(f"## [{label}]({rel})")
             lines.append("")
-            # Count pages for a subtitle
-            page_count = sum(1 for _ in pdir.rglob("*.md"))
-            lines.append(f"    {page_count} page{'s' if page_count != 1 else ''}")
+            lines.append(f"{page_count} page{'s' if page_count != 1 else ''}")
             lines.append("")
-        lines.append("</div>")
-        lines.append("")
 
     index_md.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     logger.debug("Generated landing page: %s", index_md)

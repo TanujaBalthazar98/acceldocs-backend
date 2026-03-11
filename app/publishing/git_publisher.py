@@ -578,6 +578,40 @@ def _configure_pages_source(remote_url: str) -> None:
         logger.exception("_configure_pages_source failed (non-fatal)")
 
 
+def remove_stale_product_dir(old_product_slug: str) -> None:
+    """Remove a stale product directory from the main branch.
+
+    Called when a parent project's name-based slug ("adoc") differs from its
+    stored slug ("new-project") so the old directory is cleaned up on first republish.
+    """
+    active_branch: str | None = None
+    try:
+        repo = get_repo()
+        repo_path = Path(settings.docs_repo_path)
+        active_branch = _current_branch_name(repo)
+        _ensure_branch(repo, MAIN_BRANCH)
+
+        old_dir = repo_path / "docs" / _safe_path(old_product_slug)
+        if not old_dir.exists():
+            return
+
+        shutil.rmtree(old_dir)
+        # Stage the deletions
+        try:
+            repo.git.rm("-r", "--cached", "--ignore-unmatch",
+                        f"docs/{_safe_path(old_product_slug)}")
+        except Exception:
+            pass
+        repo.git.add("-A")
+        if repo.is_dirty(untracked_files=True):
+            repo.index.commit(f"Remove stale product dir: {old_product_slug}")
+            logger.info("Removed stale product dir docs/%s from main", _safe_path(old_product_slug))
+    except Exception:
+        logger.exception("Failed to remove stale product dir: %s", old_product_slug)
+    finally:
+        _restore_branch(repo if "repo" in locals() else None, active_branch)
+
+
 def push_branch(branch: str = MAIN_BRANCH) -> bool:
     try:
         repo = get_repo()

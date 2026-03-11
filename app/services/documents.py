@@ -43,7 +43,9 @@ def _resolve_publish_path(doc: Document) -> tuple[str, str, str | None, str, str
         project_slug = p.slug or p.name.lower().replace(" ", "-")
         # If the project has a parent → that parent is the "product"
         if p.parent:
-            product_slug = p.parent.slug or p.parent.name.lower().replace(" ", "-")
+            # Derive from name rather than stored slug — stored slugs are often
+            # auto-generated defaults ("new-project") that don't reflect the actual name.
+            product_slug = (p.parent.name or "").lower().replace(" ", "-") or p.parent.slug
     elif doc.project:
         project_slug = doc.project
 
@@ -280,6 +282,29 @@ def _publish_to_preview(doc: Document, db=None) -> str | None:
         return None
 
 
+def _cleanup_stale_product_dir(doc: Document, new_product_slug: str | None) -> None:
+    """Remove old product directory when the computed slug differs from the stored slug.
+
+    When a parent project's stored slug is an auto-generated default (e.g. "new-project")
+    but the name-based slug is "adoc", the docs were previously published under
+    docs/new-project/. After republishing to docs/adoc/ we remove the old dir so it
+    doesn't create a phantom product card on the published site.
+    """
+    if not new_product_slug:
+        return
+    if not (doc.project_rel and doc.project_rel.parent):
+        return
+    old_slug = (doc.project_rel.parent.slug or "").strip()
+    if not old_slug or old_slug == new_product_slug:
+        return
+    try:
+        from app.publishing.git_publisher import remove_stale_product_dir
+        remove_stale_product_dir(old_slug)
+        logger.info("Cleaned up stale product dir: docs/%s → docs/%s", old_slug, new_product_slug)
+    except Exception as e:
+        logger.debug("Stale product dir cleanup skipped (%s → %s): %s", old_slug, new_product_slug, e)
+
+
 def _publish_to_git(doc: Document, db=None, *, skip_deploy: bool = False) -> str | None:
     """Convert document HTML to Markdown and commit to Git production branch.
 
@@ -315,6 +340,10 @@ def _publish_to_git(doc: Document, db=None, *, skip_deploy: bool = False) -> str
             return None
 
         project_slug, version_slug, section, doc_slug, product_slug = _resolve_publish_path(doc)
+
+        # Remove old product dir when the name-based slug differs from the stored slug
+        # (e.g. parent project "ADOC" had stored slug "new-project" → clean up docs/new-project/)
+        _cleanup_stale_product_dir(doc, product_slug)
 
         commit_sha = publish_to_production(project_slug, version_slug, section, doc_slug, markdown,
                                            product=product_slug)
