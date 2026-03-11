@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -516,48 +516,15 @@ async def callback(
             },
         }
 
-    # Return HTML that handles both popup flow (postMessage) and redirect flow (store + redirect)
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Authentication Success</title>
-    </head>
-    <body>
-        <script>
-            var authData = {{
-                type: 'GOOGLE_AUTH_SUCCESS',
-                accessToken: '{access_token}',
-                jwt: '{jwt_token}',
-                isNewUser: {'true' if is_new_user else 'false'},
-                user: {{
-                    id: {user.id},
-                    email: '{user.email}',
-                    name: '{user.name or ""}',
-                    role: '{user.role}'
-                }}
-            }};
-
-            if (window.opener) {{
-                // Popup flow: send message to parent and close
-                window.opener.postMessage(authData, '*');
-                window.close();
-            }} else {{
-                // Redirect flow: store token in localStorage and redirect
-                try {{
-                    localStorage.setItem('acceldocs_auth_token', authData.jwt);
-                    localStorage.setItem('google_access_token', authData.accessToken);
-                }} catch(e) {{}}
-                // New users go to dashboard (onboarding will trigger automatically)
-                window.location.href = '/dashboard';
-            }}
-        </script>
-        <p>Authentication successful! Redirecting...</p>
-    </body>
-    </html>
-    """
-
-    return HTMLResponse(content=html_content)
+    # Redirect to frontend /auth/callback with token in URL params.
+    # The frontend AuthCallback page reads the token and stores it in localStorage.
+    import urllib.parse
+    frontend_url = settings.frontend_url.rstrip("/")
+    params = urllib.parse.urlencode({
+        "token": jwt_token,
+        "google_access_token": access_token,
+    })
+    return RedirectResponse(url=f"{frontend_url}/auth/callback?{params}")
 
 
 @router.post("/logout")

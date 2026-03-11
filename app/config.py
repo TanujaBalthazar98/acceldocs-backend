@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     port: int = 8000
     secret_key: str = "change-me-in-production"
     allowed_origins: str = "http://localhost:3000,http://localhost:5173"
+    frontend_url: str = "http://localhost:5173"
     auto_create_schema: bool = False
 
     # Netlify
