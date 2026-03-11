@@ -368,7 +368,7 @@ async def get_document_raw_markdown(
     _track_view(doc_id, user, request, db)
 
     # Build path to markdown file using same normalization as publishing code
-    repo_path = Path(settings.docs_repo_path)
+    repo_path = _org_repo_path(doc, db)
     parts = ["docs", _safe_path(doc.project)]
     if doc.version:
         parts.append(_safe_path(doc.version))
@@ -395,6 +395,19 @@ def _safe_path(name: str) -> str:
     return name.replace(" ", "-").replace("/", "-").lower().strip("-")
 
 
+def _org_repo_path(doc: Document, db: Session) -> Path:
+    """Return the org-scoped docs repo path for a document (mirrors publishing logic)."""
+    from app.models import Organization, Project as _Project
+    org_slug: str | None = None
+    if doc.project_id:
+        proj = db.get(_Project, doc.project_id)
+        if proj and proj.organization_id:
+            org = db.get(Organization, proj.organization_id)
+            if org:
+                org_slug = org.slug or str(org.id)
+    return Path(settings.docs_repo_path) / (org_slug or "default")
+
+
 @router.get("/{doc_id}/preview")
 async def get_document_preview(
     doc_id: int,
@@ -417,14 +430,14 @@ async def get_document_preview(
     # Track view
     _track_view(doc_id, user, request, db)
 
-    # Build path to markdown file
-    repo_path = Path(settings.docs_repo_path)
+    # Build path to markdown file (org-scoped)
+    repo_path = _org_repo_path(doc, db)
 
     # Check if repo exists
     if not repo_path.exists():
         raise HTTPException(
             status_code=500,
-            detail=f"Docs repository not found at {settings.docs_repo_path}. Please configure DOCS_REPO_PATH in settings.",
+            detail=f"Docs repository not found at {repo_path}. Please configure DOCS_REPO_PATH in settings.",
         )
 
     # Use same path normalization as publishing code

@@ -23,6 +23,17 @@ from app.publishing.mkdocs_gen import write_zensical_toml
 # generated config reflects the organization's theme.
 _current_branding: dict[str, Any] = {}
 
+# Per-org repo path: set by _set_branding_from_doc in documents.py so that
+# each organization's docs are isolated in their own subdirectory.
+# Falls back to settings.docs_repo_path (legacy / single-tenant).
+_current_repo_path: Path | None = None
+
+
+def _get_repo_path() -> Path:
+    """Return the active org-scoped repo path, falling back to the global setting."""
+    return _current_repo_path or Path(settings.docs_repo_path)
+
+
 logger = logging.getLogger(__name__)
 
 PREVIEW_BRANCH = "docs-preview"
@@ -31,7 +42,7 @@ MAIN_BRANCH = "main"
 
 def get_repo() -> git.Repo:
     """Get or clone the docs site repository."""
-    repo_path = Path(settings.docs_repo_path)
+    repo_path = _get_repo_path()
 
     if repo_path.exists() and (repo_path / ".git").exists():
         repo = git.Repo(repo_path)
@@ -74,7 +85,7 @@ def publish_document(
     active_branch: str | None = None
     try:
         repo = get_repo()
-        repo_path = Path(settings.docs_repo_path)
+        repo_path = _get_repo_path()
         active_branch = _current_branch_name(repo)
 
         _ensure_branch(repo, branch)
@@ -154,7 +165,7 @@ def promote_preview_to_production(
     active_branch: str | None = None
     try:
         repo = get_repo()
-        repo_path = Path(settings.docs_repo_path)
+        repo_path = _get_repo_path()
         active_branch = _current_branch_name(repo)
         rel_path = _document_rel_path(project, version, section, slug, product=product)
 
@@ -185,7 +196,7 @@ def unpublish_from_production(
     active_branch: str | None = None
     try:
         repo = get_repo()
-        repo_path = Path(settings.docs_repo_path)
+        repo_path = _get_repo_path()
         active_branch = _current_branch_name(repo)
         _ensure_branch(repo, MAIN_BRANCH)
 
@@ -587,7 +598,7 @@ def remove_stale_product_dir(old_product_slug: str) -> None:
     active_branch: str | None = None
     try:
         repo = get_repo()
-        repo_path = Path(settings.docs_repo_path)
+        repo_path = _get_repo_path()
         active_branch = _current_branch_name(repo)
         _ensure_branch(repo, MAIN_BRANCH)
 

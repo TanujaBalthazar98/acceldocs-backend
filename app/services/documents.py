@@ -163,6 +163,13 @@ def _set_branding_from_doc(doc: Document, db) -> None:
             org.name if org else None,
         )
         if org:
+            # Set org-scoped repo path so each org's docs are isolated in their
+            # own subdirectory (prevents cross-org content bleed on published sites).
+            from app.config import settings as _settings
+            from pathlib import Path as _Path
+            org_dir_name = org.slug or str(org.id)
+            git_publisher._current_repo_path = _Path(_settings.docs_repo_path) / org_dir_name
+
             # Parse social_links from custom_links JSON if it's a list of link objects
             social_links = None
             try:
@@ -235,7 +242,9 @@ def _auto_deploy_if_public(doc: Document, db) -> None:
 
         token = get_encryption_service().decrypt(org.github_token_encrypted)
         remote_url = f"https://oauth2:{token}@github.com/{org.github_repo_full_name}.git"
-        repo_path = Path(settings.docs_repo_path)
+        # Use org-scoped subdirectory so each org's docs are isolated
+        org_dir_name = org.slug or str(org.id)
+        repo_path = Path(settings.docs_repo_path) / org_dir_name
 
         ok = deploy_to_gh_pages(repo_path, remote_url)
         if ok:

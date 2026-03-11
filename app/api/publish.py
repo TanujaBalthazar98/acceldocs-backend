@@ -190,14 +190,14 @@ async def publish_mkdocs(
     logger.info("Publish: found %d docs total (%d with FK, %d orphans backfilled)",
                 len(all_docs), len(docs_with_pid), backfilled)
 
-    # ----- CRITICAL: Clean docs/ directory before publishing -----
-    # The docs-site/ directory on Railway is shared across all orgs.
-    # Without cleaning, docs from a previous org's publish remain and
-    # contaminate the nav / published site of the current org.
+    # ----- Clean docs/ directory before publishing -----
+    # Each org has its own subdirectory (docs-site/{org_slug}/), so content is
+    # isolated. We still clean before republishing so removed docs don't linger.
+    _org_dir_name = (org.slug or str(org_id)) if org else str(org_id)
     try:
         from pathlib import Path as _CleanPath
         import shutil as _shutil
-        _docs_root = _CleanPath(_settings.docs_repo_path) / "docs"
+        _docs_root = _CleanPath(_settings.docs_repo_path) / _org_dir_name / "docs"
         if _docs_root.exists():
             for _child in list(_docs_root.iterdir()):
                 # Keep top-level index.md (will be regenerated), remove everything else
@@ -301,7 +301,7 @@ async def publish_mkdocs(
             _branding["site_name"] = org.name or "Documentation"
             logger.info("Publish: final branding site_name=%s, _current_branding=%s",
                         _branding.get("site_name"), bool(_gp._current_branding))
-            _repo_path = _Path(_settings.docs_repo_path)
+            _repo_path = _Path(_settings.docs_repo_path) / _org_dir_name
             _repo = get_repo()
             # Checkout main so the toml commit lands on the right branch
             if _gp.MAIN_BRANCH in [b.name for b in _repo.branches]:
@@ -332,7 +332,7 @@ async def publish_mkdocs(
             push_branch("main")  # push markdown source (best-effort backup)
 
             # Build with zensical and push pre-built HTML to gh-pages
-            repo_path = _Path(_settings.docs_repo_path)
+            repo_path = _Path(_settings.docs_repo_path) / _org_dir_name
             deploy_result = deploy_to_gh_pages(repo_path, remote_url_with_token)
             push_ok = deploy_result is True
 
