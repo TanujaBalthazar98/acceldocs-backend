@@ -25,6 +25,7 @@ class OrgUpdate(BaseModel):
     logo_url: str | None = None
     primary_color: str | None = None
     tagline: str | None = None
+    hierarchy_mode: str | None = None
 
 
 class InviteCreate(BaseModel):
@@ -55,6 +56,7 @@ def _org_dict(org: Organization, role: OrgRole, member_count: int, has_drive: bo
         "primary_color": org.primary_color,
         "tagline": org.tagline,
         "domain": org.domain,
+        "hierarchy_mode": org.hierarchy_mode or "product",
         "drive_folder_id": org.drive_folder_id,
         "has_drive_connected": has_drive,
         "user_role": role.role,
@@ -108,6 +110,8 @@ def update_org(
         org.primary_color = body.primary_color
     if body.tagline is not None:
         org.tagline = body.tagline
+    if body.hierarchy_mode is not None:
+        org.hierarchy_mode = "flat" if body.hierarchy_mode == "flat" else "product"
 
     db.commit()
     db.refresh(org)

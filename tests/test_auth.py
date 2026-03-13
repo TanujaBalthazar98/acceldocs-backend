@@ -37,3 +37,25 @@ def test_me_with_valid_token(client, db):
 def test_me_with_invalid_token(client):
     response = client.get("/auth/me", headers={"Authorization": "Bearer invalid.token.here"})
     assert response.status_code == 401
+
+
+def test_docs_session_sets_http_only_cookie(client, db):
+    user = User(google_id="g-docs-cookie", email="cookie@example.com", name="Cookie User", role="editor")
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    token = _create_jwt(user.id, user.email)
+    response = client.post("/auth/docs-session", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    cookie_header = response.headers.get("set-cookie", "")
+    assert "acceldocs_docs_session=" in cookie_header
+    assert "HttpOnly" in cookie_header
+    assert "Path=/docs" in cookie_header
+
+
+def test_logout_clears_docs_session_cookie(client):
+    response = client.post("/auth/logout")
+    assert response.status_code == 200
+    cookie_header = response.headers.get("set-cookie", "")
+    assert "acceldocs_docs_session=" in cookie_header

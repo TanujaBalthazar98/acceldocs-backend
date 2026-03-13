@@ -15,6 +15,7 @@
       --accent: {{ primary_color }};
       --sidebar-w: 272px;
       --topbar-h: 56px;
+      --tabs-h: 44px;
       --bg: #FFFFFF;
       --bg-sidebar: #F8F7F4;
       --bg-hover: #F0EEE9;
@@ -134,7 +135,86 @@
       display: grid;
       grid-template-columns: var(--sidebar-w) 1fr;
       min-height: 100vh;
-      padding-top: var(--topbar-h);
+      padding-top: var(--content-offset, var(--topbar-h));
+    }
+
+    body.has-tabs { --content-offset: calc(var(--topbar-h) + var(--tabs-h)); }
+
+    .tabsbar {
+      position: fixed;
+      top: var(--topbar-h);
+      left: 0;
+      right: 0;
+      height: var(--tabs-h);
+      display: flex;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.95);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      z-index: 180;
+    }
+
+    .tabsbar-product {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      padding: 0 16px 0 20px;
+      border-right: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      overflow: hidden;
+    }
+
+    .tabsbar-product-link {
+      font-size: 0.8125rem;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.015em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: color 0.15s;
+    }
+
+    .tabsbar-product-link:hover { color: var(--accent); }
+
+    .tabsbar-inner {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex: 1;
+      padding: 0 16px;
+      overflow-x: auto;
+    }
+
+    .docs-tab {
+      display: inline-flex;
+      align-items: center;
+      height: 30px;
+      border-radius: 8px;
+      padding: 0 12px;
+      font-size: 0.84rem;
+      color: var(--text-2);
+      border: 1px solid transparent;
+      white-space: nowrap;
+      transition: all 0.15s ease;
+    }
+
+    .docs-tab:hover {
+      color: var(--text);
+      background: var(--bg-hover);
+    }
+
+    .docs-tab.active {
+      color: var(--text);
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+      font-weight: 600;
+    }
+
+    .docs-tab.disabled {
+      opacity: 0.45;
+      cursor: default;
     }
 
     /* ── Sidebar ──────────────────────────────────────────────────── */
@@ -148,6 +228,11 @@
       padding: 24px 0 48px;
       scrollbar-width: thin;
       scrollbar-color: var(--border) transparent;
+    }
+
+    body.has-tabs .sidebar {
+      top: calc(var(--topbar-h) + var(--tabs-h));
+      height: calc(100vh - var(--topbar-h) - var(--tabs-h));
     }
 
     .sidebar::-webkit-scrollbar { width: 3px; }
@@ -182,6 +267,11 @@
     .sidebar-section.collapsed .sidebar-chevron { transform: rotate(-90deg); }
     .sidebar-section.collapsed .sidebar-items { display: none; }
 
+    .sidebar-section-child > .sidebar-section-label {
+      font-size: 0.72rem;
+      opacity: 0.85;
+    }
+
     .sidebar-page {
       display: block;
       padding: 5px 18px 5px 24px;
@@ -208,10 +298,26 @@
     /* ── Main content ─────────────────────────────────────────────── */
     .main { min-width: 0; }
 
+    .doc-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 760px) 220px;
+      gap: 28px;
+      align-items: start;
+      padding: 48px 56px 100px;
+      animation: fadeUp 0.3s ease both;
+    }
+
     .content-wrap {
       max-width: 720px;
       padding: 48px 56px 100px;
       animation: fadeUp 0.3s ease both;
+    }
+
+    .doc-layout .content-wrap {
+      max-width: none;
+      padding: 0;
+      animation: none;
+      min-width: 0;
     }
 
     @keyframes fadeUp {
@@ -233,6 +339,65 @@
     .breadcrumb a:hover { color: var(--text-2); }
     .breadcrumb-sep { opacity: 0.35; font-size: 0.9em; }
     .breadcrumb span:last-child { color: var(--text-2); }
+
+    /* ── Table of contents ───────────────────────────────────────── */
+    .toc {
+      position: sticky;
+      top: calc(var(--content-offset, var(--topbar-h)) + 18px);
+      max-height: calc(100vh - var(--content-offset, var(--topbar-h)) - 26px);
+      overflow-y: auto;
+      border-left: 1px solid var(--border);
+      padding-left: 16px;
+      margin-left: 6px;
+    }
+
+    .toc-title {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-3);
+      margin-bottom: 10px;
+    }
+
+    .toc-nav {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .toc-link {
+      display: block;
+      font-size: 0.8rem;
+      line-height: 1.35;
+      color: var(--text-3);
+      padding: 4px 0;
+      border-left: 2px solid transparent;
+      padding-left: 10px;
+      margin-left: -16px;
+      transition: color 0.14s, border-color 0.14s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .toc-link:hover { color: var(--text-2); }
+
+    .toc-link.active {
+      color: var(--accent);
+      border-left-color: var(--accent);
+      font-weight: 600;
+    }
+
+    .toc-link.level-3 { padding-left: 20px; font-size: 0.77rem; }
+    .toc-link.level-4, .toc-link.level-5, .toc-link.level-6 { padding-left: 28px; font-size: 0.75rem; }
+
+    .toc-empty {
+      font-size: 0.76rem;
+      color: var(--text-3);
+      padding-left: 10px;
+      margin-left: -16px;
+    }
 
     /* ── Page content ─────────────────────────────────────────────── */
     .page-content {
@@ -590,16 +755,23 @@
       }
 
       .topbar-brand { width: auto; }
+      .doc-layout { grid-template-columns: 1fr; padding: 28px 20px 64px; }
+      .toc { display: none; }
       .content-wrap { padding: 28px 20px 64px; }
       .landing-title { font-size: 1.9rem; }
     }
+
+    @media (max-width: 1180px) {
+      .doc-layout { grid-template-columns: minmax(0, 1fr); }
+      .toc { display: none; }
+    }
   </style>
 </head>
-<body>
+<body class="{% if product_header or (top_tabs and top_tabs|length > 0) %}has-tabs{% endif %}">
 
   <!-- Topbar -->
   <header class="topbar">
-    <a href="/docs/{{ org_slug }}" class="topbar-brand">
+    <a href="{{ docs_root }}/{{ org_slug }}{{ audience_suffix }}" class="topbar-brand">
       {% if org_logo %}
         <div class="brand-avatar"><img src="{{ org_logo }}" alt="{{ org_name }}" /></div>
       {% else %}
@@ -618,6 +790,34 @@
       </div>
     </div>
   </header>
+
+  {% if product_header or (top_tabs and top_tabs|length > 0) %}
+    <nav class="tabsbar" aria-label="{% if top_tabs and top_tabs|length > 0 %}Tabs{% else %}Product{% endif %}">
+      {% if product_header %}
+        <div class="tabsbar-product">
+          <a href="{% if product_header.first_page_id %}{{ docs_root }}/{{ org_slug }}/p/{{ product_header.first_page_id }}/{{ product_header.first_page_slug or '' }}{{ audience_suffix }}{% else %}{{ docs_root }}/{{ org_slug }}{{ audience_suffix }}{% endif %}" class="tabsbar-product-link">
+            {{ product_header.name }}
+          </a>
+        </div>
+      {% endif %}
+      {% if top_tabs and top_tabs|length > 0 %}
+        <div class="tabsbar-inner">
+          {% for tab in top_tabs %}
+            {% if tab.first_page_id and tab.first_page_slug %}
+              <a
+                href="{{ docs_root }}/{{ org_slug }}/p/{{ tab.first_page_id }}/{{ tab.first_page_slug }}{{ audience_suffix }}"
+                class="docs-tab {% if tab.slug == current_tab_slug %}active{% endif %}"
+              >
+                {{ tab.name }}
+              </a>
+            {% else %}
+              <span class="docs-tab disabled">{{ tab.name }}</span>
+            {% endif %}
+          {% endfor %}
+        </div>
+      {% endif %}
+    </nav>
+  {% endif %}
 
   <!-- Search modal -->
   <div id="searchOverlay" class="search-overlay hidden" role="dialog" aria-label="Search">
@@ -638,8 +838,9 @@
 
     <!-- Sidebar -->
     <nav class="sidebar">
-      {% for section in nav_sections %}
-        <div class="sidebar-section" id="sec-{{ section.id }}">
+      {% macro render_section(section, depth) %}
+        <div class="sidebar-section{% if depth > 0 %} sidebar-section-child{% endif %}" id="sec-{{ section.id }}"
+             {% if depth > 0 %}style="margin-left: {{ depth * 10 }}px;"{% endif %}>
           {% if section.name %}
             <div class="sidebar-section-label" onclick="toggleSection('sec-{{ section.id }}')">
               {{ section.name }}
@@ -650,47 +851,108 @@
           {% endif %}
           <div class="sidebar-items">
             {% for page in section.pages %}
-              <a href="/docs/{{ org_slug }}/{{ page.slug }}"
+              <a href="{{ docs_root }}/{{ org_slug }}/p/{{ page.id }}/{{ page.slug }}{{ audience_suffix }}"
                  class="sidebar-page {% if page.slug == current_page_slug %}active{% endif %}">
                 {{ page.title }}
               </a>
             {% endfor %}
+            {% for child in section.children %}
+              {{ render_section(child, depth + 1) }}
+            {% endfor %}
           </div>
         </div>
-      {% endfor %}
+      {% endmacro %}
+
+      {% if top_tabs and top_tabs|length > 0 %}
+        {#
+          Tabbed view: nav_sections[0] is the active tab node.
+          Render its pages and sub-sections directly (name is already in the tabsbar).
+        #}
+        {% if nav_sections %}
+          {% set tab_node = nav_sections[0] %}
+          {#
+            Legacy import shape can create:
+              Tab "Resume" -> child section "Resume" -> actual content.
+            Flatten that single same-name wrapper so the sidebar doesn't duplicate the tab label.
+          #}
+          {% if tab_node.pages|length == 0 and tab_node.children|length == 1 %}
+            {% set maybe_wrapper = tab_node.children[0] %}
+            {% if maybe_wrapper.name and tab_node.name and (maybe_wrapper.name|trim|lower == tab_node.name|trim|lower) %}
+              {% set tab_node = maybe_wrapper %}
+            {% endif %}
+          {% endif %}
+          {% for page in tab_node.pages %}
+            <a href="{{ docs_root }}/{{ org_slug }}/p/{{ page.id }}/{{ page.slug }}{{ audience_suffix }}"
+               class="sidebar-page {% if page.slug == current_page_slug %}active{% endif %}">
+              {{ page.title }}
+            </a>
+          {% endfor %}
+          {% for child in tab_node.children %}
+            {{ render_section(child, 0) }}
+          {% endfor %}
+        {% endif %}
+      {% else %}
+        {# Non-tab view: if product header matches nav root, render children directly to avoid duplicate product label #}
+        {% if product_header and nav_sections and nav_sections|length == 1 and nav_sections[0].id == product_header.id %}
+          {% set product_node = nav_sections[0] %}
+          {% for page in product_node.pages %}
+            <a href="{{ docs_root }}/{{ org_slug }}/p/{{ page.id }}/{{ page.slug }}{{ audience_suffix }}"
+               class="sidebar-page {% if page.slug == current_page_slug %}active{% endif %}">
+              {{ page.title }}
+            </a>
+          {% endfor %}
+          {% for child in product_node.children %}
+            {{ render_section(child, 0) }}
+          {% endfor %}
+        {% else %}
+          {# Fallback: show full section tree #}
+          {% for section in nav_sections %}
+            {{ render_section(section, 0) }}
+          {% endfor %}
+        {% endif %}
+      {% endif %}
     </nav>
 
     <!-- Main -->
     <main class="main">
-      <div class="content-wrap">
-
-        {% if current_page %}
-          <!-- Breadcrumb -->
-          <nav class="breadcrumb" aria-label="Breadcrumb">
-            <a href="/docs/{{ org_slug }}">{{ org_name }}</a>
-            {% if current_page.section_name %}
+      {% if current_page %}
+        <div class="doc-layout">
+          <div class="content-wrap">
+            <!-- Breadcrumb -->
+            <nav class="breadcrumb" aria-label="Breadcrumb">
+              <a href="{{ docs_root }}/{{ org_slug }}{{ audience_suffix }}">{{ org_name }}</a>
+              {% if current_page.section_name %}
+                <span class="breadcrumb-sep">›</span>
+                <span>{{ current_page.section_name }}</span>
+              {% endif %}
               <span class="breadcrumb-sep">›</span>
-              <span>{{ current_page.section_name }}</span>
-            {% endif %}
-            <span class="breadcrumb-sep">›</span>
-            <span>{{ current_page.title }}</span>
-          </nav>
+              <span>{{ current_page.title }}</span>
+            </nav>
 
-          <article class="page-content">
-            {{ page_html | safe }}
-          </article>
-
-        {% else %}
+            <article class="page-content">
+              {{ page_html | safe }}
+            </article>
+          </div>
+          <aside class="toc" id="tocAside" aria-label="On this page">
+            <div class="toc-title">On this page</div>
+            <nav id="tocNav" class="toc-nav"></nav>
+          </aside>
+        </div>
+      {% else %}
+        <div class="content-wrap">
           <!-- Landing -->
           <div class="landing">
-            <span class="landing-eyebrow">Documentation</span>
+            <span class="landing-eyebrow">Documentation Home</span>
             <h1 class="landing-title">{{ org_name }}</h1>
-            <p class="landing-tagline">{{ org_tagline or "Browse the sections below to get started." }}</p>
+            <p class="landing-tagline">{{ org_tagline or "Browse products below and open the one you need." }}</p>
 
             {% if top_sections %}
+              <div style="font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); margin-bottom: 14px;">
+                Products
+              </div>
               <div class="section-grid">
                 {% for section in top_sections %}
-                  <a href="/docs/{{ org_slug }}/{{ section.first_page_slug or '#' }}" class="section-card">
+                  <a href="{% if section.first_page_id and section.first_page_slug %}{{ docs_root }}/{{ org_slug }}/p/{{ section.first_page_id }}/{{ section.first_page_slug }}{{ audience_suffix }}{% else %}#{% endif %}" class="section-card">
                     <div class="section-card-icon">
                       <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                         <path stroke-linecap="round" stroke-linejoin="round"
@@ -698,17 +960,16 @@
                       </svg>
                     </div>
                     <div class="section-card-name">{{ section.name }}</div>
-                    <div class="section-card-count">{{ section.page_count }} page{% if section.page_count != 1 %}s{% endif %}</div>
+                    <div class="section-card-count">{{ section.page_count }} doc{% if section.page_count != 1 %}s{% endif %}</div>
                   </a>
                 {% endfor %}
               </div>
             {% else %}
-              <p style="color: var(--text-3); font-size: 0.9rem;">No published content yet.</p>
+              <p style="color: var(--text-3); font-size: 0.9rem;">No published products yet.</p>
             {% endif %}
           </div>
-        {% endif %}
-
-      </div>
+        </div>
+      {% endif %}
     </main>
 
   </div>
@@ -721,6 +982,8 @@
 
     // ── Search ────────────────────────────────────────────────────
     const ORG_SLUG = {{ org_slug | tojson }};
+    const DOCS_ROOT = {{ docs_root | tojson }};
+    const AUDIENCE = {{ audience | tojson }};
     const overlay  = document.getElementById('searchOverlay');
     const input    = document.getElementById('searchInput');
     const results  = document.getElementById('searchResults');
@@ -757,7 +1020,8 @@
     async function doSearch(q) {
       results.innerHTML = '<div class="search-loading">Searching…</div>';
       try {
-        const res  = await fetch(`/docs/${ORG_SLUG}/search?q=${encodeURIComponent(q)}`);
+        const audienceQuery = AUDIENCE ? `&audience=${encodeURIComponent(AUDIENCE)}` : '';
+        const res  = await fetch(`${DOCS_ROOT}/${ORG_SLUG}/search?q=${encodeURIComponent(q)}${audienceQuery}`);
         const data = await res.json();
         renderResults(data.results, q);
       } catch {
@@ -771,11 +1035,20 @@
         return;
       }
       results.innerHTML = items.map(r => `
-        <a href="/docs/${ORG_SLUG}/${r.slug}" class="search-result" onclick="closeSearch()">
+        <a href="${canonicalHref(r)}" class="search-result" onclick="closeSearch()">
           <div class="search-result-title">${highlight(r.title, q)}</div>
           ${r.section_name ? `<div class="search-result-section">${esc(r.section_name)}</div>` : ''}
         </a>
       `).join('');
+    }
+
+    function canonicalHref(item) {
+      if (item && item.page_id && item.slug) {
+        const suffix = AUDIENCE ? `?audience=${encodeURIComponent(AUDIENCE)}` : '';
+        return `${DOCS_ROOT}/${ORG_SLUG}/p/${item.page_id}/${item.slug}${suffix}`;
+      }
+      const suffix = AUDIENCE ? `?audience=${encodeURIComponent(AUDIENCE)}` : '';
+      return `${DOCS_ROOT}/${ORG_SLUG}/${item.slug || ''}${suffix}`;
     }
 
     function highlight(text, q) {
@@ -787,6 +1060,79 @@
     function esc(s) {
       return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
+
+    // ── Table of contents ─────────────────────────────────────────
+    function slugify(text) {
+      return text
+        .toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .trim()
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-');
+    }
+
+    function buildToc() {
+      const page = document.querySelector('.page-content');
+      const tocAside = document.getElementById('tocAside');
+      const tocNav = document.getElementById('tocNav');
+      if (!page || !tocAside || !tocNav) return;
+
+      const headings = Array.from(page.querySelectorAll('h2, h3, h4'));
+      if (!headings.length) {
+        tocNav.innerHTML = '<div class="toc-empty">No sections detected.</div>';
+        return;
+      }
+
+      const usedIds = new Set();
+      const items = headings
+        .map((heading, index) => {
+          const text = (heading.textContent || '').trim();
+          if (!text) return null;
+          const level = Number(heading.tagName.slice(1)) || 2;
+          let id = heading.id || `toc-${index}-${slugify(text) || 'section'}`;
+          while (usedIds.has(id)) id = `${id}-${index + 1}`;
+          usedIds.add(id);
+          heading.id = id;
+          return { id, text, level };
+        })
+        .filter(Boolean);
+
+      if (!items.length) {
+        tocNav.innerHTML = '<div class="toc-empty">No sections detected.</div>';
+        return;
+      }
+
+      tocNav.innerHTML = items.map((item) => (
+        `<a href="#${item.id}" class="toc-link level-${item.level}" data-toc-id="${item.id}">${esc(item.text)}</a>`
+      )).join('');
+
+      const links = Array.from(tocNav.querySelectorAll('.toc-link'));
+      const setActive = (id) => {
+        links.forEach((link) => {
+          if (link.getAttribute('data-toc-id') === id) link.classList.add('active');
+          else link.classList.remove('active');
+        });
+      };
+
+      setActive(items[0].id);
+
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible.length) setActive(visible[0].target.id);
+      }, {
+        rootMargin: '-90px 0px -68% 0px',
+        threshold: [0, 0.2, 0.5, 0.8],
+      });
+
+      items.forEach((item) => {
+        const target = document.getElementById(item.id);
+        if (target) observer.observe(target);
+      });
+    }
+
+    buildToc();
   </script>
 
 </body>

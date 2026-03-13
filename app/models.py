@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -52,6 +52,7 @@ class Organization(Base):
     custom_css: Mapped[str | None] = mapped_column(Text)
     hero_title: Mapped[str | None] = mapped_column(String(500))
     hero_description: Mapped[str | None] = mapped_column(Text)
+    hierarchy_mode: Mapped[str] = mapped_column(String(20), default="product")
     show_search_on_landing: Mapped[bool] = mapped_column(Boolean, default=True)
     show_featured_projects: Mapped[bool] = mapped_column(Boolean, default=True)
     custom_links: Mapped[str | None] = mapped_column(Text)  # JSON string
@@ -85,6 +86,7 @@ class Organization(Base):
     document_caches: Mapped[list["DocumentCache"]] = relationship(back_populates="organization")
     domains: Mapped[list["Domain"]] = relationship(back_populates="organization")
     google_tokens: Mapped[list["GoogleToken"]] = relationship(back_populates="organization")
+    external_access_grants: Mapped[list["ExternalAccessGrant"]] = relationship(back_populates="organization")
 
 
 class Project(Base):
@@ -432,6 +434,9 @@ class Section(Base):
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("sections.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    # "section" = regular nested section, "tab" = top-level tab inside a product section
+    section_type: Mapped[str] = mapped_column(String(50), default="section")
+    visibility: Mapped[str] = mapped_column(String(20), default="public")
     drive_folder_id: Mapped[str | None] = mapped_column(String(255))
     display_order: Mapped[int] = mapped_column(Integer, default=0)
     is_published: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -463,6 +468,8 @@ class Page(Base):
     google_doc_id: Mapped[str] = mapped_column(String(255), nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     slug: Mapped[str] = mapped_column(String(500), nullable=False)
+    slug_locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    visibility_override: Mapped[str | None] = mapped_column(String(20))
     html_content: Mapped[str | None] = mapped_column(Text)          # latest synced from Drive
     published_html: Mapped[str | None] = mapped_column(Text)        # snapshot at publish time
     is_published: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -480,4 +487,31 @@ class Page(Base):
 
     __table_args__ = (
         UniqueConstraint("organization_id", "google_doc_id", name="uq_page_google_doc_per_org"),
+        UniqueConstraint("organization_id", "slug", name="uq_page_slug_per_org"),
+        Index("ix_pages_org_visibility_override", "organization_id", "visibility_override"),
+    )
+
+
+class ExternalAccessGrant(Base):
+    """Allow an external email to access external docs for an organization."""
+    __tablename__ = "external_access_grants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    organization: Mapped["Organization"] = relationship(back_populates="external_access_grants")
+    created_by_user: Mapped["User | None"] = relationship("User", foreign_keys=[created_by_user_id])
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "email", name="uq_external_access_org_email"),
+        Index("ix_external_access_org_active", "organization_id", "is_active"),
     )

@@ -2,11 +2,12 @@
 
 import logging
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import httpx
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -25,6 +26,7 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24
+DOCS_SESSION_COOKIE = "acceldocs_docs_session"
 PUBLIC_EMAIL_DOMAINS = {
     "gmail.com",
     "googlemail.com",
@@ -37,6 +39,75 @@ PUBLIC_EMAIL_DOMAINS = {
     "proton.me",
     "protonmail.com",
 }
+
+
+def _allowed_redirect_hosts() -> set[str]:
+    hosts = {"localhost", "127.0.0.1", "::1"}
+
+    try:
+        frontend_host = (urlparse(settings.frontend_url).hostname or "").lower()
+        if frontend_host:
+            hosts.add(frontend_host)
+    except Exception:
+        pass
+
+    try:
+        oauth_host = (urlparse(settings.google_oauth_redirect_uri).hostname or "").lower()
+        if oauth_host:
+            hosts.add(oauth_host)
+    except Exception:
+        pass
+
+    for origin in settings.allowed_origins_list:
+        try:
+            origin_host = (urlparse(origin).hostname or "").lower()
+            if origin_host:
+                hosts.add(origin_host)
+        except Exception:
+            continue
+
+    return hosts
+
+
+def _resolve_default_redirect_from_request(request: Request | None) -> str:
+    """Build a default redirect URI from trusted app hosts only."""
+    trusted_hosts = _allowed_redirect_hosts()
+
+    if request:
+        for header_name in ("origin", "referer"):
+            raw = (request.headers.get(header_name) or "").strip()
+            if not raw:
+                continue
+            parsed = urlparse(raw)
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme in {"http", "https"} and parsed.netloc and host in trusted_hosts:
+                return f"{parsed.scheme}://{parsed.netloc}/auth/callback"
+
+    return settings.google_oauth_redirect_uri
+
+
+def _resolve_oauth_redirect_uri_for_request(
+    redirect_uri: str | None,
+    request: Request | None,
+) -> str:
+    """Resolve redirect URI while allowing app domains from request + config."""
+    configured_default = _resolve_default_redirect_from_request(request)
+
+    candidate = (redirect_uri or "").strip()
+    if not candidate:
+        return configured_default
+
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        logger.warning("Ignoring invalid redirect_uri format: %s", candidate)
+        return configured_default
+
+    host = (parsed.hostname or "").lower()
+    if host not in _allowed_redirect_hosts():
+        logger.warning("Ignoring non-allowed redirect_uri host: %s", candidate)
+        return configured_default
+
+    return candidate
 
 
 def _extract_org_domain(email: str | None) -> str | None:
@@ -62,6 +133,13 @@ def _create_jwt(user_id: int, email: str) -> str:
         "iat": datetime.now(timezone.utc),
     }
     return jwt.encode(payload, settings.secret_key, algorithm=JWT_ALGORITHM)
+
+
+def _is_secure_request(request: Request) -> bool:
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    if proto:
+        return proto == "https"
+    return request.url.scheme == "https"
 
 
 def _check_drive_folder_owner(access_token: str, folder_id: str, user_email: str) -> bool:
@@ -221,7 +299,7 @@ async def search_organizations(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/login")
-async def login(state: str | None = None):
+async def login(request: Request, state: str | None = None, redirect_uri: str | None = None):
     """Return the Google OAuth consent URL.
 
     Args:
@@ -230,15 +308,15 @@ async def login(state: str | None = None):
     if not settings.google_client_id:
         raise HTTPException(status_code=501, detail="Google OAuth not configured")
 
-    # Request both drive.readonly (browse) and drive.file (create/edit owned files)
+    # Full Drive access — required to move/modify any file, including imported ones
     scopes = [
         "openid",
         "email",
         "profile",
-        "https://www.googleapis.com/auth/drive.readonly",
-        "https://www.googleapis.com/auth/drive.file"
+        "https://www.googleapis.com/auth/drive",
     ]
     scope_param = "%20".join(scopes)
+    resolved_redirect_uri = _resolve_oauth_redirect_uri_for_request(redirect_uri, request)
 
     # Include state parameter if provided
     state_param = f"&state={state}" if state else ""
@@ -249,11 +327,12 @@ async def login(state: str | None = None):
             f"?client_id={settings.google_client_id}"
             "&response_type=code"
             f"&scope={scope_param}"
-            f"&redirect_uri={settings.google_oauth_redirect_uri}"
+            f"&redirect_uri={resolved_redirect_uri}"
             "&access_type=offline"
             "&prompt=consent"  # Force consent to ensure refresh_token is returned
             f"{state_param}"
-        )
+        ),
+        "redirect_uri": resolved_redirect_uri,
     }
 
 
@@ -263,6 +342,7 @@ async def callback(
     code: str | None = None,
     state: str | None = None,
     api: bool = False,
+    redirect_uri: str | None = None,
     db: Session = Depends(get_db),
 ):
     """Handle OAuth callback — exchange code for tokens, upsert user, store refresh token, return HTML popup.
@@ -288,7 +368,8 @@ async def callback(
             raise HTTPException(status_code=400, detail="Invalid signup token")
 
     # Exchange authorization code for tokens
-    logger.info("OAuth callback: exchanging code, redirect_uri=%s", settings.google_oauth_redirect_uri)
+    resolved_redirect_uri = _resolve_oauth_redirect_uri_for_request(redirect_uri, request)
+    logger.info("OAuth callback: exchanging code, redirect_uri=%s", resolved_redirect_uri)
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             token_resp = await client.post(
@@ -297,7 +378,7 @@ async def callback(
                     "code": code,
                     "client_id": settings.google_client_id,
                     "client_secret": settings.google_client_secret,
-                    "redirect_uri": settings.google_oauth_redirect_uri,
+                    "redirect_uri": resolved_redirect_uri,
                     "grant_type": "authorization_code",
                 },
             )
@@ -307,7 +388,10 @@ async def callback(
 
     if token_resp.status_code != 200:
         logger.error("Token exchange failed (status %s): %s", token_resp.status_code, token_resp.text)
-        raise HTTPException(status_code=400, detail=f"Failed to exchange authorization code: {token_resp.text}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to exchange authorization code (redirect_uri={resolved_redirect_uri}): {token_resp.text}",
+        )
 
     tokens = token_resp.json()
     access_token = tokens.get("access_token")
@@ -528,9 +612,60 @@ async def callback(
 
 
 @router.post("/logout")
-async def logout():
+async def logout(request: Request):
     """Stateless JWT logout endpoint for frontend compatibility."""
-    return {"ok": True}
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/")
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/docs")
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/internal-docs")
+    return response
+
+
+@router.post("/docs-session")
+async def set_docs_session_cookie(request: Request, user: User = Depends(get_current_user)):
+    """Set docs-only HttpOnly session cookie for rendered /docs pages.
+
+    Frontend calls this once before redirecting browser to backend-rendered docs.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    token = auth_header[7:]
+    expires_in = JWT_EXPIRY_HOURS * 3600
+
+    response = JSONResponse(
+        {
+            "ok": True,
+            "user_id": user.id,
+            "expires_in": expires_in,
+        }
+    )
+    # Remove any legacy path-scoped cookies first to avoid duplicate cookie-name
+    # collisions across /docs and /internal-docs.
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/")
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/docs")
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/internal-docs")
+    response.set_cookie(
+        key=DOCS_SESSION_COOKIE,
+        value=token,
+        max_age=expires_in,
+        httponly=True,
+        secure=_is_secure_request(request),
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+@router.delete("/docs-session")
+async def clear_docs_session_cookie():
+    """Clear docs session cookie."""
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/")
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/docs")
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/internal-docs")
+    return response
 
 
 @router.get("/me")

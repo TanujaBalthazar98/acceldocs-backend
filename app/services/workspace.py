@@ -164,6 +164,7 @@ async def get_organization(body: dict, db: Session, user: User | None) -> dict:
             "custom_css": org.custom_css,
             "hero_title": org.hero_title,
             "hero_description": org.hero_description,
+            "hierarchy_mode": org.hierarchy_mode or "product",
             "show_search_on_landing": org.show_search_on_landing,
             "show_featured_projects": org.show_featured_projects,
             "custom_links": org.custom_links,
@@ -222,6 +223,7 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
             "name", "slug", "domain", "custom_docs_domain", "subdomain",
             "logo_url", "tagline", "primary_color", "secondary_color", "accent_color",
             "font_heading", "font_body", "custom_css", "hero_title", "hero_description",
+            "hierarchy_mode",
             "show_search_on_landing", "show_featured_projects", "custom_links",
             "mcp_enabled", "openapi_spec_json", "openapi_spec_url", "drive_folder_id",
             "analytics_property_id", "copyright",
@@ -237,7 +239,10 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
         updated_fields = []
         for field in updatable_fields:
             if field in merged:
-                setattr(org, field, merged[field])
+                value = merged[field]
+                if field == "hierarchy_mode":
+                    value = "flat" if value == "flat" else "product"
+                setattr(org, field, value)
                 updated_fields.append(field)
 
         logger.info("update-organization updated fields: %s", updated_fields)
