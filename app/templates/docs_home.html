@@ -306,6 +306,75 @@
       box-shadow: 0 8px 18px color-mix(in srgb, var(--accent) 28%, transparent);
     }
 
+    .versions {
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,0.85);
+    }
+
+    .versions-inner {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-top: 10px;
+      padding-bottom: 10px;
+      overflow-x: auto;
+    }
+
+    .versions-select-wrap {
+      min-width: 220px;
+      max-width: 320px;
+    }
+
+    .versions-select {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 7px 34px 7px 12px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      appearance: none;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      background-image:
+        linear-gradient(45deg, transparent 50%, #7a8394 50%),
+        linear-gradient(135deg, #7a8394 50%, transparent 50%);
+      background-position:
+        calc(100% - 18px) calc(50% - 1px),
+        calc(100% - 12px) calc(50% - 1px);
+      background-size: 6px 6px, 6px 6px;
+      background-repeat: no-repeat;
+      transition: border-color 0.14s, box-shadow 0.14s;
+      cursor: pointer;
+    }
+
+    .versions-select:focus {
+      outline: none;
+      border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+
+    .version-pill {
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink-soft);
+      border-radius: 999px;
+      padding: 5px 11px;
+      font-size: 0.83rem;
+      transition: all 0.14s;
+    }
+
+    .version-pill:hover { color: var(--ink); border-color: #c8d2de; }
+
+    .version-pill.active {
+      color: var(--ink);
+      border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
+      background: color-mix(in srgb, var(--accent) 10%, #ffffff);
+      font-weight: 600;
+    }
+
     .groups {
       padding-top: 28px;
       padding-bottom: 56px;
@@ -465,6 +534,23 @@
         {% endfor %}
       </div>
     </section>
+    {% if landing_versions and landing_versions|length > 0 and landing_selected_product %}
+      <section class="versions">
+        <div class="container versions-inner">
+          <span class="products-label">Versions</span>
+          <div class="versions-select-wrap">
+            <select id="versionSelect" class="versions-select" aria-label="Select version">
+              <option value="__base__" {% if not landing_selected_version %}selected{% endif %}>{{ landing_base_label or "Original" }}</option>
+              {% for version in landing_versions %}
+                <option value="{{ version.slug }}" {% if version.slug == landing_selected_version %}selected{% endif %}>
+                  {{ version.name }}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+      </section>
+    {% endif %}
   {% endif %}
 
   <main class="groups container">
@@ -496,6 +582,7 @@
   <script>
     const orgSlug = {{ org_slug | tojson }};
     const docsRoot = {{ docs_root | tojson }};
+    const landingSelectedProduct = {{ landing_selected_product | tojson }};
     const localSearchIndexRaw = {{ landing_search_index | tojson }};
     const localSearchIndex = Array.isArray(localSearchIndexRaw) ? localSearchIndexRaw : [];
     const searchInput = document.getElementById("searchInput");
@@ -707,6 +794,26 @@
         }
       }
     });
+
+    const versionSelect = document.getElementById("versionSelect");
+    if (versionSelect) {
+      versionSelect.addEventListener("change", () => {
+        const params = new URLSearchParams();
+        if (landingSelectedProduct) {
+          params.set("product", landingSelectedProduct);
+        }
+        if (versionSelect.value && versionSelect.value !== "__base__") {
+          params.set("version", versionSelect.value);
+        }
+        if (audience) {
+          params.set("audience", audience);
+        }
+        const query = params.toString();
+        window.location.href = query
+          ? `${docsRoot}/${orgSlug}?${query}`
+          : `${docsRoot}/${orgSlug}`;
+      });
+    }
   </script>
 </body>
 </html>

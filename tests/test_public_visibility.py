@@ -195,6 +195,136 @@ def test_public_route_allows_external_visibility_for_granted_user(client, db, mo
     assert "Partner Guide" in resp.text
 
 
+def test_external_docs_route_requires_invitation(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+
+    org = Organization(name="External Locked Org", slug="external-locked-org")
+    db.add(org)
+    db.flush()
+    section = Section(
+        organization_id=org.id,
+        name="Shared",
+        slug="shared",
+        visibility="external",
+        is_published=True,
+    )
+    db.add(section)
+    db.flush()
+    db.add(
+        Page(
+            organization_id=org.id,
+            section_id=section.id,
+            google_doc_id="external-locked-doc",
+            title="Locked Partner Guide",
+            slug="locked-partner-guide",
+            published_html="<h1>Locked Partner Guide</h1>",
+            is_published=True,
+            status="published",
+        )
+    )
+    db.commit()
+
+    resp = client.get("/external-docs/external-locked-org")
+    assert resp.status_code == 403
+    assert "invitation" in resp.text.lower()
+
+
+def test_external_docs_route_allows_granted_user_and_filters_scope(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+
+    org = Organization(name="External Scoped Org", slug="external-scoped-org")
+    user = User(google_id="external-scoped-user", email="partner-scoped@example.com", name="Partner Scoped")
+    db.add_all([org, user])
+    db.flush()
+    db.add(
+        ExternalAccessGrant(
+            organization_id=org.id,
+            email=user.email,
+            is_active=True,
+        )
+    )
+    db.flush()
+
+    section_external = Section(
+        organization_id=org.id,
+        name="External",
+        slug="external",
+        visibility="external",
+        is_published=True,
+    )
+    section_public = Section(
+        organization_id=org.id,
+        name="Public",
+        slug="public",
+        visibility="public",
+        is_published=True,
+    )
+    section_internal = Section(
+        organization_id=org.id,
+        name="Internal",
+        slug="internal",
+        visibility="internal",
+        is_published=True,
+    )
+    db.add_all([section_external, section_public, section_internal])
+    db.flush()
+    db.add_all(
+        [
+            Page(
+                organization_id=org.id,
+                section_id=section_external.id,
+                google_doc_id="ext-scope-external-doc",
+                title="Partner Playbook",
+                slug="partner-playbook",
+                published_html="<h1>Partner Playbook</h1>",
+                is_published=True,
+                status="published",
+            ),
+            Page(
+                organization_id=org.id,
+                section_id=section_public.id,
+                google_doc_id="ext-scope-public-doc",
+                title="Public Intro",
+                slug="public-intro",
+                published_html="<h1>Public Intro</h1>",
+                is_published=True,
+                status="published",
+            ),
+            Page(
+                organization_id=org.id,
+                section_id=section_internal.id,
+                google_doc_id="ext-scope-internal-doc",
+                title="Internal Ops",
+                slug="internal-ops",
+                published_html="<h1>Internal Ops</h1>",
+                is_published=True,
+                status="published",
+            ),
+        ]
+    )
+    db.commit()
+
+    auth_header = _auth_header_for_user(user.id, user.email)
+
+    landing = client.get("/external-docs/external-scoped-org", headers=auth_header)
+    assert landing.status_code == 200
+    assert "Partner Playbook" in landing.text
+    assert "Public Intro" not in landing.text
+    assert "Internal Ops" not in landing.text
+
+    external_page = client.get("/external-docs/external-scoped-org/partner-playbook", headers=auth_header)
+    assert external_page.status_code == 200
+    assert "Partner Playbook" in external_page.text
+
+    public_page = client.get("/external-docs/external-scoped-org/public-intro", headers=auth_header)
+    assert public_page.status_code == 404
+
+    search = client.get("/external-docs/external-scoped-org/search?q=playbook", headers=auth_header)
+    assert search.status_code == 200
+    slugs = {item["slug"] for item in search.json()["results"]}
+    assert slugs == {"partner-playbook"}
+
+
 def test_public_search_filters_by_visibility_scope(client, db, monkeypatch):
     monkeypatch.setattr(public_api, "_get_db", lambda: db)
 
@@ -389,6 +519,73 @@ def test_internal_docs_route_renders_only_internal_content(client, db, monkeypat
     assert "public-landing-page" not in internal_slugs
 
 
+def test_internal_docs_page_renders_version_selector_for_visible_version_content(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+
+    org = Organization(name="Internal Version Org", slug="internal-version-org")
+    user = User(google_id="internal-version-user", email="internal-version@example.com", name="Internal Version")
+    db.add_all([org, user])
+    db.flush()
+    db.add(OrgRole(organization_id=org.id, user_id=user.id, role="viewer"))
+    db.flush()
+
+    product = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Resume",
+        slug="resume",
+        section_type="section",
+        visibility="public",
+        is_published=True,
+        display_order=0,
+    )
+    version = Section(
+        organization_id=org.id,
+        parent_id=product.id,
+        name="Resume v2.0",
+        slug="resume-v2-0",
+        section_type="version",
+        visibility="public",
+        is_published=True,
+        display_order=0,
+    )
+    topic = Section(
+        organization_id=org.id,
+        parent_id=version.id,
+        name="Doc",
+        slug="doc",
+        section_type="section",
+        visibility="public",
+        is_published=True,
+        display_order=0,
+    )
+    db.add_all([product, version, topic])
+    db.flush()
+
+    internal_page = Page(
+        organization_id=org.id,
+        section_id=topic.id,
+        google_doc_id="internal-version-doc",
+        title="Create Pipeline",
+        slug="create-pipeline",
+        visibility_override="internal",
+        published_html="<h1>Create Pipeline</h1>",
+        is_published=True,
+        status="published",
+        display_order=0,
+    )
+    db.add(internal_page)
+    db.commit()
+
+    resp = client.get(
+        f"/internal-docs/{org.slug}/p/{internal_page.id}/{internal_page.slug}",
+        headers=_auth_header_for_user(user.id, user.email),
+    )
+    assert resp.status_code == 200
+    assert "version-select" in resp.text
+    assert f"/internal-docs/{org.slug}/p/{internal_page.id}/{internal_page.slug}" in resp.text
+
+
 def test_internal_docs_route_uses_docs_session_cookie(client, db, monkeypatch):
     monkeypatch.setattr(public_api, "_get_db", lambda: db)
 
@@ -476,3 +673,106 @@ def test_internal_docs_accepts_query_auth_token_and_bootstraps_cookie(client, db
     follow = client.get("/internal-docs/internal-query-org/query-token-internal-doc")
     assert follow.status_code == 200
     assert "Query Token Internal Doc" in follow.text
+
+
+def test_docs_page_renders_last_updated_metadata(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+
+    org = Organization(name="Updated Org", slug="updated-org")
+    db.add(org)
+    db.flush()
+
+    section = Section(
+        organization_id=org.id,
+        name="Guides",
+        slug="guides",
+        visibility="public",
+        is_published=True,
+    )
+    db.add(section)
+    db.flush()
+
+    page = Page(
+        organization_id=org.id,
+        section_id=section.id,
+        google_doc_id="updated-doc",
+        title="Release Notes",
+        slug="release-notes",
+        published_html="<h1>Release Notes</h1>",
+        is_published=True,
+        status="published",
+        last_synced_at="2026-03-14T10:15:00+00:00",
+    )
+    db.add(page)
+    db.commit()
+
+    resp = client.get("/docs/updated-org/release-notes")
+    assert resp.status_code == 200
+    assert "Last updated: Mar 14, 2026 10:15 UTC" in resp.text
+
+
+def test_docs_page_feedback_and_comments_api(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+
+    org = Organization(name="Engagement Org", slug="engagement-org")
+    user = User(google_id="engagement-user", email="engagement@example.com", name="Engagement User")
+    db.add_all([org, user])
+    db.flush()
+    db.add(OrgRole(organization_id=org.id, user_id=user.id, role="viewer"))
+    db.flush()
+
+    section = Section(
+        organization_id=org.id,
+        name="Guides",
+        slug="guides",
+        visibility="public",
+        is_published=True,
+    )
+    db.add(section)
+    db.flush()
+
+    page = Page(
+        organization_id=org.id,
+        section_id=section.id,
+        google_doc_id="engagement-doc",
+        title="Start Here",
+        slug="start-here",
+        published_html="<h1>Start Here</h1>",
+        is_published=True,
+        status="published",
+    )
+    db.add(page)
+    db.commit()
+    user_id = user.id
+    user_email = user.email
+
+    base_path = f"/docs/{org.slug}/p/{page.id}/{page.slug}"
+
+    empty = client.get(f"{base_path}/engagement")
+    assert empty.status_code == 200
+    assert empty.json()["feedback"]["total"] == 0
+    assert empty.json()["comments"] == []
+
+    feedback_resp = client.post(f"{base_path}/feedback", json={"vote": "up", "message": "Very clear"})
+    assert feedback_resp.status_code == 201
+    assert feedback_resp.json()["feedback"]["up"] == 1
+
+    anon_comment = client.post(f"{base_path}/comments", json={"body": "Thanks!"})
+    assert anon_comment.status_code == 401
+
+    auth_header = _auth_header_for_user(user_id, user_email)
+    member_comment = client.post(
+        f"{base_path}/comments",
+        headers=auth_header,
+        json={"body": "Please add troubleshooting steps."},
+    )
+    assert member_comment.status_code == 201
+    assert member_comment.json()["comment"]["display_name"] == "Engagement User"
+
+    full = client.get(f"{base_path}/engagement", headers=auth_header)
+    assert full.status_code == 200
+    payload = full.json()
+    assert payload["feedback"]["up"] == 1
+    assert payload["permissions"]["can_comment"] is True
+    assert len(payload["comments"]) == 1
+    assert payload["comments"][0]["body"] == "Please add troubleshooting steps."

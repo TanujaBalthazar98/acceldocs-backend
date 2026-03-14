@@ -492,6 +492,85 @@ class Page(Base):
     )
 
 
+class PageFeedback(Base):
+    """Per-page feedback votes with optional freeform notes."""
+    __tablename__ = "page_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    page_id: Mapped[int] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    user_email: Mapped[str | None] = mapped_column(String(255))
+    vote: Mapped[str] = mapped_column(String(16), nullable=False)  # up | down
+    message: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str | None] = mapped_column(String(20))  # public | internal | external
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_page_feedback_org_page_vote", "organization_id", "page_id", "vote"),
+        Index("ix_page_feedback_page_created", "page_id", "created_at"),
+    )
+
+
+class PageComment(Base):
+    """End-user comments attached to rendered documentation pages."""
+    __tablename__ = "page_comments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    page_id: Mapped[int] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    user_email: Mapped[str | None] = mapped_column(String(255))
+    display_name: Mapped[str | None] = mapped_column(String(255))
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str | None] = mapped_column(String(20))  # public | internal | external
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_page_comments_org_page_created", "organization_id", "page_id", "created_at"),
+        Index("ix_page_comments_page_deleted", "page_id", "is_deleted"),
+    )
+
+
+class PageRedirect(Base):
+    """Redirect map for historical/retired page links.
+
+    Used to preserve old links when slugs change or pages are deleted.
+    """
+    __tablename__ = "page_redirects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    source_page_id: Mapped[int | None] = mapped_column(Integer)
+    source_slug: Mapped[str] = mapped_column(String(500), nullable=False)
+    target_page_id: Mapped[int | None] = mapped_column(Integer)
+    target_url: Mapped[str | None] = mapped_column(String(1000))
+    status_code: Mapped[int] = mapped_column(Integer, default=307)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "source_page_id", "source_slug", name="uq_page_redirect_source_page_slug"
+        ),
+        Index("ix_page_redirect_org_slug_active", "organization_id", "source_slug", "is_active"),
+        Index("ix_page_redirect_org_page_active", "organization_id", "source_page_id", "is_active"),
+    )
+
+
 class ExternalAccessGrant(Base):
     """Allow an external email to access external docs for an organization."""
     __tablename__ = "external_access_grants"

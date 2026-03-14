@@ -2,24 +2,38 @@
 
 Routes:
   GET /docs/{org_slug}                  — landing page (section cards)
+  GET /external-docs/{org_slug}         — invite-only external docs landing
+  GET /internal-docs/{org_slug}         — org-only internal docs landing
   GET /docs/{org_slug}/{page_slug}      — single page view
   GET /docs/{org_slug}/{section_slug}/{page_slug}  — page inside explicit section
 """
 
 import logging
 import re
+from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlparse
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.auth.routes import DOCS_SESSION_COOKIE
 from app.middleware.auth import get_current_user as _get_auth_user
-from app.models import Organization, Page, Section, User
+from app.config import settings
+from app.models import (
+    Organization,
+    Page,
+    PageComment,
+    PageFeedback,
+    PageRedirect,
+    Section,
+    User,
+)
 from app.services.visibility import (
     ViewerScope,
     build_viewer_scope,
@@ -32,6 +46,10 @@ router = APIRouter(tags=["public"])
 
 DEFAULT_PRIMARY_COLOR = "#6366f1"
 VALID_AUDIENCES = {"all", "public", "internal", "external"}
+_GOOGLE_DOC_URL_RE = re.compile(r"docs\.google\.com/document/d/([a-zA-Z0-9_-]+)")
+_CANONICAL_DOCS_PATH_RE = re.compile(r"^/(docs|internal-docs|external-docs)/([^/]+)/p/(\d+)/([^/?#]+)$")
+_LEGACY_DOCS_PATH_RE = re.compile(r"^/(docs|internal-docs|external-docs)/([^/]+)/([^/?#]+)$")
+_HREF_ATTR_RE = re.compile(r'href=(["\'])(.*?)\1', re.IGNORECASE)
 
 # Template engine — load from app/templates/
 _TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
@@ -58,6 +76,49 @@ def _org_initials(name: str) -> str:
 
 def _org_hierarchy_mode(org: Organization) -> str:
     return "flat" if getattr(org, "hierarchy_mode", None) == "flat" else "product"
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _format_last_updated(page: Page) -> str | None:
+    parsed = (
+        _parse_timestamp(page.last_synced_at)
+        or _parse_timestamp(page.drive_modified_at)
+        or _parse_timestamp(getattr(page, "last_published_at", None))
+    )
+    if not parsed:
+        if page.updated_at:
+            parsed = page.updated_at
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            return None
+    return parsed.astimezone(timezone.utc).strftime("%b %d, %Y %H:%M UTC")
+
+
+def _viewer_display_name(user: User | None) -> str | None:
+    if user and user.name and user.name.strip():
+        return user.name.strip()
+    if user and user.email:
+        local_part = user.email.split("@", 1)[0].strip()
+        if local_part:
+            return local_part
+    return None
 
 
 def _resolve_request_user(request: Request, db: Session) -> User | None:
@@ -150,6 +211,7 @@ def _bootstrap_docs_cookie_redirect_if_needed(request: Request) -> RedirectRespo
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/")
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/docs")
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/internal-docs")
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/external-docs")
     response.set_cookie(
         key=DOCS_SESSION_COOKIE,
         value=query_token,
@@ -179,12 +241,15 @@ def _resolve_route_audience(
 
     Rules:
     - /internal-docs is always internal-only.
+    - /external-docs is always external-only.
     - /docs is strict public by default.
     - /docs can opt into external audience via ?audience=external.
     """
     normalized_docs_root = docs_root.rstrip("/") or "/docs"
     if normalized_docs_root == "/internal-docs":
         return "internal", None
+    if normalized_docs_root == "/external-docs":
+        return "external", "external"
 
     normalized = _normalize_audience(audience)
     if normalized == "external":
@@ -262,6 +327,7 @@ def _build_section_node(
         "name": section.name,
         "slug": section.slug,
         "section_type": section.section_type or "section",
+        "display_order": section.display_order,
         "pages": [{"id": p.id, "title": p.title, "slug": p.slug} for p in pages],
         "children": children,
         "first_page_id": first_page_id,
@@ -371,7 +437,11 @@ def _build_landing_groups(product_node: dict | None) -> list[dict]:
     if not normalized:
         return []
 
-    group_nodes = normalized.get("children", [])
+    group_nodes = [
+        child
+        for child in normalized.get("children", [])
+        if (child.get("section_type") or "section") != "version"
+    ]
     if not group_nodes:
         group_nodes = [normalized]
 
@@ -463,11 +533,87 @@ def _find_page_path(
     return None
 
 
+def _parse_version_parts(value: str | None) -> tuple[int, int, int] | None:
+    text = (value or "").strip().lower()
+    if not text:
+        return None
+    text = text[1:] if text.startswith("v") else text
+    match = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?$", text)
+    if not match:
+        return None
+    major = int(match.group(1))
+    minor = int(match.group(2) or 0)
+    patch = int(match.group(3) or 0)
+    return (major, minor, patch)
+
+
+def _sort_versions_desc(nodes: list[dict]) -> list[dict]:
+    def key(node: dict) -> tuple[int, int, int, int, int, str]:
+        parts = _parse_version_parts(node.get("name")) or _parse_version_parts(node.get("slug"))
+        if parts:
+            return (1, parts[0], parts[1], parts[2], node.get("display_order", 0), node.get("name", ""))
+        return (0, 0, 0, 0, node.get("display_order", 0), node.get("name", ""))
+
+    return sorted(nodes, key=key, reverse=True)
+
+
+def _find_first_page_excluding_versions(node: dict | None) -> tuple[int | None, str | None]:
+    if not node:
+        return (None, None)
+    pages = node.get("pages") or []
+    if pages:
+        first = pages[0]
+        return first.get("id"), first.get("slug")
+    for child in node.get("children", []):
+        if (child.get("section_type") or "section") == "version":
+            continue
+        page_id, page_slug = _find_first_page_excluding_versions(child)
+        if page_id and page_slug:
+            return page_id, page_slug
+    return (None, None)
+
+
+def _build_product_version_nodes(
+    *,
+    org_id: int,
+    product_section_id: int,
+    db: Session,
+    viewer_scope: ViewerScope,
+    audience: str | None = None,
+) -> list[dict]:
+    """Build switchable version nodes under a product.
+
+    Includes published version sections even when they have no visible pages yet,
+    so the version selector remains stable.
+    """
+    version_sections = (
+        db.query(Section)
+        .filter(
+            Section.organization_id == org_id,
+            Section.parent_id == product_section_id,
+            Section.section_type == "version",
+        )
+        .order_by(Section.display_order, Section.name)
+        .all()
+    )
+    nodes: list[dict] = []
+    for version_section in version_sections:
+        # Do not pre-filter by section visibility only.
+        # A version section can contain audience-visible pages via page-level overrides
+        # (for example, internal pages under a public version section).
+        # _build_section_node applies page-level visibility filtering correctly.
+        existing_node = _build_section_node(version_section, org_id, db, viewer_scope, audience)
+        if existing_node is not None:
+            nodes.append(existing_node)
+    return _sort_versions_desc(nodes)
+
+
 def _resolve_page_navigation(
     all_top_nodes: list[dict],
     page_slug: str,
     page_id: int | None = None,
     hierarchy_mode: str = "product",
+    version_slug: str | None = None,
 ) -> dict:
     """Resolve tabs, sidebar tree, and product header for a page view."""
     path: list[dict] = []
@@ -515,6 +661,8 @@ def _resolve_page_navigation(
                 "nav_sections": all_top_nodes,
                 "current_tab_slug": None,
                 "product_header": None,
+                "top_versions": [],
+                "current_version_slug": None,
             }
 
         tab_roots = [
@@ -546,6 +694,8 @@ def _resolve_page_navigation(
                 "nav_sections": nav_sections,
                 "current_tab_slug": current_tab_slug,
                 "product_header": None,
+                "top_versions": [],
+                "current_version_slug": None,
             }
 
         return {
@@ -553,6 +703,8 @@ def _resolve_page_navigation(
             "nav_sections": all_top_nodes,
             "current_tab_slug": None,
             "product_header": None,
+            "top_versions": [],
+            "current_version_slug": None,
         }
 
     # Product hierarchy mode (default).
@@ -562,6 +714,8 @@ def _resolve_page_navigation(
             "nav_sections": all_top_nodes,
             "current_tab_slug": None,
             "product_header": None,
+            "top_versions": [],
+            "current_version_slug": None,
         }
 
     # Legacy shape: single root node explicitly marked as tab.
@@ -571,18 +725,52 @@ def _resolve_page_navigation(
             "nav_sections": [active_top_node],
             "current_tab_slug": active_top_node.get("slug"),
             "product_header": active_top_node,
+            "top_versions": [],
+            "current_version_slug": None,
         }
 
     product_children = active_top_node.get("children", [])
+    version_children = _sort_versions_desc(
+        [
+            child for child in product_children
+            if (child.get("section_type") or "section") == "version"
+        ]
+    )
+    active_content_root = active_top_node
+    current_version_slug = None
+
+    if version_children:
+        active_version = next(
+            (version for version in version_children if _find_page_path(version, page_slug=page_slug, page_id=page_id)),
+            None,
+        )
+        if active_version is None and version_slug:
+            active_version = next((version for version in version_children if version.get("slug") == version_slug), None)
+        if active_version is not None:
+            active_content_root = active_version
+            current_version_slug = active_version.get("slug")
+        else:
+            # Base-content scope: keep version switcher available, but render sidebar
+            # from product content excluding version branches.
+            active_content_root = {
+                **active_top_node,
+                "children": [
+                    child
+                    for child in active_top_node.get("children", [])
+                    if (child.get("section_type") or "section") != "version"
+                ],
+            }
+
+    content_children = active_content_root.get("children", [])
     tab_children = [
-        child for child in product_children
+        child for child in content_children
         if (child.get("section_type") or "section") == "tab"
     ]
     non_tab_children = [
-        child for child in product_children
+        child for child in content_children
         if (child.get("section_type") or "section") != "tab"
     ]
-    product_pages = active_top_node.get("pages", [])
+    content_pages = active_content_root.get("pages", [])
 
     # If this product has explicit tab children, use strict product + tabs layout.
     if tab_children:
@@ -590,7 +778,11 @@ def _resolve_page_navigation(
             (tab for tab in tab_children if _find_page_path(tab, page_slug=page_slug, page_id=page_id)),
             None,
         )
-        docs_node = _build_docs_node(f"product-{active_top_node.get('id')}", product_pages, non_tab_children)
+        docs_node = _build_docs_node(
+            f"product-{active_content_root.get('id')}",
+            content_pages,
+            non_tab_children,
+        )
         top_tabs = [*tab_children, *([docs_node] if docs_node else [])]
 
         if active_tab is not None:
@@ -608,26 +800,32 @@ def _resolve_page_navigation(
             "nav_sections": nav_sections,
             "current_tab_slug": current_tab_slug,
             "product_header": active_top_node,
+            "top_versions": version_children,
+            "current_version_slug": current_version_slug,
         }
 
     # Legacy fallback for non-typed structures.
     if len(all_top_nodes) == 1:
-        only_node = all_top_nodes[0]
+        only_node = active_content_root if active_content_root else all_top_nodes[0]
         normalized_only = _flatten_same_name_wrapper(only_node) or only_node
         return {
             "top_tabs": [],
             "nav_sections": [normalized_only],
             "current_tab_slug": None,
-            "product_header": normalized_only,
+            "product_header": active_top_node,
+            "top_versions": version_children,
+            "current_version_slug": current_version_slug,
         }
 
     # Multiple top-level sections represent products, not tabs.
-    normalized_active = _flatten_same_name_wrapper(active_top_node) or active_top_node
+    normalized_active = _flatten_same_name_wrapper(active_content_root) or active_content_root
     return {
         "top_tabs": [],
         "nav_sections": [normalized_active] if normalized_active else all_top_nodes,
         "current_tab_slug": None,
-        "product_header": normalized_active,
+        "product_header": active_top_node,
+        "top_versions": version_children,
+        "current_version_slug": current_version_slug,
     }
 
 
@@ -658,6 +856,222 @@ def _clean_gdoc_html(raw_html: str) -> str:
     return html.strip()
 
 
+def _audience_suffix_for_links(docs_root: str, audience_for_links: str | None) -> str:
+    normalized_docs_root = docs_root.rstrip("/") or "/docs"
+    normalized = _normalize_audience(audience_for_links)
+    if normalized_docs_root == "/docs" and normalized:
+        return f"?audience={normalized}"
+    return ""
+
+
+def _canonical_page_href(
+    page: Page,
+    *,
+    org_slug: str,
+    docs_root: str,
+    audience_for_links: str | None = None,
+) -> str:
+    suffix = _audience_suffix_for_links(docs_root, audience_for_links)
+    return f"{docs_root}/{org_slug}/p/{page.id}/{page.slug}{suffix}"
+
+
+def _landing_href(*, org_slug: str, docs_root: str, audience_for_links: str | None = None) -> str:
+    suffix = _audience_suffix_for_links(docs_root, audience_for_links)
+    return f"{docs_root}/{org_slug}{suffix}"
+
+
+def _docs_root_for_visibility(visibility: str) -> str:
+    normalized = (visibility or "").strip().lower()
+    if normalized == "internal":
+        return "/internal-docs"
+    if normalized == "external":
+        return "/external-docs"
+    return "/docs"
+
+
+def _rewrite_page_links(
+    html: str,
+    *,
+    org: Organization,
+    db: Session,
+    docs_root: str,
+    audience_for_links: str | None = None,
+) -> str:
+    """Rewrite known internal links to canonical page URLs.
+
+    Handles:
+    - Google Docs links (docs.google.com/document/d/{id}/...)
+    - Legacy docs slug links (/docs/{org}/{slug})
+    - Canonical links in any docs root are normalized to current docs_root
+    """
+    org_slug = org.slug or str(org.id)
+    org_aliases = {org_slug, str(org.id)}
+    pages = (
+        db.query(Page)
+        .filter(Page.organization_id == org.id, Page.is_published == True)
+        .order_by(Page.id.asc())
+        .all()
+    )
+    section_ids = {p.section_id for p in pages if p.section_id is not None}
+    sections_by_id = {
+        s.id: s for s in db.query(Section).filter(Section.id.in_(section_ids)).all()
+    } if section_ids else {}
+    page_visibility: dict[int, str] = {}
+    for p in pages:
+        section = sections_by_id.get(p.section_id) if p.section_id else None
+        page_visibility[p.id] = resolve_effective_visibility(
+            section.visibility if section else "public",
+            p.visibility_override,
+        )
+    by_doc_id = {p.google_doc_id: p for p in pages if p.google_doc_id}
+    by_id = {p.id: p for p in pages}
+    by_slug: dict[str, Page | None] = {}
+    for p in pages:
+        existing = by_slug.get(p.slug)
+        if existing is None and p.slug not in by_slug:
+            by_slug[p.slug] = p
+        elif existing is not None:
+            by_slug[p.slug] = None
+
+    def replace_href(match: re.Match[str]) -> str:
+        quote = match.group(1)
+        href = (match.group(2) or "").strip()
+        if not href:
+            return match.group(0)
+        lowered = href.lower()
+        if lowered.startswith(("#", "mailto:", "tel:", "javascript:")):
+            return match.group(0)
+
+        parsed = urlparse(href)
+        target_page: Page | None = None
+        fragment = parsed.fragment
+
+        gdoc_match = _GOOGLE_DOC_URL_RE.search(href)
+        if gdoc_match:
+            target_page = by_doc_id.get(gdoc_match.group(1))
+        else:
+            path = parsed.path or ""
+            canonical_match = _CANONICAL_DOCS_PATH_RE.match(path)
+            if canonical_match:
+                _, path_org, page_id_text, _ = canonical_match.groups()
+                if path_org in org_aliases:
+                    try:
+                        target_page = by_id.get(int(page_id_text))
+                    except ValueError:
+                        target_page = None
+            if target_page is None:
+                legacy_match = _LEGACY_DOCS_PATH_RE.match(path)
+                if legacy_match:
+                    _, path_org, slug = legacy_match.groups()
+                    if path_org in org_aliases:
+                        target_page = by_slug.get(slug) or None
+            if target_page is None and not parsed.scheme and not path.startswith("/") and "/" not in path:
+                target_page = by_slug.get(path) or None
+
+        if target_page is None:
+            return match.group(0)
+
+        target_visibility = page_visibility.get(target_page.id, "public")
+        target_docs_root = _docs_root_for_visibility(target_visibility)
+        rewritten = _canonical_page_href(
+            target_page,
+            org_slug=org_slug,
+            docs_root=target_docs_root,
+            audience_for_links=audience_for_links if target_docs_root == docs_root else None,
+        )
+        if fragment:
+            rewritten += f"#{fragment}"
+        return f"href={quote}{rewritten}{quote}"
+
+    return _HREF_ATTR_RE.sub(replace_href, html)
+
+
+def _lookup_redirect_for_page_id(
+    *,
+    organization_id: int,
+    page_id: int,
+    page_slug: str,
+    db: Session,
+) -> PageRedirect | None:
+    redirects = (
+        db.query(PageRedirect)
+        .filter(
+            PageRedirect.organization_id == organization_id,
+            PageRedirect.source_page_id == page_id,
+            PageRedirect.is_active == True,
+        )
+        .order_by(PageRedirect.updated_at.desc())
+        .all()
+    )
+    if not redirects:
+        return None
+    exact = next((r for r in redirects if r.source_slug == page_slug), None)
+    return exact or redirects[0]
+
+
+def _lookup_redirect_for_slug(
+    *,
+    organization_id: int,
+    page_slug: str,
+    db: Session,
+) -> PageRedirect | None:
+    return (
+        db.query(PageRedirect)
+        .filter(
+            PageRedirect.organization_id == organization_id,
+            PageRedirect.source_slug == page_slug,
+            PageRedirect.is_active == True,
+        )
+        .order_by(PageRedirect.updated_at.desc())
+        .first()
+    )
+
+
+def _resolve_redirect_target_url(
+    *,
+    redirect: PageRedirect,
+    org: Organization,
+    db: Session,
+    viewer_scope: ViewerScope,
+    audience: str | None,
+    docs_root: str,
+    audience_for_links: str | None,
+) -> str:
+    org_slug = org.slug or str(org.id)
+    if redirect.target_page_id:
+        target_page = (
+            db.query(Page)
+            .filter(
+                Page.organization_id == org.id,
+                Page.id == redirect.target_page_id,
+                Page.is_published == True,
+            )
+            .first()
+        )
+        if target_page:
+            section = db.get(Section, target_page.section_id) if target_page.section_id else None
+            if _is_page_visible(
+                target_page,
+                section.visibility if section else "public",
+                viewer_scope,
+                audience,
+            ):
+                return _canonical_page_href(
+                    target_page,
+                    org_slug=org_slug,
+                    docs_root=docs_root,
+                    audience_for_links=audience_for_links,
+                )
+
+    if redirect.target_url:
+        return redirect.target_url
+    return _landing_href(
+        org_slug=org_slug,
+        docs_root=docs_root,
+        audience_for_links=audience_for_links,
+    )
+
+
 def _render(template_name: str, **ctx) -> str:
     tpl = _jinja_env.get_template(template_name)
     return tpl.render(**ctx)
@@ -678,12 +1092,19 @@ def _base_ctx(
     audience_suffix = f"?audience={template_audience}" if template_audience else ""
     if normalized_docs_root == "/internal-docs":
         docs_visibility_label = "Internal"
+        docs_mode = "internal"
+    elif normalized_docs_root == "/external-docs":
+        docs_visibility_label = "External"
+        docs_mode = "external"
     elif template_audience == "external":
         docs_visibility_label = "External"
+        docs_mode = "public"
     elif template_audience == "all":
         docs_visibility_label = "All"
+        docs_mode = "public"
     else:
         docs_visibility_label = "Public"
+        docs_mode = "public"
     return {
         "org_name": org.name,
         "org_slug": org.slug or str(org.id),
@@ -694,10 +1115,16 @@ def _base_ctx(
         "nav_sections": nav_sections,
         "top_sections": top_sections,
         "top_tabs": [],
+        "top_versions": [],
         "current_tab_slug": None,
+        "current_version_slug": None,
+        "base_version_label": "Original",
         "product_header": None,
         "landing_products": [],
         "landing_selected_product": None,
+        "landing_versions": [],
+        "landing_selected_version": None,
+        "landing_base_label": "Original",
         "landing_groups": [],
         "landing_get_started_slug": None,
         "landing_get_started_id": None,
@@ -706,7 +1133,7 @@ def _base_ctx(
         "audience": template_audience,
         "audience_suffix": audience_suffix,
         "docs_root": normalized_docs_root,
-        "docs_mode": "internal" if normalized_docs_root == "/internal-docs" else "public",
+        "docs_mode": docs_mode,
         "docs_visibility_label": docs_visibility_label,
     }
 
@@ -731,13 +1158,139 @@ def _ensure_internal_org_member(viewer_scope: ViewerScope) -> None:
     raise HTTPException(status_code=403, detail="Internal docs require organization access")
 
 
+def _ensure_external_docs_access(viewer_scope: ViewerScope) -> None:
+    if viewer_scope.is_org_member or viewer_scope.is_external_allowed:
+        return
+    raise HTTPException(status_code=403, detail="External docs require invitation")
+
+
+def _access_required_html(
+    *,
+    org: Organization,
+    docs_root: str,
+    required_scope: str,
+    request: Request,
+) -> HTMLResponse:
+    """Render a lightweight access gate instead of JSON 403 for docs pages."""
+    scope_label = "internal" if required_scope == "internal" else "external"
+    scope_title = "Internal docs only" if required_scope == "internal" else "External docs only"
+    message = (
+        "Sign in with your organization account to access internal docs."
+        if required_scope == "internal"
+        else "This page is shared only with invited external users. Ask for an invitation to continue."
+    )
+    current_url = str(request.url)
+    sign_in_url = f"{settings.frontend_url.rstrip('/')}/auth?next={quote(current_url, safe='')}"
+    public_url = _landing_href(org_slug=org.slug or str(org.id), docs_root="/docs")
+    scope_label_safe = escape(scope_label)
+    scope_title_safe = escape(scope_title)
+    message_safe = escape(message)
+    sign_in_url_safe = escape(sign_in_url, quote=True)
+    public_url_safe = escape(public_url, quote=True)
+    html = f"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{scope_title}</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+    }}
+    .wrap {{
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }}
+    .card {{
+      width: min(640px, 100%);
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: 0 8px 30px rgba(15, 23, 42, 0.06);
+    }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid #cbd5e1;
+      color: #334155;
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 12px;
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 32px;
+      line-height: 1.15;
+    }}
+    p {{
+      margin: 0 0 18px;
+      color: #475569;
+      font-size: 16px;
+      line-height: 1.5;
+    }}
+    .actions {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }}
+    .btn {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 10px;
+      text-decoration: none;
+      font-weight: 600;
+      padding: 10px 14px;
+      border: 1px solid #cbd5e1;
+      color: #0f172a;
+      background: #fff;
+    }}
+    .btn.primary {{
+      border-color: #0f766e;
+      background: #14b8a6;
+      color: #ffffff;
+    }}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <div class="badge">{scope_label_safe} access required</div>
+      <h1>{scope_title_safe}</h1>
+      <p>{message_safe}</p>
+      <div class="actions">
+        <a class="btn primary" href="{sign_in_url_safe}">Sign in</a>
+        <a class="btn" href="{public_url_safe}">View public docs</a>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
+"""
+    return HTMLResponse(content=html, status_code=403)
+
+
 def _docs_landing_impl(
     org_slug: str,
     request: Request,
     product: str | None,
+    version: str | None,
     audience: str | None,
     docs_root: str,
-    require_org_member: bool,
+    access_scope: str | None,
 ) -> HTMLResponse:
     db = _get_db()
     try:
@@ -749,11 +1302,28 @@ def _docs_landing_impl(
             _resolve_request_user_with_optional_query_token(
                 request,
                 db,
-                allow_query_token=require_org_member,
+                allow_query_token=access_scope is not None,
             ),
         )
-        if require_org_member:
-            _ensure_internal_org_member(viewer_scope)
+        if access_scope == "internal":
+            if not viewer_scope.is_org_member:
+                return _access_required_html(
+                    org=org,
+                    docs_root=docs_root,
+                    required_scope="internal",
+                    request=request,
+                )
+            cookie_redirect = _bootstrap_docs_cookie_redirect_if_needed(request)
+            if cookie_redirect is not None:
+                return cookie_redirect
+        elif access_scope == "external":
+            if not (viewer_scope.is_org_member or viewer_scope.is_external_allowed):
+                return _access_required_html(
+                    org=org,
+                    docs_root=docs_root,
+                    required_scope="external",
+                    request=request,
+                )
             cookie_redirect = _bootstrap_docs_cookie_redirect_if_needed(request)
             if cookie_redirect is not None:
                 return cookie_redirect
@@ -763,15 +1333,46 @@ def _docs_landing_impl(
         all_top_nodes = _build_top_nodes(org.id, db, viewer_scope, effective_audience)
         cards = _build_top_section_cards(org.id, db, viewer_scope, effective_audience)
         selected_product_node = None
+        landing_versions: list[dict] = []
+        landing_selected_version: str | None = None
         if hierarchy_mode == "product":
             if product:
                 selected_product_node = next((node for node in all_top_nodes if node.get("slug") == product), None)
             if selected_product_node is None and all_top_nodes:
                 selected_product_node = all_top_nodes[0]
-            selected_product_node = _flatten_same_name_wrapper(selected_product_node)
-            landing_groups = _build_landing_groups(selected_product_node)
-            landing_get_started_slug = selected_product_node.get("first_page_slug") if selected_product_node else None
-            landing_get_started_id = selected_product_node.get("first_page_id") if selected_product_node else None
+            version_nodes = (
+                _build_product_version_nodes(
+                    org_id=org.id,
+                    product_section_id=selected_product_node.get("id"),
+                    db=db,
+                    viewer_scope=viewer_scope,
+                    audience=effective_audience,
+                )
+                if selected_product_node and selected_product_node.get("id")
+                else []
+            )
+            selected_version_node = None
+            if version_nodes:
+                landing_versions = [
+                    {
+                        "id": node.get("id"),
+                        "name": node.get("name"),
+                        "slug": node.get("slug"),
+                    }
+                    for node in version_nodes
+                ]
+                if version:
+                    selected_version_node = next((node for node in version_nodes if node.get("slug") == version), None)
+                if selected_version_node is None:
+                    base_page_id, base_page_slug = _find_first_page_excluding_versions(selected_product_node)
+                    if not (base_page_id and base_page_slug):
+                        selected_version_node = version_nodes[0]
+                landing_selected_version = selected_version_node.get("slug") if selected_version_node else None
+            selected_content_node = selected_version_node or selected_product_node
+            selected_content_node = _flatten_same_name_wrapper(selected_content_node)
+            landing_groups = _build_landing_groups(selected_content_node)
+            landing_get_started_slug = selected_content_node.get("first_page_slug") if selected_content_node else None
+            landing_get_started_id = selected_content_node.get("first_page_id") if selected_content_node else None
         else:
             landing_groups = _build_flat_landing_groups(all_top_nodes)
             first_page = None
@@ -795,6 +1396,9 @@ def _docs_landing_impl(
         )
         ctx["landing_products"] = cards if hierarchy_mode == "product" else []
         ctx["landing_selected_product"] = selected_product_node.get("slug") if selected_product_node else None
+        ctx["landing_versions"] = landing_versions
+        ctx["landing_selected_version"] = landing_selected_version
+        ctx["landing_base_label"] = (selected_product_node.get("name") if selected_product_node else "Original")
         ctx["landing_groups"] = landing_groups
         ctx["landing_get_started_slug"] = landing_get_started_slug
         ctx["landing_get_started_id"] = landing_get_started_id
@@ -819,6 +1423,7 @@ def docs_landing(
     org_slug: str,
     request: Request,
     product: str | None = Query(default=None),
+    version: str | None = Query(default=None),
     audience: str | None = Query(default=None),
 ) -> HTMLResponse:
     """Org documentation landing page — shows section cards."""
@@ -826,9 +1431,29 @@ def docs_landing(
         org_slug=org_slug,
         request=request,
         product=product,
+        version=version,
         audience=audience,
         docs_root="/docs",
-        require_org_member=False,
+        access_scope=None,
+    )
+
+
+@router.get("/external-docs/{org_slug}", response_class=HTMLResponse)
+def external_docs_landing(
+    org_slug: str,
+    request: Request,
+    product: str | None = Query(default=None),
+    version: str | None = Query(default=None),
+) -> HTMLResponse:
+    """External docs landing — invitation-only external visibility."""
+    return _docs_landing_impl(
+        org_slug=org_slug,
+        request=request,
+        product=product,
+        version=version,
+        audience="external",
+        docs_root="/external-docs",
+        access_scope="external",
     )
 
 
@@ -837,15 +1462,17 @@ def internal_docs_landing(
     org_slug: str,
     request: Request,
     product: str | None = Query(default=None),
+    version: str | None = Query(default=None),
 ) -> HTMLResponse:
     """Organization internal docs landing — internal-only visibility for org members."""
     return _docs_landing_impl(
         org_slug=org_slug,
         request=request,
         product=product,
+        version=version,
         audience="internal",
         docs_root="/internal-docs",
-        require_org_member=True,
+        access_scope="internal",
     )
 
 
@@ -855,22 +1482,28 @@ def _docs_search_impl(
     q: str,
     audience: str | None,
     docs_root: str,
-    require_org_member: bool,
+    access_scope: str | None,
 ) -> JSONResponse:
     db = _get_db()
     try:
         org = _lookup_org(org_slug, db)
+        request_user = _resolve_request_user_with_optional_query_token(
+            request,
+            db,
+            allow_query_token=access_scope is not None,
+        )
         viewer_scope = build_viewer_scope(
             db,
             org.id,
-            _resolve_request_user_with_optional_query_token(
-                request,
-                db,
-                allow_query_token=require_org_member,
-            ),
+            request_user,
         )
-        if require_org_member:
+        if access_scope == "internal":
             _ensure_internal_org_member(viewer_scope)
+            cookie_redirect = _bootstrap_docs_cookie_redirect_if_needed(request)
+            if cookie_redirect is not None:
+                return cookie_redirect
+        elif access_scope == "external":
+            _ensure_external_docs_access(viewer_scope)
             cookie_redirect = _bootstrap_docs_cookie_redirect_if_needed(request)
             if cookie_redirect is not None:
                 return cookie_redirect
@@ -946,7 +1579,24 @@ def docs_search(
         q=q,
         audience=audience,
         docs_root="/docs",
-        require_org_member=False,
+        access_scope=None,
+    )
+
+
+@router.get("/external-docs/{org_slug}/search")
+def external_docs_search(
+    org_slug: str,
+    request: Request,
+    q: str = Query(default=""),
+) -> JSONResponse:
+    """Search endpoint for invitation-only external docs."""
+    return _docs_search_impl(
+        org_slug=org_slug,
+        request=request,
+        q=q,
+        audience="external",
+        docs_root="/external-docs",
+        access_scope="external",
     )
 
 
@@ -963,7 +1613,7 @@ def internal_docs_search(
         q=q,
         audience="internal",
         docs_root="/internal-docs",
-        require_org_member=True,
+        access_scope="internal",
     )
 
 
@@ -972,9 +1622,11 @@ def _render_docs_page(
     page: Page,
     db: Session,
     viewer_scope: ViewerScope,
+    request_user: User | None = None,
     audience: str | None = None,
     audience_for_links: str | None = None,
     docs_root: str = "/docs",
+    version_slug: str | None = None,
 ) -> HTMLResponse:
     section = db.get(Section, page.section_id) if page.section_id else None
     primary = org.primary_color or DEFAULT_PRIMARY_COLOR
@@ -982,9 +1634,51 @@ def _render_docs_page(
 
     all_top_nodes = _build_top_nodes(org.id, db, viewer_scope, audience)
     cards = _build_top_section_cards(org.id, db, viewer_scope, audience)
-    nav_meta = _resolve_page_navigation(all_top_nodes, page.slug, page_id=page.id, hierarchy_mode=hierarchy_mode)
+    nav_meta = _resolve_page_navigation(
+        all_top_nodes,
+        page.slug,
+        page_id=page.id,
+        hierarchy_mode=hierarchy_mode,
+        version_slug=version_slug,
+    )
+    if hierarchy_mode == "product" and nav_meta.get("product_header"):
+        product_id = nav_meta["product_header"].get("id")
+        if product_id:
+            nav_meta["top_versions"] = _build_product_version_nodes(
+                org_id=org.id,
+                product_section_id=product_id,
+                db=db,
+                viewer_scope=viewer_scope,
+                audience=audience,
+            )
+            if version_slug and any(v.get("slug") == version_slug for v in nav_meta["top_versions"]):
+                nav_meta["current_version_slug"] = version_slug
 
     page_html = _clean_gdoc_html(page.published_html or "")
+    page_html = _rewrite_page_links(
+        page_html,
+        org=org,
+        db=db,
+        docs_root=docs_root,
+        audience_for_links=audience_for_links,
+    )
+    page_last_updated = _format_last_updated(page)
+
+    feedback_rows = (
+        db.query(PageFeedback.vote, func.count(PageFeedback.id))
+        .filter(
+            PageFeedback.organization_id == org.id,
+            PageFeedback.page_id == page.id,
+            PageFeedback.vote.in_(["up", "down"]),
+        )
+        .group_by(PageFeedback.vote)
+        .all()
+    )
+    feedback_summary = {"up": 0, "down": 0}
+    for vote, count in feedback_rows:
+        if vote in feedback_summary:
+            feedback_summary[vote] = int(count or 0)
+    feedback_summary["total"] = feedback_summary["up"] + feedback_summary["down"]
 
     ctx = _base_ctx(
         org,
@@ -996,8 +1690,27 @@ def _render_docs_page(
         docs_root=docs_root,
     )
     ctx["top_tabs"] = nav_meta["top_tabs"]
+    ctx["top_versions"] = nav_meta["top_versions"]
     ctx["current_tab_slug"] = nav_meta["current_tab_slug"]
+    ctx["current_version_slug"] = nav_meta["current_version_slug"]
     ctx["product_header"] = nav_meta["product_header"]
+    ctx["base_version_href"] = None
+    ctx["base_version_label"] = None
+    if hierarchy_mode == "product" and nav_meta.get("product_header"):
+        product_id = nav_meta["product_header"].get("id")
+        if product_id:
+            product_node = next((node for node in all_top_nodes if node.get("id") == product_id), None)
+            base_page_id, base_page_slug = _find_first_page_excluding_versions(product_node)
+        if base_page_id and base_page_slug:
+            ctx["base_version_href"] = f"{docs_root}/{org.slug or org.id}/p/{base_page_id}/{base_page_slug}{_audience_suffix_for_links(docs_root, audience_for_links)}"
+            ctx["base_version_label"] = nav_meta["product_header"].get("name") or "Original"
+    ctx["page_last_updated"] = page_last_updated
+    ctx["feedback_summary"] = feedback_summary
+    ctx["viewer_signed_in"] = bool(request_user)
+    ctx["viewer_email"] = request_user.email if request_user and request_user.email else None
+    ctx["viewer_name"] = _viewer_display_name(request_user)
+    ctx["can_comment"] = bool(viewer_scope.is_org_member or viewer_scope.is_external_allowed)
+    ctx["can_feedback"] = True
 
     html = _render(
         "docs.html",
@@ -1021,25 +1734,44 @@ def _docs_page_by_id_impl(
     page_id: int,
     page_slug: str,
     request: Request,
+    version: str | None,
     audience: str | None,
     docs_root: str,
-    require_org_member: bool,
+    access_scope: str | None,
 ) -> HTMLResponse:
     """Serve a single published page by id+slug (canonical, product-safe URL)."""
     db = _get_db()
     try:
         org = _lookup_org(org_slug, db)
+        request_user = _resolve_request_user_with_optional_query_token(
+            request,
+            db,
+            allow_query_token=access_scope is not None,
+        )
         viewer_scope = build_viewer_scope(
             db,
             org.id,
-            _resolve_request_user_with_optional_query_token(
-                request,
-                db,
-                allow_query_token=require_org_member,
-            ),
+            request_user,
         )
-        if require_org_member:
-            _ensure_internal_org_member(viewer_scope)
+        if access_scope == "internal":
+            if not viewer_scope.is_org_member:
+                return _access_required_html(
+                    org=org,
+                    docs_root=docs_root,
+                    required_scope="internal",
+                    request=request,
+                )
+            cookie_redirect = _bootstrap_docs_cookie_redirect_if_needed(request)
+            if cookie_redirect is not None:
+                return cookie_redirect
+        elif access_scope == "external":
+            if not (viewer_scope.is_org_member or viewer_scope.is_external_allowed):
+                return _access_required_html(
+                    org=org,
+                    docs_root=docs_root,
+                    required_scope="external",
+                    request=request,
+                )
             cookie_redirect = _bootstrap_docs_cookie_redirect_if_needed(request)
             if cookie_redirect is not None:
                 return cookie_redirect
@@ -1054,6 +1786,24 @@ def _docs_page_by_id_impl(
             .first()
         )
         if not page:
+            redirect = _lookup_redirect_for_page_id(
+                organization_id=org.id,
+                page_id=page_id,
+                page_slug=page_slug,
+                db=db,
+            )
+            if redirect:
+                target_url = _resolve_redirect_target_url(
+                    redirect=redirect,
+                    org=org,
+                    db=db,
+                    viewer_scope=viewer_scope,
+                    audience=effective_audience,
+                    docs_root=docs_root,
+                    audience_for_links=template_audience,
+                )
+                code = redirect.status_code if redirect.status_code in {301, 302, 307, 308} else 307
+                return RedirectResponse(url=target_url, status_code=code)
             raise HTTPException(status_code=404, detail="Page not found or not published")
         section = db.get(Section, page.section_id) if page.section_id else None
         if not _is_page_visible(
@@ -1073,9 +1823,11 @@ def _docs_page_by_id_impl(
             page,
             db,
             viewer_scope,
+            request_user,
             effective_audience,
             audience_for_links=template_audience,
             docs_root=docs_root,
+            version_slug=version,
         )
     finally:
         db.close()
@@ -1087,6 +1839,7 @@ def docs_page_by_id(
     page_id: int,
     page_slug: str,
     request: Request,
+    version: str | None = Query(default=None),
     audience: str | None = Query(default=None),
 ) -> HTMLResponse:
     return _docs_page_by_id_impl(
@@ -1094,9 +1847,30 @@ def docs_page_by_id(
         page_id=page_id,
         page_slug=page_slug,
         request=request,
+        version=version,
         audience=audience,
         docs_root="/docs",
-        require_org_member=False,
+        access_scope=None,
+    )
+
+
+@router.get("/external-docs/{org_slug}/p/{page_id}/{page_slug}", response_class=HTMLResponse)
+def external_docs_page_by_id(
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+    version: str | None = Query(default=None),
+) -> HTMLResponse:
+    return _docs_page_by_id_impl(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        version=version,
+        audience="external",
+        docs_root="/external-docs",
+        access_scope="external",
     )
 
 
@@ -1106,15 +1880,17 @@ def internal_docs_page_by_id(
     page_id: int,
     page_slug: str,
     request: Request,
+    version: str | None = Query(default=None),
 ) -> HTMLResponse:
     return _docs_page_by_id_impl(
         org_slug=org_slug,
         page_id=page_id,
         page_slug=page_slug,
         request=request,
+        version=version,
         audience="internal",
         docs_root="/internal-docs",
-        require_org_member=True,
+        access_scope="internal",
     )
 
 
@@ -1122,25 +1898,44 @@ def _docs_page_impl(
     org_slug: str,
     page_slug: str,
     request: Request,
+    version: str | None,
     audience: str | None,
     docs_root: str,
-    require_org_member: bool,
+    access_scope: str | None,
 ) -> HTMLResponse:
     """Legacy slug route; redirects only when slug is ambiguous."""
     db = _get_db()
     try:
         org = _lookup_org(org_slug, db)
+        request_user = _resolve_request_user_with_optional_query_token(
+            request,
+            db,
+            allow_query_token=access_scope is not None,
+        )
         viewer_scope = build_viewer_scope(
             db,
             org.id,
-            _resolve_request_user_with_optional_query_token(
-                request,
-                db,
-                allow_query_token=require_org_member,
-            ),
+            request_user,
         )
-        if require_org_member:
-            _ensure_internal_org_member(viewer_scope)
+        if access_scope == "internal":
+            if not viewer_scope.is_org_member:
+                return _access_required_html(
+                    org=org,
+                    docs_root=docs_root,
+                    required_scope="internal",
+                    request=request,
+                )
+            cookie_redirect = _bootstrap_docs_cookie_redirect_if_needed(request)
+            if cookie_redirect is not None:
+                return cookie_redirect
+        elif access_scope == "external":
+            if not (viewer_scope.is_org_member or viewer_scope.is_external_allowed):
+                return _access_required_html(
+                    org=org,
+                    docs_root=docs_root,
+                    required_scope="external",
+                    request=request,
+                )
             cookie_redirect = _bootstrap_docs_cookie_redirect_if_needed(request)
             if cookie_redirect is not None:
                 return cookie_redirect
@@ -1156,6 +1951,23 @@ def _docs_page_impl(
             .all()
         )
         if not pages:
+            redirect = _lookup_redirect_for_slug(
+                organization_id=org.id,
+                page_slug=page_slug,
+                db=db,
+            )
+            if redirect:
+                target_url = _resolve_redirect_target_url(
+                    redirect=redirect,
+                    org=org,
+                    db=db,
+                    viewer_scope=viewer_scope,
+                    audience=effective_audience,
+                    docs_root=docs_root,
+                    audience_for_links=template_audience,
+                )
+                code = redirect.status_code if redirect.status_code in {301, 302, 307, 308} else 307
+                return RedirectResponse(url=target_url, status_code=code)
             raise HTTPException(status_code=404, detail="Page not found or not published")
         section_ids = {p.section_id for p in pages if p.section_id is not None}
         sections_by_id = {
@@ -1185,9 +1997,11 @@ def _docs_page_impl(
             page,
             db,
             viewer_scope,
+            request_user,
             effective_audience,
             audience_for_links=template_audience,
             docs_root=docs_root,
+            version_slug=version,
         )
     finally:
         db.close()
@@ -1198,15 +2012,35 @@ def docs_page(
     org_slug: str,
     page_slug: str,
     request: Request,
+    version: str | None = Query(default=None),
     audience: str | None = Query(default=None),
 ) -> HTMLResponse:
     return _docs_page_impl(
         org_slug=org_slug,
         page_slug=page_slug,
         request=request,
+        version=version,
         audience=audience,
         docs_root="/docs",
-        require_org_member=False,
+        access_scope=None,
+    )
+
+
+@router.get("/external-docs/{org_slug}/{page_slug}", response_class=HTMLResponse)
+def external_docs_page(
+    org_slug: str,
+    page_slug: str,
+    request: Request,
+    version: str | None = Query(default=None),
+) -> HTMLResponse:
+    return _docs_page_impl(
+        org_slug=org_slug,
+        page_slug=page_slug,
+        request=request,
+        version=version,
+        audience="external",
+        docs_root="/external-docs",
+        access_scope="external",
     )
 
 
@@ -1215,12 +2049,417 @@ def internal_docs_page(
     org_slug: str,
     page_slug: str,
     request: Request,
+    version: str | None = Query(default=None),
 ) -> HTMLResponse:
     return _docs_page_impl(
         org_slug=org_slug,
         page_slug=page_slug,
         request=request,
+        version=version,
         audience="internal",
         docs_root="/internal-docs",
-        require_org_member=True,
+        access_scope="internal",
+    )
+
+
+def _load_page_for_engagement(
+    *,
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+    docs_root: str,
+    access_scope: str | None,
+    audience: str | None = None,
+) -> tuple[Session, Organization, Page, ViewerScope, User | None]:
+    """Resolve org/page and enforce same visibility rules as rendered docs pages."""
+    db = _get_db()
+    org = _lookup_org(org_slug, db)
+    request_user = _resolve_request_user_with_optional_query_token(
+        request,
+        db,
+        allow_query_token=access_scope is not None,
+    )
+    viewer_scope = build_viewer_scope(db, org.id, request_user)
+
+    if access_scope == "internal":
+        _ensure_internal_org_member(viewer_scope)
+    elif access_scope == "external":
+        _ensure_external_docs_access(viewer_scope)
+
+    effective_audience, _ = _resolve_route_audience(audience, docs_root)
+    page = (
+        db.query(Page)
+        .filter(
+            Page.organization_id == org.id,
+            Page.id == page_id,
+            Page.is_published == True,
+        )
+        .first()
+    )
+    if not page or page.slug != page_slug:
+        db.close()
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    section = db.get(Section, page.section_id) if page.section_id else None
+    if not _is_page_visible(
+        page,
+        section.visibility if section else "public",
+        viewer_scope,
+        effective_audience,
+    ):
+        db.close()
+        raise HTTPException(status_code=404, detail="Page not found")
+    return db, org, page, viewer_scope, request_user
+
+
+def _feedback_summary(db: Session, organization_id: int, page_id: int) -> dict[str, int]:
+    rows = (
+        db.query(PageFeedback.vote, func.count(PageFeedback.id))
+        .filter(
+            PageFeedback.organization_id == organization_id,
+            PageFeedback.page_id == page_id,
+            PageFeedback.vote.in_(["up", "down"]),
+        )
+        .group_by(PageFeedback.vote)
+        .all()
+    )
+    summary = {"up": 0, "down": 0}
+    for vote, count in rows:
+        if vote in summary:
+            summary[vote] = int(count or 0)
+    summary["total"] = summary["up"] + summary["down"]
+    return summary
+
+
+def _serialize_comment(comment: PageComment) -> dict:
+    return {
+        "id": comment.id,
+        "display_name": comment.display_name or "User",
+        "user_email": comment.user_email,
+        "body": comment.body,
+        "created_at": comment.created_at.isoformat() if comment.created_at else None,
+    }
+
+
+def _engagement_impl(
+    *,
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+    docs_root: str,
+    access_scope: str | None,
+    audience: str | None = None,
+) -> JSONResponse:
+    db, org, page, viewer_scope, request_user = _load_page_for_engagement(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root=docs_root,
+        access_scope=access_scope,
+        audience=audience,
+    )
+    try:
+        comments = (
+            db.query(PageComment)
+            .filter(
+                PageComment.organization_id == org.id,
+                PageComment.page_id == page.id,
+                PageComment.is_deleted == False,
+            )
+            .order_by(PageComment.created_at.desc())
+            .limit(100)
+            .all()
+        )
+        comments_payload = [_serialize_comment(c) for c in reversed(comments)]
+        return JSONResponse(
+            {
+                "last_updated": _format_last_updated(page),
+                "feedback": _feedback_summary(db, org.id, page.id),
+                "comments": comments_payload,
+                "permissions": {
+                    "can_comment": bool(
+                        request_user and (viewer_scope.is_org_member or viewer_scope.is_external_allowed)
+                    ),
+                    "signed_in": bool(request_user),
+                },
+            }
+        )
+    finally:
+        db.close()
+
+
+async def _submit_feedback_impl(
+    *,
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+    docs_root: str,
+    access_scope: str | None,
+    audience: str | None = None,
+) -> JSONResponse:
+    db, org, page, _, request_user = _load_page_for_engagement(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root=docs_root,
+        access_scope=access_scope,
+        audience=audience,
+    )
+    try:
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        vote = str((payload or {}).get("vote") or "").strip().lower()
+        if vote not in {"up", "down"}:
+            raise HTTPException(status_code=400, detail="vote must be 'up' or 'down'")
+
+        message = str((payload or {}).get("message") or "").strip()
+        if len(message) > 2000:
+            raise HTTPException(status_code=400, detail="Feedback message is too long")
+
+        source = docs_root.strip("/").split("/", 1)[0] or "docs"
+        db.add(
+            PageFeedback(
+                organization_id=org.id,
+                page_id=page.id,
+                user_id=request_user.id if request_user else None,
+                user_email=request_user.email if request_user else None,
+                vote=vote,
+                message=message or None,
+                source=source,
+            )
+        )
+        db.commit()
+        return JSONResponse(
+            {
+                "status": "ok",
+                "feedback": _feedback_summary(db, org.id, page.id),
+            },
+            status_code=201,
+        )
+    finally:
+        db.close()
+
+
+async def _submit_comment_impl(
+    *,
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+    docs_root: str,
+    access_scope: str | None,
+    audience: str | None = None,
+) -> JSONResponse:
+    db, org, page, viewer_scope, request_user = _load_page_for_engagement(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root=docs_root,
+        access_scope=access_scope,
+        audience=audience,
+    )
+    try:
+        if not request_user or not (viewer_scope.is_org_member or viewer_scope.is_external_allowed):
+            raise HTTPException(status_code=401, detail="Sign in with access permissions to comment")
+
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        body = str((payload or {}).get("body") or "").strip()
+        if not body:
+            raise HTTPException(status_code=400, detail="Comment body is required")
+        if len(body) > 5000:
+            raise HTTPException(status_code=400, detail="Comment is too long")
+
+        source = docs_root.strip("/").split("/", 1)[0] or "docs"
+        comment = PageComment(
+            organization_id=org.id,
+            page_id=page.id,
+            user_id=request_user.id,
+            user_email=request_user.email,
+            display_name=_viewer_display_name(request_user),
+            body=body,
+            source=source,
+        )
+        db.add(comment)
+        db.commit()
+        db.refresh(comment)
+        return JSONResponse({"status": "ok", "comment": _serialize_comment(comment)}, status_code=201)
+    finally:
+        db.close()
+
+
+@router.get("/docs/{org_slug}/p/{page_id}/{page_slug}/engagement")
+def docs_page_engagement(
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+    audience: str | None = Query(default=None),
+) -> JSONResponse:
+    return _engagement_impl(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root="/docs",
+        access_scope=None,
+        audience=audience,
+    )
+
+
+@router.post("/docs/{org_slug}/p/{page_id}/{page_slug}/feedback")
+async def docs_page_feedback(
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+    audience: str | None = Query(default=None),
+) -> JSONResponse:
+    return await _submit_feedback_impl(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root="/docs",
+        access_scope=None,
+        audience=audience,
+    )
+
+
+@router.post("/docs/{org_slug}/p/{page_id}/{page_slug}/comments")
+async def docs_page_comments(
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+    audience: str | None = Query(default=None),
+) -> JSONResponse:
+    return await _submit_comment_impl(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root="/docs",
+        access_scope=None,
+        audience=audience,
+    )
+
+
+@router.get("/internal-docs/{org_slug}/p/{page_id}/{page_slug}/engagement")
+def internal_docs_page_engagement(
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+) -> JSONResponse:
+    return _engagement_impl(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root="/internal-docs",
+        access_scope="internal",
+        audience="internal",
+    )
+
+
+@router.post("/internal-docs/{org_slug}/p/{page_id}/{page_slug}/feedback")
+async def internal_docs_page_feedback(
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+) -> JSONResponse:
+    return await _submit_feedback_impl(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root="/internal-docs",
+        access_scope="internal",
+        audience="internal",
+    )
+
+
+@router.post("/internal-docs/{org_slug}/p/{page_id}/{page_slug}/comments")
+async def internal_docs_page_comments(
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+) -> JSONResponse:
+    return await _submit_comment_impl(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root="/internal-docs",
+        access_scope="internal",
+        audience="internal",
+    )
+
+
+@router.get("/external-docs/{org_slug}/p/{page_id}/{page_slug}/engagement")
+def external_docs_page_engagement(
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+) -> JSONResponse:
+    return _engagement_impl(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root="/external-docs",
+        access_scope="external",
+        audience="external",
+    )
+
+
+@router.post("/external-docs/{org_slug}/p/{page_id}/{page_slug}/feedback")
+async def external_docs_page_feedback(
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+) -> JSONResponse:
+    return await _submit_feedback_impl(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root="/external-docs",
+        access_scope="external",
+        audience="external",
+    )
+
+
+@router.post("/external-docs/{org_slug}/p/{page_id}/{page_slug}/comments")
+async def external_docs_page_comments(
+    org_slug: str,
+    page_id: int,
+    page_slug: str,
+    request: Request,
+) -> JSONResponse:
+    return await _submit_comment_impl(
+        org_slug=org_slug,
+        page_id=page_id,
+        page_slug=page_slug,
+        request=request,
+        docs_root="/external-docs",
+        access_scope="external",
+        audience="external",
     )

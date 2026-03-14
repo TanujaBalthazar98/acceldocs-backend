@@ -100,7 +100,7 @@ async def get_drive_credentials(user: User, org_id: int, db: Session) -> Credent
 class ScanRequest(BaseModel):
     folder_id: str
     parent_section_id: int | None = None
-    target_type: Literal["product", "tab", "section"] | None = None
+    target_type: Literal["product", "version", "tab", "section"] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +137,11 @@ def _unique_page_slug(title: str, org_id: int, db: Session, exclude_id: int | No
         slug, n = f"{base}-{n}", n + 1
 
 
-def _infer_target_type(section: Section) -> Literal["product", "tab", "section"]:
+def _infer_target_type(section: Section) -> Literal["product", "version", "tab", "section"]:
     if section.parent_id is None:
         return "product"
+    if (section.section_type or "section") == "version":
+        return "version"
     if (section.section_type or "section") == "tab":
         return "tab"
     return "section"
@@ -150,7 +152,7 @@ def _resolve_target_section(
     org_id: int,
     db: Session,
     section_id: int | None,
-    expected_type: Literal["product", "tab", "section"] | None,
+    expected_type: Literal["product", "version", "tab", "section"] | None,
 ) -> Section | None:
     if section_id is None:
         return None
@@ -555,7 +557,7 @@ async def scan_folder(
 @router.post("/import/local")
 async def import_local(
     target_section_id: int = Form(...),
-    target_type: Literal["product", "tab", "section"] | None = Form(default=None),
+    target_type: Literal["product", "version", "tab", "section"] | None = Form(default=None),
     mode: Literal["files", "folder"] = Form(default="files"),
     relative_paths_json: str | None = Form(default=None),
     files: list[UploadFile] = File(...),

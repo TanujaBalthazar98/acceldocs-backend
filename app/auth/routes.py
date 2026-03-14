@@ -618,6 +618,7 @@ async def logout(request: Request):
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/")
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/docs")
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/internal-docs")
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/external-docs")
     return response
 
 
@@ -646,6 +647,7 @@ async def set_docs_session_cookie(request: Request, user: User = Depends(get_cur
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/")
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/docs")
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/internal-docs")
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/external-docs")
     response.set_cookie(
         key=DOCS_SESSION_COOKIE,
         value=token,
@@ -665,6 +667,7 @@ async def clear_docs_session_cookie():
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/")
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/docs")
     response.delete_cookie(DOCS_SESSION_COOKIE, path="/internal-docs")
+    response.delete_cookie(DOCS_SESSION_COOKIE, path="/external-docs")
     return response
 
 

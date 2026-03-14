@@ -1,6 +1,7 @@
 """Sections API — CRUD for the section tree (replaces Project + Topic hierarchy)."""
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,7 +12,7 @@ from app.api.drive import _create_drive_folder, _trash_drive_item, _move_drive_i
 from app.auth.routes import get_current_user
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
-from app.models import Organization, OrgRole, Section, User
+from app.models import Organization, OrgRole, Page, Section, User
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,16 +25,17 @@ router = APIRouter()
 class SectionCreate(BaseModel):
     name: str
     parent_id: int | None = None
-    section_type: Literal["section", "tab"] = "section"
+    section_type: Literal["section", "tab", "version"] = "section"
     visibility: Literal["public", "internal", "external"] = "public"
     drive_folder_id: str | None = None
     display_order: int = 0
+    clone_from_section_id: int | None = None
 
 
 class SectionUpdate(BaseModel):
     name: str | None = None
     parent_id: int | None = None
-    section_type: Literal["section", "tab"] | None = None
+    section_type: Literal["section", "tab", "version"] | None = None
     visibility: Literal["public", "internal", "external"] | None = None
     drive_folder_id: str | None = None
     display_order: int | None = None
@@ -94,6 +96,204 @@ def _unique_slug(name: str, org_id: int, parent_id: int | None, db: Session, exc
         n += 1
 
 
+def _unique_page_slug(seed: str, org_id: int, db: Session) -> str:
+    base = slugify(seed) or "page"
+    slug = base
+    n = 1
+    while True:
+        existing = db.query(Page).filter(
+            Page.organization_id == org_id,
+            Page.slug == slug,
+        ).first()
+        if not existing:
+            return slug
+        slug = f"{base}-{n}"
+        n += 1
+
+
+def _copy_drive_doc(service, source_file_id: str, copy_title: str, parent_id: str | None) -> tuple[str, str | None]:
+    body: dict[str, Any] = {"name": copy_title}
+    if parent_id:
+        body["parents"] = [parent_id]
+    result = (
+        service.files()
+        .copy(
+            fileId=source_file_id,
+            body=body,
+            fields="id,modifiedTime,name",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    file_id = result.get("id")
+    if not file_id:
+        raise HTTPException(status_code=502, detail="Drive copy failed: missing file ID")
+    return file_id, result.get("modifiedTime")
+
+
+def _resolve_clone_source_id(
+    *,
+    org_id: int,
+    product_id: int,
+    new_version_id: int,
+    explicit_source_id: int | None,
+    db: Session,
+) -> int | None:
+    if explicit_source_id:
+        source = db.query(Section).filter(
+            Section.id == explicit_source_id,
+            Section.organization_id == org_id,
+        ).first()
+        if not source:
+            raise HTTPException(status_code=400, detail="clone_from_section_id is invalid")
+        return source.id
+
+    # First-version creation path: duplicate current product tree (excluding existing version nodes).
+    has_non_version_children = db.query(Section).filter(
+        Section.organization_id == org_id,
+        Section.parent_id == product_id,
+        Section.id != new_version_id,
+        Section.section_type != "version",
+    ).first()
+    has_product_pages = db.query(Page).filter(
+        Page.organization_id == org_id,
+        Page.section_id == product_id,
+    ).first()
+    if has_non_version_children or has_product_pages:
+        return product_id
+
+    # Existing-version path: clone from the latest sibling version.
+    sibling_version = (
+        db.query(Section)
+        .filter(
+            Section.organization_id == org_id,
+            Section.parent_id == product_id,
+            Section.id != new_version_id,
+            Section.section_type == "version",
+        )
+        .order_by(Section.display_order.desc(), Section.id.desc())
+        .first()
+    )
+    return sibling_version.id if sibling_version else None
+
+
+def _validate_version_parent(
+    *,
+    org_id: int,
+    parent_id: int | None,
+    db: Session,
+) -> None:
+    if parent_id is None:
+        raise HTTPException(status_code=400, detail="Version must be created under a product")
+    parent = db.query(Section).filter(
+        Section.id == parent_id,
+        Section.organization_id == org_id,
+    ).first()
+    if not parent:
+        raise HTTPException(status_code=404, detail="Parent section not found")
+    if parent.parent_id is not None:
+        raise HTTPException(status_code=400, detail="Version parent must be a top-level product")
+
+
+def _clone_section_tree_into_version(
+    *,
+    org_id: int,
+    source_section_id: int,
+    target_section_id: int,
+    db: Session,
+    drive_service: Any,
+    owner_id: int | None,
+) -> tuple[int, int]:
+    """Deep-clone sections/pages from source subtree into a new version subtree."""
+    sections_created = 0
+    pages_created = 0
+
+    def clone_node(src_id: int, dst_id: int) -> None:
+        nonlocal sections_created, pages_created
+
+        destination = db.get(Section, dst_id)
+        if not destination:
+            raise HTTPException(status_code=404, detail="Destination section not found during clone")
+
+        source_pages = (
+            db.query(Page)
+            .filter(Page.organization_id == org_id, Page.section_id == src_id)
+            .order_by(Page.display_order, Page.id)
+            .all()
+        )
+        for src_page in source_pages:
+            copied_doc_id, copied_modified_at = _copy_drive_doc(
+                drive_service,
+                src_page.google_doc_id,
+                src_page.title,
+                destination.drive_folder_id,
+            )
+            slug_seed = src_page.slug or src_page.title
+            cloned_page = Page(
+                organization_id=org_id,
+                section_id=dst_id,
+                google_doc_id=copied_doc_id,
+                title=src_page.title,
+                slug=_unique_page_slug(slug_seed, org_id, db),
+                slug_locked=False,
+                visibility_override=src_page.visibility_override,
+                html_content=src_page.html_content,
+                published_html=None,
+                is_published=False,
+                status="draft",
+                display_order=src_page.display_order,
+                drive_modified_at=copied_modified_at or src_page.drive_modified_at,
+                last_synced_at=datetime.now(timezone.utc).isoformat(),
+                owner_id=owner_id if owner_id is not None else src_page.owner_id,
+            )
+            db.add(cloned_page)
+            pages_created += 1
+
+        source_children = (
+            db.query(Section)
+            .filter(Section.organization_id == org_id, Section.parent_id == src_id)
+            .order_by(Section.display_order, Section.id)
+            .all()
+        )
+        for src_child in source_children:
+            src_type = src_child.section_type or "section"
+            if src_type == "version":
+                continue
+
+            clone_type = src_type if src_type in ("section", "tab") else "section"
+            cloned_child = Section(
+                organization_id=org_id,
+                parent_id=dst_id,
+                name=src_child.name,
+                slug=_unique_slug(src_child.name, org_id, dst_id, db),
+                section_type=clone_type,
+                visibility=src_child.visibility or "public",
+                drive_folder_id=None,
+                display_order=src_child.display_order,
+                is_published=False,
+            )
+            db.add(cloned_child)
+            db.flush()
+
+            cloned_child.drive_folder_id = _create_drive_folder(
+                drive_service,
+                cloned_child.name,
+                destination.drive_folder_id,
+            )
+            sections_created += 1
+            clone_node(src_child.id, cloned_child.id)
+
+    source_root = db.query(Section).filter(
+        Section.id == source_section_id,
+        Section.organization_id == org_id,
+    ).first()
+    if not source_root:
+        raise HTTPException(status_code=400, detail="Source section not found for version clone")
+
+    clone_node(source_root.id, target_section_id)
+    return sections_created, pages_created
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -121,6 +321,17 @@ async def create_section(
     db: Session = Depends(get_db),
 ) -> dict:
     org_id = _require_editor(user, db)
+    if body.section_type == "version":
+        _validate_version_parent(org_id=org_id, parent_id=body.parent_id, db=db)
+
+    if body.parent_id is not None:
+        parent = db.query(Section).filter(
+            Section.id == body.parent_id,
+            Section.organization_id == org_id,
+        ).first()
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent section not found")
+
     slug = _unique_slug(body.name, org_id, body.parent_id, db)
     section = Section(
         organization_id=org_id,
@@ -133,11 +344,87 @@ async def create_section(
         display_order=body.display_order,
     )
     db.add(section)
+    db.flush()
+
+    drive_service = None
+    strict_clone_mode = body.section_type == "version"
+    if not section.drive_folder_id:
+        try:
+            creds = await get_drive_credentials(user, org_id, db)
+            from googleapiclient.discovery import build as _build
+            drive_service = _build("drive", "v3", credentials=creds, cache_discovery=False)
+
+            # Determine parent folder: parent section's folder → org root folder
+            parent_drive_id: str | None = None
+            if body.parent_id:
+                parent_sec = db.get(Section, body.parent_id)
+                parent_drive_id = parent_sec.drive_folder_id if parent_sec else None
+            if not parent_drive_id:
+                org = db.get(Organization, org_id)
+                parent_drive_id = org.drive_folder_id if org else None
+            if strict_clone_mode and not parent_drive_id:
+                raise HTTPException(status_code=400, detail="Drive root folder is required to create a version")
+
+            folder_id = _create_drive_folder(drive_service, section.name, parent_drive_id)
+            section.drive_folder_id = folder_id
+            logger.info("Created Drive folder %s for section %d", folder_id, section.id)
+        except HTTPException as exc:
+            if strict_clone_mode:
+                raise
+            logger.warning("Could not create Drive folder for section %d: %s", section.id, exc.detail)
+        except Exception as exc:
+            if strict_clone_mode:
+                db.rollback()
+                raise HTTPException(status_code=400, detail=f"Drive setup required for version cloning: {exc}") from exc
+            logger.warning("Could not create Drive folder for section %d: %s", section.id, exc)
+
+    cloned_sections = 0
+    cloned_pages = 0
+    if body.section_type == "version":
+        clone_source_id = _resolve_clone_source_id(
+            org_id=org_id,
+            product_id=body.parent_id,  # validated above via _validate_version_parent
+            new_version_id=section.id,
+            explicit_source_id=body.clone_from_section_id,
+            db=db,
+        )
+        if clone_source_id is not None:
+            if drive_service is None:
+                try:
+                    creds = await get_drive_credentials(user, org_id, db)
+                    from googleapiclient.discovery import build as _build
+                    drive_service = _build("drive", "v3", credentials=creds, cache_discovery=False)
+                except Exception as exc:
+                    db.rollback()
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Drive connection is required to clone version content: {exc}",
+                    ) from exc
+            if not section.drive_folder_id:
+                db.rollback()
+                raise HTTPException(status_code=400, detail="Version folder missing in Drive; cannot clone")
+
+            cloned_sections, cloned_pages = _clone_section_tree_into_version(
+                org_id=org_id,
+                source_section_id=clone_source_id,
+                target_section_id=section.id,
+                db=db,
+                drive_service=drive_service,
+                owner_id=user.id,
+            )
+            logger.info(
+                "Cloned version %d from source %d (%d sections, %d pages)",
+                section.id,
+                clone_source_id,
+                cloned_sections,
+                cloned_pages,
+            )
+
     db.commit()
     db.refresh(section)
 
-    # Create a matching Drive folder if Drive is connected
-    if not section.drive_folder_id:
+    # Create a matching Drive folder if Drive is connected (legacy non-version flow fallback)
+    if not section.drive_folder_id and not strict_clone_mode:
         try:
             creds = await get_drive_credentials(user, org_id, db)
             from googleapiclient.discovery import build as _build
@@ -182,6 +469,11 @@ async def update_section(
         "parent_id" in body.model_fields_set and body.parent_id != section.parent_id
     )
     new_parent_id_value = body.parent_id if parent_id_changed else None
+
+    next_section_type = body.section_type if body.section_type is not None else section.section_type
+    next_parent_id = body.parent_id if "parent_id" in body.model_fields_set else section.parent_id
+    if next_section_type == "version":
+        _validate_version_parent(org_id=org_id, parent_id=next_parent_id, db=db)
 
     if body.name is not None:
         section.name = body.name.strip()

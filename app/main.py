@@ -17,6 +17,7 @@ from app.api.sections import router as sections_router
 from app.api.pages import router as pages_router
 from app.api.drive import router as drive_router
 from app.api.public import router as public_router
+from app.api.external_access import router as external_access_router
 from app.auth.routes import router as auth_router
 
 logging.basicConfig(
@@ -93,3 +94,4 @@ app.include_router(org_router, prefix="/api/org", tags=["org"])
 app.include_router(sections_router, prefix="/api/sections", tags=["sections"])
 app.include_router(pages_router, prefix="/api/pages", tags=["pages"])
 app.include_router(drive_router, prefix="/api/drive", tags=["drive"])
+app.include_router(external_access_router, prefix="/api/external-access", tags=["external-access"])

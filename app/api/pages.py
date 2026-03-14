@@ -17,7 +17,7 @@ from app.auth.routes import get_current_user
 from app.config import settings
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
-from app.models import GoogleToken, Organization, OrgRole, Page, Section, User
+from app.models import GoogleToken, Organization, OrgRole, Page, PageRedirect, Section, User
 from app.services.encryption import get_encryption_service
 
 logger = logging.getLogger(__name__)
@@ -199,6 +199,50 @@ def _unique_slug(base_value: str, org_id: int, db: Session, exclude_id: int | No
         slug, n = f"{base}-{n}", n + 1
 
 
+def _upsert_page_redirect(
+    db: Session,
+    *,
+    organization_id: int,
+    source_page_id: int | None,
+    source_slug: str,
+    target_page_id: int | None = None,
+    target_url: str | None = None,
+    status_code: int = 307,
+) -> None:
+    source_slug_clean = (source_slug or "").strip()
+    if not source_slug_clean:
+        return
+
+    query = db.query(PageRedirect).filter(
+        PageRedirect.organization_id == organization_id,
+        PageRedirect.source_slug == source_slug_clean,
+    )
+    if source_page_id is None:
+        query = query.filter(PageRedirect.source_page_id.is_(None))
+    else:
+        query = query.filter(PageRedirect.source_page_id == source_page_id)
+
+    existing = query.first()
+    if existing:
+        existing.target_page_id = target_page_id
+        existing.target_url = target_url
+        existing.status_code = status_code
+        existing.is_active = True
+        return
+
+    db.add(
+        PageRedirect(
+            organization_id=organization_id,
+            source_page_id=source_page_id,
+            source_slug=source_slug_clean,
+            target_page_id=target_page_id,
+            target_url=target_url,
+            status_code=status_code,
+            is_active=True,
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -316,6 +360,7 @@ async def update_page(
         raise HTTPException(status_code=404, detail="Page not found")
 
     old_section_id = page.section_id
+    old_slug = page.slug
     section_id_changed = False
     title_changed = body.title is not None and body.title.strip() != page.title
     slug_changed = body.slug is not None
@@ -351,6 +396,15 @@ async def update_page(
             raise HTTPException(status_code=400, detail="Slug cannot be empty")
         page.slug = _unique_slug(raw_slug, org_id, db, exclude_id=page_id, strip_numeric_prefix=False)
         page.slug_locked = True
+        if old_slug != page.slug:
+            _upsert_page_redirect(
+                db,
+                organization_id=org_id,
+                source_page_id=page.id,
+                source_slug=old_slug,
+                target_page_id=page.id,
+                status_code=307,
+            )
 
     if body.display_order is not None:
         page.display_order = body.display_order
@@ -481,6 +535,29 @@ async def delete_page(
         raise HTTPException(status_code=404, detail="Page not found")
 
     google_doc_id = page.google_doc_id
+
+    # Preserve old links for deleted pages: route historical page IDs/slugs to landing.
+    existing_redirects = db.query(PageRedirect).filter(
+        PageRedirect.organization_id == org_id,
+        PageRedirect.source_page_id == page.id,
+        PageRedirect.is_active == True,
+    ).all()
+    for redirect in existing_redirects:
+        redirect.target_page_id = None
+        redirect.target_url = None
+        redirect.status_code = 307
+        redirect.is_active = True
+
+    _upsert_page_redirect(
+        db,
+        organization_id=org_id,
+        source_page_id=page.id,
+        source_slug=page.slug,
+        target_page_id=None,
+        target_url=None,
+        status_code=307,
+    )
+
     db.delete(page)
     db.commit()
 

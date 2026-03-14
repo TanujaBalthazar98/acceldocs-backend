@@ -187,6 +187,19 @@
       overflow-x: auto;
     }
 
+    .version-select {
+      height: 30px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0 10px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-2);
+      background: var(--bg);
+      min-width: 110px;
+      cursor: pointer;
+    }
+
     .docs-tab {
       display: inline-flex;
       align-items: center;
@@ -339,6 +352,13 @@
     .breadcrumb a:hover { color: var(--text-2); }
     .breadcrumb-sep { opacity: 0.35; font-size: 0.9em; }
     .breadcrumb span:last-child { color: var(--text-2); }
+
+    .doc-meta {
+      margin: -16px 0 24px;
+      font-size: 0.78rem;
+      color: var(--text-3);
+      letter-spacing: 0.01em;
+    }
 
     /* ── Table of contents ───────────────────────────────────────── */
     .toc {
@@ -538,6 +558,128 @@
       border: none;
       border-top: 1px solid var(--border);
       margin: 2.5rem 0;
+    }
+
+    .engagement {
+      margin-top: 28px;
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: 540px;
+    }
+
+    .engagement-title {
+      font-size: 0.88rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: var(--text-2);
+    }
+
+    .feedback-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .feedback-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .feedback-btn {
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text-2);
+      font-size: 0.8rem;
+      font-weight: 600;
+      border-radius: 7px;
+      padding: 5px 10px;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+
+    .feedback-btn:hover {
+      border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+      color: var(--text);
+    }
+
+    .feedback-btn.active {
+      background: color-mix(in srgb, var(--accent) 11%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+      color: var(--accent);
+    }
+
+    .feedback-message {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      font-family: inherit;
+      font-size: 0.82rem;
+      color: var(--text);
+      padding: 7px 9px;
+      background: #fff;
+      resize: vertical;
+      min-height: 64px;
+    }
+
+    .feedback-message:focus {
+      outline: none;
+      border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+    }
+
+    .engagement-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .engagement-submit {
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text-2);
+      font-size: 0.76rem;
+      font-weight: 700;
+      border-radius: 7px;
+      padding: 5px 9px;
+      cursor: pointer;
+    }
+
+    .engagement-submit:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .engagement-hint {
+      font-size: 0.74rem;
+      color: var(--text-3);
+    }
+
+    .feedback-details {
+      border-top: 1px dashed var(--border);
+      padding-top: 8px;
+    }
+
+    .feedback-details summary {
+      list-style: none;
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.77rem;
+      color: var(--text-3);
+      font-weight: 600;
+    }
+
+    .feedback-details summary::-webkit-details-marker { display: none; }
+
+    .feedback-details-body {
+      margin-top: 7px;
+      display: grid;
+      gap: 6px;
     }
 
     /* ── Landing ──────────────────────────────────────────────────── */
@@ -767,7 +909,7 @@
     }
   </style>
 </head>
-<body class="{% if product_header or (top_tabs and top_tabs|length > 0) %}has-tabs{% endif %}">
+<body class="{% if product_header or (top_tabs and top_tabs|length > 0) or (top_versions and top_versions|length > 0) %}has-tabs{% endif %}">
 
   <!-- Topbar -->
   <header class="topbar">
@@ -791,7 +933,7 @@
     </div>
   </header>
 
-  {% if product_header or (top_tabs and top_tabs|length > 0) %}
+  {% if product_header or (top_tabs and top_tabs|length > 0) or (top_versions and top_versions|length > 0) %}
     <nav class="tabsbar" aria-label="{% if top_tabs and top_tabs|length > 0 %}Tabs{% else %}Product{% endif %}">
       {% if product_header %}
         <div class="tabsbar-product">
@@ -800,8 +942,25 @@
           </a>
         </div>
       {% endif %}
-      {% if top_tabs and top_tabs|length > 0 %}
+      {% if (top_tabs and top_tabs|length > 0) or (top_versions and top_versions|length > 0) %}
         <div class="tabsbar-inner">
+          {% if top_versions and top_versions|length > 0 %}
+            <select class="version-select" onchange="if(this.value){ window.location.href = this.value; }" aria-label="Version">
+              {% if base_version_href %}
+                <option value="{{ base_version_href }}" {% if not current_version_slug %}selected{% endif %}>
+                  {{ base_version_label or "Original" }}
+                </option>
+              {% endif %}
+              {% for version in top_versions %}
+                <option
+                  value="{% if version.first_page_id and version.first_page_slug %}{{ docs_root }}/{{ org_slug }}/p/{{ version.first_page_id }}/{{ version.first_page_slug }}{{ audience_suffix }}{% elif product_header and product_header.slug %}{{ docs_root }}/{{ org_slug }}?product={{ product_header.slug }}&version={{ version.slug }}{% if audience %}&audience={{ audience }}{% endif %}{% else %}{{ docs_root }}/{{ org_slug }}?version={{ version.slug }}{% if audience %}&audience={{ audience }}{% endif %}{% endif %}"
+                  {% if version.slug == current_version_slug %}selected{% endif %}
+                >
+                  {{ version.name }}
+                </option>
+              {% endfor %}
+            </select>
+          {% endif %}
           {% for tab in top_tabs %}
             {% if tab.first_page_id and tab.first_page_slug %}
               <a
@@ -928,10 +1087,42 @@
               <span class="breadcrumb-sep">›</span>
               <span>{{ current_page.title }}</span>
             </nav>
+            {% if page_last_updated %}
+              <div class="doc-meta">Last updated: {{ page_last_updated }}</div>
+            {% endif %}
 
             <article class="page-content">
               {{ page_html | safe }}
             </article>
+
+            <section class="engagement" id="engagementRoot">
+              <div>
+                <div class="feedback-row">
+                  <div class="engagement-title">Was this page helpful?</div>
+                  <span class="engagement-hint" id="feedbackSummary">
+                    {{ feedback_summary.up }} helpful · {{ feedback_summary.down }} not helpful
+                  </span>
+                </div>
+                <div class="feedback-actions">
+                  <button class="feedback-btn" id="feedbackUpBtn" type="button">👍 Yes</button>
+                  <button class="feedback-btn" id="feedbackDownBtn" type="button">👎 No</button>
+                </div>
+                <details class="feedback-details">
+                  <summary>Add details (optional)</summary>
+                  <div class="feedback-details-body">
+                    <textarea
+                      class="feedback-message"
+                      id="feedbackMessage"
+                      placeholder="What can we improve?"
+                      maxlength="2000"
+                    ></textarea>
+                  </div>
+                </details>
+                <div class="engagement-actions">
+                  <button class="engagement-submit" id="feedbackSubmitBtn" type="button">Submit feedback</button>
+                </div>
+              </div>
+            </section>
           </div>
           <aside class="toc" id="tocAside" aria-label="On this page">
             <div class="toc-title">On this page</div>
@@ -984,6 +1175,7 @@
     const ORG_SLUG = {{ org_slug | tojson }};
     const DOCS_ROOT = {{ docs_root | tojson }};
     const AUDIENCE = {{ audience | tojson }};
+    const CURRENT_PAGE = {{ current_page | tojson }};
     const overlay  = document.getElementById('searchOverlay');
     const input    = document.getElementById('searchInput');
     const results  = document.getElementById('searchResults');
@@ -1061,6 +1253,99 @@
       return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
+    function audienceQuery() {
+      return AUDIENCE ? `?audience=${encodeURIComponent(AUDIENCE)}` : '';
+    }
+
+    function pageEndpoint(suffix) {
+      if (!CURRENT_PAGE || !CURRENT_PAGE.id || !CURRENT_PAGE.slug) return '';
+      return `${DOCS_ROOT}/${ORG_SLUG}/p/${CURRENT_PAGE.id}/${CURRENT_PAGE.slug}${suffix}${audienceQuery()}`;
+    }
+
+    async function loadEngagement() {
+      const feedbackSummary = document.getElementById('feedbackSummary');
+      if (!CURRENT_PAGE) return;
+
+      try {
+        const res = await fetch(pageEndpoint('/engagement'));
+        if (!res.ok) throw new Error('failed');
+        const data = await res.json();
+
+        if (feedbackSummary && data.feedback) {
+          const up = Number(data.feedback.up || 0);
+          const down = Number(data.feedback.down || 0);
+          feedbackSummary.textContent = `${up} helpful · ${down} not helpful`;
+        }
+      } catch {
+        if (feedbackSummary) feedbackSummary.textContent = 'Feedback unavailable';
+      }
+    }
+
+    function setSelectedVote(vote) {
+      const up = document.getElementById('feedbackUpBtn');
+      const down = document.getElementById('feedbackDownBtn');
+      if (!up || !down) return;
+      up.classList.toggle('active', vote === 'up');
+      down.classList.toggle('active', vote === 'down');
+      up.dataset.selected = vote === 'up' ? '1' : '';
+      down.dataset.selected = vote === 'down' ? '1' : '';
+    }
+
+    async function submitFeedback() {
+      const up = document.getElementById('feedbackUpBtn');
+      const down = document.getElementById('feedbackDownBtn');
+      const messageEl = document.getElementById('feedbackMessage');
+      const submitBtn = document.getElementById('feedbackSubmitBtn');
+      const feedbackSummary = document.getElementById('feedbackSummary');
+      if (!up || !down || !messageEl || !submitBtn) return;
+
+      const vote = up.dataset.selected ? 'up' : (down.dataset.selected ? 'down' : '');
+      if (!vote) {
+        if (feedbackSummary) feedbackSummary.textContent = 'Select Yes or No before submitting.';
+        return;
+      }
+
+      submitBtn.disabled = true;
+      try {
+        const res = await fetch(pageEndpoint('/feedback'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            vote,
+            message: String(messageEl.value || '').trim(),
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Failed to submit feedback');
+        messageEl.value = '';
+        setSelectedVote('');
+        if (feedbackSummary && data.feedback) {
+          const upCount = Number(data.feedback.up || 0);
+          const downCount = Number(data.feedback.down || 0);
+          feedbackSummary.textContent = `${upCount} helpful · ${downCount} not helpful`;
+        }
+      } catch (error) {
+        if (feedbackSummary) {
+          feedbackSummary.textContent = error && error.message ? error.message : 'Failed to submit feedback';
+        }
+      } finally {
+        submitBtn.disabled = false;
+      }
+    }
+
+    function initEngagement() {
+      if (!CURRENT_PAGE) return;
+
+      const up = document.getElementById('feedbackUpBtn');
+      const down = document.getElementById('feedbackDownBtn');
+      const feedbackSubmit = document.getElementById('feedbackSubmitBtn');
+
+      if (up) up.addEventListener('click', () => setSelectedVote('up'));
+      if (down) down.addEventListener('click', () => setSelectedVote('down'));
+      if (feedbackSubmit) feedbackSubmit.addEventListener('click', submitFeedback);
+      loadEngagement();
+    }
+
     // ── Table of contents ─────────────────────────────────────────
     function slugify(text) {
       return text
@@ -1133,6 +1418,7 @@
     }
 
     buildToc();
+    initEngagement();
   </script>
 
 </body>

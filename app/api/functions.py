@@ -40,7 +40,7 @@ async def invoke_function(
         body["_google_access_token"] = google_token
 
     # Import service modules (lazy import to avoid circular dependencies)
-    from app.services import workspace, projects, documents, drive, members
+    from app.services import workspace, projects, documents, drive, members, external_access
     from app.api import approvals as approvals_mod
 
     # Function dispatch table
@@ -61,6 +61,9 @@ async def invoke_function(
         "invite-to-project": projects.invite_to_project,
         "list-project-members": projects.list_project_members_for_project,
         "remove-project-member": projects.remove_project_member,
+        "list-external-access": external_access.list_external_access,
+        "grant-external-access": external_access.grant_external_access,
+        "revoke-external-access": external_access.revoke_external_access,
 
         # Versions (2 functions)
         "list-project-versions": projects.list_project_versions,

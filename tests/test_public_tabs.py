@@ -194,6 +194,207 @@ def test_public_page_renders_single_root_section_without_tabs(client, db, monkey
     assert "docs-tab active" not in html
 
 
+def test_public_product_version_selector_and_landing_scope(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+
+    org = Organization(name="Versioned Org", slug="versioned-org", domain="versioned.example.com", primary_color="#2563eb")
+    db.add(org)
+    db.flush()
+
+    product = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Product A",
+        slug="product-a",
+        section_type="section",
+        is_published=True,
+        display_order=0,
+    )
+    db.add(product)
+    db.flush()
+
+    version_v1 = Section(
+        organization_id=org.id,
+        parent_id=product.id,
+        name="v1.0",
+        slug="v1-0",
+        section_type="version",
+        is_published=True,
+        display_order=0,
+    )
+    version_v2 = Section(
+        organization_id=org.id,
+        parent_id=product.id,
+        name="v2.0",
+        slug="v2-0",
+        section_type="version",
+        is_published=True,
+        display_order=1,
+    )
+    db.add_all([version_v1, version_v2])
+    db.flush()
+
+    section_v1 = Section(
+        organization_id=org.id,
+        parent_id=version_v1.id,
+        name="Guides",
+        slug="guides-v1",
+        section_type="section",
+        is_published=True,
+        display_order=0,
+    )
+    section_v2 = Section(
+        organization_id=org.id,
+        parent_id=version_v2.id,
+        name="Guides",
+        slug="guides-v2",
+        section_type="section",
+        is_published=True,
+        display_order=0,
+    )
+    db.add_all([section_v1, section_v2])
+    db.flush()
+
+    page_v1 = Page(
+        organization_id=org.id,
+        section_id=section_v1.id,
+        google_doc_id="doc-v1",
+        title="Getting Started v1",
+        slug="getting-started-v1",
+        published_html="<h1>Getting Started v1</h1>",
+        is_published=True,
+        status="published",
+        display_order=0,
+    )
+    page_v2 = Page(
+        organization_id=org.id,
+        section_id=section_v2.id,
+        google_doc_id="doc-v2",
+        title="Getting Started v2",
+        slug="getting-started-v2",
+        published_html="<h1>Getting Started v2</h1>",
+        is_published=True,
+        status="published",
+        display_order=0,
+    )
+    db.add_all([page_v1, page_v2])
+    db.commit()
+
+    page_resp = client.get("/docs/versioned-org/getting-started-v2")
+    assert page_resp.status_code == 200
+    page_html = page_resp.text
+    assert "version-select" in page_html
+    assert "v1.0" in page_html
+    assert "v2.0" in page_html
+    assert f'/docs/versioned-org/p/{page_v1.id}/{page_v1.slug}' in page_html
+    assert f'/docs/versioned-org/p/{page_v2.id}/{page_v2.slug}' in page_html
+
+    landing_resp = client.get("/docs/versioned-org?product=product-a&version=v2-0")
+    assert landing_resp.status_code == 200
+    landing_html = landing_resp.text
+    assert 'id="versionSelect"' in landing_html
+    assert '<option value="v2-0" selected>' in landing_html
+    assert "Getting Started v2" in landing_html
+    assert f'/docs/versioned-org/p/{page_v2.id}/{page_v2.slug}' in landing_html
+
+
+def test_public_page_keeps_base_scope_when_product_has_versions(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+
+    org = Organization(name="Base Scope Org", slug="base-scope-org", domain="base-scope.example.com", primary_color="#2563eb")
+    db.add(org)
+    db.flush()
+
+    product = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Resume",
+        slug="resume",
+        section_type="section",
+        is_published=True,
+        display_order=0,
+    )
+    db.add(product)
+    db.flush()
+
+    base_section = Section(
+        organization_id=org.id,
+        parent_id=product.id,
+        name="Guides",
+        slug="guides",
+        section_type="section",
+        is_published=True,
+        display_order=0,
+    )
+    version = Section(
+        organization_id=org.id,
+        parent_id=product.id,
+        name="Resume v2.0",
+        slug="resume-v2-0",
+        section_type="version",
+        is_published=False,
+        display_order=1,
+    )
+    db.add_all([base_section, version])
+    db.flush()
+
+    version_section = Section(
+        organization_id=org.id,
+        parent_id=version.id,
+        name="Guides",
+        slug="guides-v2",
+        section_type="section",
+        is_published=True,
+        display_order=0,
+    )
+    db.add(version_section)
+    db.flush()
+
+    base_page = Page(
+        organization_id=org.id,
+        section_id=base_section.id,
+        google_doc_id="base-doc",
+        title="Base Guide",
+        slug="base-guide",
+        published_html="<h1>Base Guide</h1>",
+        is_published=True,
+        status="published",
+        display_order=0,
+    )
+    v2_page = Page(
+        organization_id=org.id,
+        section_id=version_section.id,
+        google_doc_id="v2-doc",
+        title="Guide v2",
+        slug="guide-v2",
+        published_html="<h1>Guide v2</h1>",
+        is_published=True,
+        status="published",
+        display_order=0,
+    )
+    db.add_all([base_page, v2_page])
+    db.commit()
+
+    page_resp = client.get(f"/docs/base-scope-org/p/{base_page.id}/{base_page.slug}")
+    assert page_resp.status_code == 200
+    page_html = page_resp.text
+
+    assert "version-select" in page_html
+    assert "Resume" in page_html
+    assert f'/docs/base-scope-org/p/{base_page.id}/{base_page.slug}' in page_html
+    assert f'/docs/base-scope-org/p/{v2_page.id}/{v2_page.slug}' in page_html
+    assert "Resume v2.0" in page_html
+    assert f"sec-{version.id}" not in page_html
+
+    landing_resp = client.get("/docs/base-scope-org?product=resume")
+    assert landing_resp.status_code == 200
+    landing_html = landing_resp.text
+    assert "Guides" in landing_html
+    assert 'class="group-title"' in landing_html
+    assert '>Resume v2.0</a>' not in landing_html
+    assert ">Resume<" in landing_html
+
+
 def test_public_page_flattens_same_name_wrapper_without_tabs(client, db, monkeypatch):
     monkeypatch.setattr(public_api, "_get_db", lambda: db)
 
