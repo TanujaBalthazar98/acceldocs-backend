@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, File, Form, Header, UploadFile
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -91,6 +91,18 @@ async def get_drive_credentials(user: User, org_id: int, db: Session) -> Credent
     google_token.last_refreshed_at = datetime.now(timezone.utc)
     db.commit()
     return Credentials(token=access_token)
+
+
+def _resolve_org_role(user: User, db: Session, requested_org_id: int | None = None) -> OrgRole:
+    query = db.query(OrgRole).filter(OrgRole.user_id == user.id)
+    if requested_org_id is not None:
+        explicit = query.filter(OrgRole.organization_id == requested_org_id).first()
+        if explicit:
+            return explicit
+    role = query.first()
+    if not role:
+        raise HTTPException(status_code=403, detail="User has no organization")
+    return role
 
 
 # ---------------------------------------------------------------------------
@@ -408,12 +420,11 @@ def _scan_folder(
 
 @router.get("/status")
 def drive_status(
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
-    if not org_role:
-        return {"connected": False}
+    org_role = _resolve_org_role(user, db, x_org_id)
 
     org = db.get(Organization, org_role.organization_id)
     token = db.query(GoogleToken).filter(
@@ -432,6 +443,7 @@ def drive_status(
 @router.post("/scan")
 async def scan_folder(
     body: ScanRequest,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -439,7 +451,7 @@ async def scan_folder(
 
     HTML content is NOT fetched here — call /sync after scan to pull content.
     """
-    org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+    org_role = _resolve_org_role(user, db, x_org_id)
     if not org_role or org_role.role not in ("owner", "admin", "editor"):
         raise HTTPException(status_code=403, detail="Editor role required")
 
@@ -451,6 +463,14 @@ async def scan_folder(
         section_id=body.parent_section_id,
         expected_type=body.target_type,
     )
+
+    # Root folder is workspace-level configuration and must stay owner/admin only.
+    if body.parent_section_id is None and (not org or not org.drive_folder_id):
+        if org_role.role not in ("owner", "admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Only workspace owner/admin can configure Drive root folder",
+            )
 
     if target_section and org and org.drive_folder_id and body.folder_id == org.drive_folder_id:
         raise HTTPException(
@@ -561,11 +581,12 @@ async def import_local(
     mode: Literal["files", "folder"] = Form(default="files"),
     relative_paths_json: str | None = Form(default=None),
     files: list[UploadFile] = File(...),
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """Import local files/folders into a target section and sync DB from Drive."""
-    org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+    org_role = _resolve_org_role(user, db, x_org_id)
     if not org_role or org_role.role not in ("owner", "admin", "editor"):
         raise HTTPException(status_code=403, detail="Editor role required")
     org_id = org_role.organization_id
@@ -672,6 +693,7 @@ async def import_local(
 
 @router.post("/sync")
 async def sync_all_pages(
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -679,7 +701,7 @@ async def sync_all_pages(
 
     Skips pages whose drive_modified_at matches the stored value (already up to date).
     """
-    org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+    org_role = _resolve_org_role(user, db, x_org_id)
     if not org_role or org_role.role not in ("owner", "admin", "editor"):
         raise HTTPException(status_code=403, detail="Editor role required")
 

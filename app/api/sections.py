@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -63,16 +63,23 @@ def _section_dict(s: Section) -> dict[str, Any]:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_org_id(user: User, db: Session) -> int:
-    role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+def _resolve_org_role(user: User, db: Session, requested_org_id: int | None = None) -> OrgRole:
+    query = db.query(OrgRole).filter(OrgRole.user_id == user.id)
+    if requested_org_id is not None:
+        query = query.filter(OrgRole.organization_id == requested_org_id)
+    role = query.first()
     if not role:
         raise HTTPException(status_code=403, detail="User has no organization")
-    return role.organization_id
+    return role
 
 
-def _require_editor(user: User, db: Session) -> int:
+def _get_org_id(user: User, db: Session, requested_org_id: int | None = None) -> int:
+    return _resolve_org_role(user, db, requested_org_id).organization_id
+
+
+def _require_editor(user: User, db: Session, requested_org_id: int | None = None) -> int:
     """Return org_id; raise 403 if user is not at least editor."""
-    role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+    role = _resolve_org_role(user, db, requested_org_id)
     if not role or role.role not in ("owner", "admin", "editor"):
         raise HTTPException(status_code=403, detail="Editor role required")
     return role.organization_id
@@ -300,11 +307,12 @@ def _clone_section_tree_into_version(
 
 @router.get("")
 def list_sections(
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """Return all sections for the current org as a flat list."""
-    org_id = _get_org_id(user, db)
+    org_id = _get_org_id(user, db, x_org_id)
     sections = (
         db.query(Section)
         .filter(Section.organization_id == org_id)
@@ -317,10 +325,11 @@ def list_sections(
 @router.post("", status_code=201)
 async def create_section(
     body: SectionCreate,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org_id = _require_editor(user, db)
+    org_id = _require_editor(user, db, x_org_id)
     if body.section_type == "version":
         _validate_version_parent(org_id=org_id, parent_id=body.parent_id, db=db)
 
@@ -454,10 +463,11 @@ async def create_section(
 async def update_section(
     section_id: int,
     body: SectionUpdate,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org_id = _require_editor(user, db)
+    org_id = _require_editor(user, db, x_org_id)
     section = db.query(Section).filter(
         Section.id == section_id,
         Section.organization_id == org_id,
@@ -519,10 +529,11 @@ async def update_section(
 @router.delete("/{section_id}", status_code=204)
 async def delete_section(
     section_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    org_id = _require_editor(user, db)
+    org_id = _require_editor(user, db, x_org_id)
     section = db.query(Section).filter(
         Section.id == section_id,
         Section.organization_id == org_id,

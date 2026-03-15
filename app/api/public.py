@@ -1180,7 +1180,7 @@ def _access_required_html(
         else "This page is shared only with invited external users. Ask for an invitation to continue."
     )
     current_url = str(request.url)
-    sign_in_url = f"{settings.frontend_url.rstrip('/')}/auth?next={quote(current_url, safe='')}"
+    sign_in_url = f"/auth/docs-login?next={quote(current_url, safe='')}"
     public_url = _landing_href(org_slug=org.slug or str(org.id), docs_root="/docs")
     scope_label_safe = escape(scope_label)
     scope_title_safe = escape(scope_title)

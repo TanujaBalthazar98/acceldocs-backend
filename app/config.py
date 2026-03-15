@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     frontend_url: str = "https://localhost:8081"
     auto_create_schema: bool = False
 
+    # Email (Resend)
+    resend_api_key: str = ""
+    resend_from_email: str = "AccelDocs <noreply@docspeare.com>"
+
     # Netlify
     netlify_site_id: str = ""
     netlify_auth_token: str = ""

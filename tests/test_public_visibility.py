@@ -309,6 +309,7 @@ def test_external_docs_route_allows_granted_user_and_filters_scope(client, db, m
     landing = client.get("/external-docs/external-scoped-org", headers=auth_header)
     assert landing.status_code == 200
     assert "Partner Playbook" in landing.text
+    # External route shows only external-visibility pages (not public or internal)
     assert "Public Intro" not in landing.text
     assert "Internal Ops" not in landing.text
 
@@ -316,6 +317,7 @@ def test_external_docs_route_allows_granted_user_and_filters_scope(client, db, m
     assert external_page.status_code == 200
     assert "Partner Playbook" in external_page.text
 
+    # Public pages are NOT accessible on external route
     public_page = client.get("/external-docs/external-scoped-org/public-intro", headers=auth_header)
     assert public_page.status_code == 404
 
@@ -323,6 +325,12 @@ def test_external_docs_route_allows_granted_user_and_filters_scope(client, db, m
     assert search.status_code == 200
     slugs = {item["slug"] for item in search.json()["results"]}
     assert slugs == {"partner-playbook"}
+
+    # Public pages do NOT appear in external search
+    search_public = client.get("/external-docs/external-scoped-org/search?q=intro", headers=auth_header)
+    assert search_public.status_code == 200
+    public_slugs = {item["slug"] for item in search_public.json()["results"]}
+    assert "public-intro" not in public_slugs
 
 
 def test_public_search_filters_by_visibility_scope(client, db, monkeypatch):
@@ -494,6 +502,7 @@ def test_internal_docs_route_renders_only_internal_content(client, db, monkeypat
     landing = client.get("/internal-docs/internal-filter-org", headers=auth_header)
     assert landing.status_code == 200
     assert "Internal Ops Guide" in landing.text
+    # Internal route shows only internal-visibility pages (not public)
     assert "Public Landing Page" not in landing.text
 
     internal_page_resp = client.get(
@@ -503,6 +512,7 @@ def test_internal_docs_route_renders_only_internal_content(client, db, monkeypat
     assert internal_page_resp.status_code == 200
     assert "Internal Ops Guide" in internal_page_resp.text
 
+    # Public pages are NOT accessible on internal route
     public_page_resp = client.get(
         "/internal-docs/internal-filter-org/public-landing-page",
         headers=auth_header,
@@ -516,7 +526,15 @@ def test_internal_docs_route_renders_only_internal_content(client, db, monkeypat
     assert internal_search.status_code == 200
     internal_slugs = {item["slug"] for item in internal_search.json()["results"]}
     assert "internal-ops-guide" in internal_slugs
-    assert "public-landing-page" not in internal_slugs
+
+    # Public pages do NOT appear in internal search
+    public_search = client.get(
+        "/internal-docs/internal-filter-org/search?q=landing",
+        headers=auth_header,
+    )
+    assert public_search.status_code == 200
+    public_slugs = {item["slug"] for item in public_search.json()["results"]}
+    assert "public-landing-page" not in public_slugs
 
 
 def test_internal_docs_page_renders_version_selector_for_visible_version_content(client, db, monkeypatch):

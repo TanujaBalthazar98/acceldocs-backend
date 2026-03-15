@@ -69,6 +69,32 @@ def _allowed_redirect_hosts() -> set[str]:
     return hosts
 
 
+def _extract_docs_next_from_state(state: str | None) -> str | None:
+    """Decode a ``next`` URL from the OAuth state parameter.
+
+    Returns the URL only when it points to an allowed host.
+    """
+    if not state:
+        return None
+    import base64 as _b64
+    import json as _json
+
+    try:
+        payload = _json.loads(_b64.urlsafe_b64decode(state + "=="))
+        next_url = payload.get("next")
+        if not next_url or not isinstance(next_url, str):
+            return None
+        from urllib.parse import urlparse as _urlparse
+
+        parsed = _urlparse(next_url)
+        host = (parsed.hostname or "").lower()
+        if host in _allowed_redirect_hosts():
+            return next_url
+    except Exception:
+        pass
+    return None
+
+
 def _resolve_default_redirect_from_request(request: Request | None) -> str:
     """Build a default redirect URI from trusted app hosts only."""
     trusted_hosts = _allowed_redirect_hosts()
@@ -299,7 +325,12 @@ async def search_organizations(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/login")
-async def login(request: Request, state: str | None = None, redirect_uri: str | None = None):
+async def login(
+    request: Request,
+    state: str | None = None,
+    redirect_uri: str | None = None,
+    org_id: int | None = None,
+):
     """Return the Google OAuth consent URL.
 
     Args:
@@ -318,8 +349,21 @@ async def login(request: Request, state: str | None = None, redirect_uri: str | 
     scope_param = "%20".join(scopes)
     resolved_redirect_uri = _resolve_oauth_redirect_uri_for_request(redirect_uri, request)
 
+    resolved_state = state
+    if not resolved_state and org_id is not None:
+        resolved_state = jwt.encode(
+            {
+                "action": "connect",
+                "org_id": org_id,
+                "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+                "iat": datetime.now(timezone.utc),
+            },
+            settings.secret_key,
+            algorithm=JWT_ALGORITHM,
+        )
+
     # Include state parameter if provided
-    state_param = f"&state={state}" if state else ""
+    state_param = f"&state={resolved_state}" if resolved_state else ""
 
     return {
         "url": (
@@ -334,6 +378,57 @@ async def login(request: Request, state: str | None = None, redirect_uri: str | 
         ),
         "redirect_uri": resolved_redirect_uri,
     }
+
+
+@router.get("/docs-login")
+async def docs_login(request: Request, next: str | None = None):
+    """Browser-redirect login for docs gate pages.
+
+    Redirects the browser straight to Google OAuth.  The ``next`` URL
+    (the docs page the user was trying to access) is encoded inside the
+    OAuth ``state`` parameter so the callback can redirect back.
+    """
+    if not settings.google_client_id:
+        raise HTTPException(status_code=501, detail="Google OAuth not configured")
+
+    import base64 as _b64
+    import json as _json
+
+    scopes = [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    scope_param = "%20".join(scopes)
+    # Always use the configured redirect URI — this request originates from
+    # the backend gate page so the request Origin/Referer is localhost:8000,
+    # which is NOT registered with Google.  The frontend callback URI IS.
+    resolved_redirect_uri = settings.google_oauth_redirect_uri
+
+    # Encode the next URL in the state so the callback can redirect back
+    state_payload: dict = {}
+    if next:
+        # Validate the next URL points to our backend (prevent open redirect)
+        from urllib.parse import urlparse as _urlparse
+
+        parsed_next = _urlparse(next)
+        next_host = (parsed_next.hostname or "").lower()
+        if next_host in _allowed_redirect_hosts() or not parsed_next.scheme:
+            state_payload["next"] = next
+    state_str = _b64.urlsafe_b64encode(_json.dumps(state_payload).encode()).decode()
+
+    google_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={settings.google_client_id}"
+        "&response_type=code"
+        f"&scope={scope_param}"
+        f"&redirect_uri={resolved_redirect_uri}"
+        "&access_type=offline"
+        "&prompt=consent"
+        f"&state={state_str}"
+    )
+    return RedirectResponse(url=google_url, status_code=302)
 
 
 @router.get("/callback")
@@ -359,7 +454,7 @@ async def callback(
 
     # Decode signup state if provided
     signup_info = None
-    if state:
+    if state and state.count(".") == 2:
         try:
             signup_info = jwt.decode(state, settings.secret_key, algorithms=[JWT_ALGORITHM])
         except jwt.ExpiredSignatureError:
@@ -449,7 +544,22 @@ async def callback(
     # Handle organization assignment based on signup info
     org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
 
-    if org_role:
+    if signup_info and signup_info.get("action") == "connect":
+        target_org_id = signup_info.get("org_id")
+        if not target_org_id:
+            raise HTTPException(status_code=400, detail="org_id required for connect action")
+        target_role = (
+            db.query(OrgRole)
+            .filter(OrgRole.user_id == user.id, OrgRole.organization_id == target_org_id)
+            .first()
+        )
+        if not target_role:
+            raise HTTPException(status_code=403, detail="You are not a member of the selected workspace")
+        if target_role.role not in ("owner", "admin"):
+            raise HTTPException(status_code=403, detail="Only workspace owner/admin can connect Drive")
+        organization_id = target_role.organization_id
+        org_role = target_role
+    elif org_role:
         # User already has an organization
         organization_id = org_role.organization_id
     elif signup_info:
@@ -599,6 +709,20 @@ async def callback(
                 "created_at": user.created_at.isoformat() if user.created_at else None,
             },
         }
+
+    # If the OAuth state contains a ``next`` URL (from /auth/docs-login),
+    # redirect back to that docs page with auth_token so the cookie
+    # bootstrap flow kicks in.
+    docs_next_url = _extract_docs_next_from_state(state)
+    if docs_next_url:
+        from urllib.parse import urlencode as _urlencode, urlparse as _urlparse, parse_qs as _parse_qs, urlunparse as _urlunparse
+
+        parsed = _urlparse(docs_next_url)
+        qs = _parse_qs(parsed.query, keep_blank_values=True)
+        qs["auth_token"] = [jwt_token]
+        new_query = _urlencode(qs, doseq=True)
+        target = _urlunparse(parsed._replace(query=new_query))
+        return RedirectResponse(url=target, status_code=302)
 
     # Redirect to frontend /auth/callback with token in URL params.
     # The frontend AuthCallback page reads the token and stores it in localStorage.

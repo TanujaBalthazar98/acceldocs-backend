@@ -1,19 +1,26 @@
 """Org API — current organization info, settings, and member management."""
 
 import logging
+import re
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth.routes import get_current_user
+from app.config import settings
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
 from app.models import GoogleToken, Invitation, OrgRole, Organization, User
+from app.services.email import send_invitation_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+PLACEHOLDER_INVITE_DOMAIN = "pending.acceldocs"
 
 
 # ---------------------------------------------------------------------------
@@ -26,19 +33,28 @@ class OrgUpdate(BaseModel):
     primary_color: str | None = None
     tagline: str | None = None
     hierarchy_mode: str | None = None
+    custom_docs_domain: str | None = None
 
 
 class InviteCreate(BaseModel):
     email: str
-    role: str = "editor"  # owner | admin | editor | viewer
+    role: str = "editor"  # owner | admin | editor | reviewer | viewer
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_org(user: User, db: Session) -> tuple[Organization, OrgRole]:
-    role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+def _get_org(user: User, db: Session, org_id: int | None = None) -> tuple[Organization, OrgRole]:
+    """Resolve the user's current organization.
+
+    If *org_id* is given, look up that specific org (the user must be a member).
+    Otherwise fall back to the user's first org.
+    """
+    query = db.query(OrgRole).filter(OrgRole.user_id == user.id)
+    if org_id:
+        query = query.filter(OrgRole.organization_id == org_id)
+    role = query.first()
     if not role:
         raise HTTPException(status_code=403, detail="User has no organization")
     org = db.get(Organization, role.organization_id)
@@ -56,6 +72,7 @@ def _org_dict(org: Organization, role: OrgRole, member_count: int, has_drive: bo
         "primary_color": org.primary_color,
         "tagline": org.tagline,
         "domain": org.domain,
+        "custom_docs_domain": org.custom_docs_domain,
         "hierarchy_mode": org.hierarchy_mode or "product",
         "drive_folder_id": org.drive_folder_id,
         "has_drive_connected": has_drive,
@@ -65,17 +82,69 @@ def _org_dict(org: Organization, role: OrgRole, member_count: int, has_drive: bo
     }
 
 
+def _normalize_dt_for_compare(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    # SQLite often returns naive datetimes even when timezone=True.
+    # Normalize to UTC-aware so comparisons never raise TypeError.
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _is_expired(dt: datetime | None, now: datetime | None = None) -> bool:
+    normalized = _normalize_dt_for_compare(dt)
+    if normalized is None:
+        return False
+    now_utc = now.astimezone(timezone.utc) if now and now.tzinfo else (now.replace(tzinfo=timezone.utc) if now else datetime.now(timezone.utc))
+    return normalized < now_utc
+
+
+def _email_domain(email: str) -> str | None:
+    value = (email or "").strip().lower()
+    if "@" not in value:
+        return None
+    return value.split("@", 1)[1].strip() or None
+
+
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.get("")
-def get_org(
+@router.get("/list")
+def list_user_orgs(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Return current org info for the authenticated user."""
-    org, role = _get_org(user, db)
+    """Return all organizations the authenticated user belongs to."""
+    roles = db.query(OrgRole).filter(OrgRole.user_id == user.id).all()
+    orgs = []
+    for r in roles:
+        org = db.get(Organization, r.organization_id)
+        if org:
+            orgs.append({
+                "id": org.id,
+                "name": org.name,
+                "slug": org.slug,
+                "logo_url": org.logo_url,
+                "domain": org.domain,
+                "user_role": r.role,
+            })
+    return {"ok": True, "organizations": orgs}
+
+
+@router.get("")
+def get_org(
+    org_id: int | None = None,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return org info. Pass ?org_id=N to select a specific org."""
+    selected_org_id = org_id if org_id is not None else x_org_id
+    org, role = _get_org(user, db, org_id=selected_org_id)
 
     # Backfill slug for orgs created before slug was required
     if not org.slug and org.name:
@@ -93,15 +162,19 @@ def get_org(
 @router.patch("")
 def update_org(
     body: OrgUpdate,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org, role = _get_org(user, db)
+    org, role = _get_org(user, db, org_id=x_org_id)
     if role.role not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Admin role required to update org")
 
     if body.name is not None:
-        org.name = body.name.strip()
+        next_name = body.name.strip()
+        if not next_name:
+            raise HTTPException(status_code=400, detail="Workspace name cannot be empty")
+        org.name = next_name
         if not org.slug:
             org.slug = slugify(org.name)
     if body.logo_url is not None:
@@ -112,6 +185,26 @@ def update_org(
         org.tagline = body.tagline
     if body.hierarchy_mode is not None:
         org.hierarchy_mode = "flat" if body.hierarchy_mode == "flat" else "product"
+    if body.custom_docs_domain is not None:
+        value = body.custom_docs_domain.strip().lower()
+        if value == "":
+            org.custom_docs_domain = None
+        else:
+            domain_regex = re.compile(r"^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$")
+            if not domain_regex.match(value):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid domain format. Example: docs.example.com",
+                )
+
+            existing = (
+                db.query(Organization)
+                .filter(func.lower(Organization.custom_docs_domain) == value, Organization.id != org.id)
+                .first()
+            )
+            if existing:
+                raise HTTPException(status_code=409, detail="Custom docs domain is already in use")
+            org.custom_docs_domain = value
 
     db.commit()
     db.refresh(org)
@@ -125,10 +218,11 @@ def update_org(
 
 @router.get("/members")
 def list_members(
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org, _ = _get_org(user, db)
+    org, _ = _get_org(user, db, org_id=x_org_id)
     roles = (
         db.query(OrgRole)
         .filter(OrgRole.organization_id == org.id)
@@ -153,10 +247,11 @@ def list_members(
 def update_member_role(
     member_id: int,
     body: dict,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org, caller_role = _get_org(user, db)
+    org, caller_role = _get_org(user, db, org_id=x_org_id)
     if caller_role.role not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Admin role required")
 
@@ -168,7 +263,7 @@ def update_member_role(
         raise HTTPException(status_code=404, detail="Member not found")
 
     new_role = body.get("role")
-    if new_role not in ("owner", "admin", "editor", "viewer"):
+    if new_role not in ("owner", "admin", "editor", "reviewer", "viewer"):
         raise HTTPException(status_code=400, detail="Invalid role")
 
     target.role = new_role
@@ -179,10 +274,11 @@ def update_member_role(
 @router.delete("/members/{member_id}", status_code=204)
 def remove_member(
     member_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    org, caller_role = _get_org(user, db)
+    org, caller_role = _get_org(user, db, org_id=x_org_id)
     if caller_role.role not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Admin role required")
 
@@ -195,3 +291,225 @@ def remove_member(
 
     db.delete(target)
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Invitations
+# ---------------------------------------------------------------------------
+
+@router.post("/invitations", status_code=201)
+def create_invitation(
+    body: InviteCreate,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create an org invitation and return a shareable token link."""
+    org, caller_role = _get_org(user, db, org_id=x_org_id)
+    if caller_role.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Admin role required to invite members")
+
+    email = body.email.strip().lower()
+    role = body.role if body.role in ("owner", "admin", "editor", "reviewer", "viewer") else "viewer"
+    email_domain = _email_domain(email)
+    is_placeholder = email_domain == PLACEHOLDER_INVITE_DOMAIN
+
+    # For orgs with a claimed domain, invitations must stay inside that domain.
+    # Link-only invites (placeholder email) are disallowed in this mode.
+    org_domain = (org.domain or "").strip().lower()
+    if org_domain:
+        if is_placeholder:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Workspace invites are restricted to @{org_domain} addresses.",
+            )
+        if not email_domain or email_domain != org_domain:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only @{org_domain} email addresses can be invited to this workspace.",
+            )
+
+    # Check if user is already a member
+    existing_user = db.query(User).filter(User.email == email).first()
+    if existing_user:
+        already_member = (
+            db.query(OrgRole)
+            .filter(OrgRole.organization_id == org.id, OrgRole.user_id == existing_user.id)
+            .first()
+        )
+        if already_member:
+            return {"ok": True, "status": "member", "message": f"{email} is already a member"}
+
+    # Check for existing pending invitation
+    existing_invite = (
+        db.query(Invitation)
+        .filter(
+            Invitation.organization_id == org.id,
+            Invitation.email == email,
+            Invitation.accepted_at.is_(None),
+            Invitation.expires_at > datetime.now(timezone.utc),
+        )
+        .first()
+    )
+    if existing_invite:
+        return {
+            "ok": True,
+            "status": "pending",
+            "token": existing_invite.token,
+            "message": f"Pending invitation already exists for {email}",
+        }
+
+    invitation = Invitation(
+        organization_id=org.id,
+        invited_by_id=user.id,
+        email=email,
+        role=role,
+        token=secrets.token_urlsafe(32),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+    )
+    db.add(invitation)
+    db.commit()
+
+    # Build invite link and send email (best-effort — won't fail the request)
+    invite_link = f"{settings.frontend_url}/auth/callback?invite={invitation.token}"
+    email_sent = False
+    if not is_placeholder:
+        email_sent = send_invitation_email(
+            to_email=email,
+            inviter_name=user.name or user.email,
+            org_name=org.name or "Workspace",
+            role=role,
+            invite_link=invite_link,
+        )
+
+    return {
+        "ok": True,
+        "status": "created",
+        "token": invitation.token,
+        "email_sent": email_sent,
+        "invitation": {
+            "id": invitation.id,
+            "email": email,
+            "role": role,
+            "expires_at": invitation.expires_at.isoformat(),
+        },
+    }
+
+
+@router.get("/invitations")
+def list_invitations(
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List all org invitations (pending and accepted)."""
+    org, caller_role = _get_org(user, db, org_id=x_org_id)
+    if caller_role.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    invitations = (
+        db.query(Invitation)
+        .filter(Invitation.organization_id == org.id)
+        .order_by(Invitation.created_at.desc())
+        .all()
+    )
+    now = datetime.now(timezone.utc)
+    results = []
+    for inv in invitations:
+        status = "accepted" if inv.accepted_at else ("expired" if _is_expired(inv.expires_at, now) else "pending")
+        inviter = db.get(User, inv.invited_by_id)
+        results.append({
+            "id": inv.id,
+            "email": inv.email,
+            "role": inv.role,
+            "status": status,
+            "token": inv.token if status == "pending" else None,
+            "invited_by": inviter.email if inviter else None,
+            "created_at": inv.created_at.isoformat() if inv.created_at else None,
+            "expires_at": inv.expires_at.isoformat(),
+            "accepted_at": inv.accepted_at.isoformat() if inv.accepted_at else None,
+        })
+    return {"invitations": results}
+
+
+@router.delete("/invitations/{invitation_id}", status_code=204)
+def revoke_invitation(
+    invitation_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    """Revoke (delete) a pending invitation."""
+    org, caller_role = _get_org(user, db, org_id=x_org_id)
+    if caller_role.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    invitation = (
+        db.query(Invitation)
+        .filter(Invitation.id == invitation_id, Invitation.organization_id == org.id)
+        .first()
+    )
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    db.delete(invitation)
+    db.commit()
+
+
+@router.post("/invitations/accept")
+def accept_invitation(
+    body: dict,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Accept an invitation by token. Adds the authenticated user to the org."""
+    token = (body.get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Invitation token required")
+
+    invitation = db.query(Invitation).filter(Invitation.token == token).first()
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+
+    invite_email = (invitation.email or "").strip().lower()
+    user_email = (user.email or "").strip().lower()
+    if invite_email and user_email and invite_email != user_email:
+        raise HTTPException(status_code=403, detail="Invitation email does not match signed-in account")
+
+    org_id = invitation.organization_id
+    if not org_id:
+        raise HTTPException(status_code=400, detail="Invalid invitation (no organization)")
+
+    # Check if already a member first so accept is idempotent for domain auto-join paths.
+    existing = (
+        db.query(OrgRole)
+        .filter(OrgRole.organization_id == org_id, OrgRole.user_id == user.id)
+        .first()
+    )
+    if existing:
+        if invitation.accepted_at is None:
+            invitation.accepted_at = datetime.now(timezone.utc)
+            db.commit()
+        return {"ok": True, "status": "already_member", "role": existing.role}
+
+    if invitation.accepted_at is not None:
+        raise HTTPException(status_code=409, detail="Invitation already accepted")
+
+    if _is_expired(invitation.expires_at):
+        raise HTTPException(status_code=410, detail="Invitation has expired")
+
+    # Add to org
+    db.add(OrgRole(
+        organization_id=org_id,
+        user_id=user.id,
+        role=invitation.role,
+    ))
+    invitation.accepted_at = datetime.now(timezone.utc)
+    db.commit()
+
+    org = db.get(Organization, org_id)
+    return {
+        "ok": True,
+        "status": "accepted",
+        "role": invitation.role,
+        "organization": {"id": org_id, "name": org.name if org else None, "slug": org.slug if org else None},
+    }

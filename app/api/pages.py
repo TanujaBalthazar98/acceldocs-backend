@@ -78,15 +78,11 @@ def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
 # Drive helpers
 # ---------------------------------------------------------------------------
 
-async def _get_drive_credentials(user: User, db: Session) -> Credentials:
+async def _get_drive_credentials(user: User, db: Session, org_id: int) -> Credentials:
     """Return valid Google Credentials for user, refreshing stored token if needed."""
-    org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
-    if not org_role:
-        raise HTTPException(status_code=403, detail="User has no organization")
-
     google_token = db.query(GoogleToken).filter(
         GoogleToken.user_id == user.id,
-        GoogleToken.organization_id == org_role.organization_id,
+        GoogleToken.organization_id == org_id,
     ).first()
     if not google_token:
         raise HTTPException(status_code=401, detail="No Google Drive credentials. Please reconnect.")
@@ -172,15 +168,22 @@ def _copy_drive_doc(service, source_file_id: str, copy_title: str, parent_id: st
 # Org / auth helpers
 # ---------------------------------------------------------------------------
 
-def _get_org_id(user: User, db: Session) -> int:
-    role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+def _resolve_org_role(user: User, db: Session, requested_org_id: int | None = None) -> OrgRole:
+    query = db.query(OrgRole).filter(OrgRole.user_id == user.id)
+    if requested_org_id is not None:
+        query = query.filter(OrgRole.organization_id == requested_org_id)
+    role = query.first()
     if not role:
         raise HTTPException(status_code=403, detail="User has no organization")
-    return role.organization_id
+    return role
 
 
-def _require_editor(user: User, db: Session) -> int:
-    role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+def _get_org_id(user: User, db: Session, requested_org_id: int | None = None) -> int:
+    return _resolve_org_role(user, db, requested_org_id).organization_id
+
+
+def _require_editor(user: User, db: Session, requested_org_id: int | None = None) -> int:
+    role = _resolve_org_role(user, db, requested_org_id)
     if not role or role.role not in ("owner", "admin", "editor"):
         raise HTTPException(status_code=403, detail="Editor role required")
     return role.organization_id
@@ -250,11 +253,12 @@ def _upsert_page_redirect(
 @router.get("")
 def list_pages(
     section_id: int | None = None,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """List all pages for the current org, optionally filtered by section."""
-    org_id = _get_org_id(user, db)
+    org_id = _get_org_id(user, db, x_org_id)
     q = db.query(Page).filter(Page.organization_id == org_id)
     if section_id is not None:
         q = q.filter(Page.section_id == section_id)
@@ -265,13 +269,14 @@ def list_pages(
 @router.post("", status_code=201)
 async def create_page(
     body: PageCreate,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """Create a page from a Google Doc ID. Fetches title + HTML immediately."""
-    org_id = _require_editor(user, db)
+    org_id = _require_editor(user, db, x_org_id)
 
-    creds = await _get_drive_credentials(user, db)
+    creds = await _get_drive_credentials(user, db, org_id)
 
     google_doc_id = body.google_doc_id
 
@@ -337,10 +342,11 @@ async def create_page(
 @router.get("/{page_id}")
 def get_page(
     page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org_id = _get_org_id(user, db)
+    org_id = _get_org_id(user, db, x_org_id)
     page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -351,10 +357,11 @@ def get_page(
 async def update_page(
     page_id: int,
     body: PageUpdate,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org_id = _require_editor(user, db)
+    org_id = _require_editor(user, db, x_org_id)
     page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -370,7 +377,7 @@ async def update_page(
         raise HTTPException(status_code=400, detail="Title cannot be empty")
 
     if page.google_doc_id and (title_changed or (body.section_id is not None and body.section_id != old_section_id)):
-        creds = await _get_drive_credentials(user, db)
+        creds = await _get_drive_credentials(user, db, org_id)
         drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     if body.section_id is not None:
@@ -426,7 +433,7 @@ async def update_page(
                 new_drive_parent = org.drive_folder_id if org else None
             if new_drive_parent:
                 if not drive_service:
-                    creds = await _get_drive_credentials(user, db)
+                    creds = await _get_drive_credentials(user, db, org_id)
                     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
                 _move_drive_item(drive_service, page.google_doc_id, new_drive_parent)
                 logger.info("Moved Drive doc %s to folder %s", page.google_doc_id, new_drive_parent)
@@ -439,18 +446,19 @@ async def update_page(
 @router.post("/{page_id}/duplicate", status_code=201)
 async def duplicate_page(
     page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """Duplicate a page in Drive and create a sibling page right below the source."""
-    org_id = _require_editor(user, db)
+    org_id = _require_editor(user, db, x_org_id)
     source = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
     if not source:
         raise HTTPException(status_code=404, detail="Page not found")
     if not source.google_doc_id:
         raise HTTPException(status_code=400, detail="Source page has no Google Doc ID")
 
-    creds = await _get_drive_credentials(user, db)
+    creds = await _get_drive_credentials(user, db, org_id)
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     copy_title = f"{source.title} Copy"
@@ -526,10 +534,11 @@ async def duplicate_page(
 @router.delete("/{page_id}", status_code=204)
 async def delete_page(
     page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    org_id = _require_editor(user, db)
+    org_id = _require_editor(user, db, x_org_id)
     page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -564,7 +573,7 @@ async def delete_page(
     # Trash Google Doc in Drive
     if google_doc_id:
         try:
-            creds = await _get_drive_credentials(user, db)
+            creds = await _get_drive_credentials(user, db, org_id)
             svc = build("drive", "v3", credentials=creds, cache_discovery=False)
             _trash_drive_item(svc, google_doc_id)
             logger.info("Trashed Drive doc %s for page %d", google_doc_id, page_id)
@@ -575,16 +584,17 @@ async def delete_page(
 @router.post("/{page_id}/sync")
 async def sync_page(
     page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """Pull latest content from Google Drive for this page."""
-    org_id = _require_editor(user, db)
+    org_id = _require_editor(user, db, x_org_id)
     page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
 
-    creds = await _get_drive_credentials(user, db)
+    creds = await _get_drive_credentials(user, db, org_id)
     html, modified_at, drive_title = await _export_html(page.google_doc_id, creds)
 
     page.html_content = html
@@ -612,11 +622,12 @@ async def sync_page(
 @router.post("/{page_id}/publish")
 def publish_page(
     page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """Publish page — snapshot html_content into published_html."""
-    org_id = _require_editor(user, db)
+    org_id = _require_editor(user, db, x_org_id)
     page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -649,10 +660,11 @@ def publish_page(
 @router.post("/{page_id}/unpublish")
 def unpublish_page(
     page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org_id = _require_editor(user, db)
+    org_id = _require_editor(user, db, x_org_id)
     page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
