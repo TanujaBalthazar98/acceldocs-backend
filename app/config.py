@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Only load .env file if it exists (not present on Railway/production)
+# Only load .env file if it exists (not present on Vercel/production)
 _env_file = ".env" if os.path.isfile(".env") else None
 
 
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # Google OAuth (interactive/user auth)
     google_client_id: str = ""
     google_client_secret: str = ""
-    google_oauth_redirect_uri: str = "https://localhost:8081/auth/callback"
+    google_oauth_redirect_uri: str = "https://acceldocs.vercel.app/auth/callback"
     google_oauth_token_file: str = "oauth-token.json"
 
     # Google Drive service account (optional, if org policy allows keys)
@@ -37,8 +37,8 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     secret_key: str = "change-me-in-production"
-    allowed_origins: str = "http://localhost:3000,http://localhost:5173,http://localhost:8081,https://localhost:8081"
-    frontend_url: str = "https://localhost:8081"
+    allowed_origins: str = "http://localhost:3000,http://localhost:5173,http://localhost:8081,https://localhost:8081,https://acceldocs.vercel.app"
+    frontend_url: str = "https://acceldocs.vercel.app"
     auto_create_schema: bool = False
 
     # Email (Resend)
