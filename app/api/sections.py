@@ -146,6 +146,18 @@ def _resolve_clone_source_id(
     explicit_source_id: int | None,
     db: Session,
 ) -> int | None:
+    latest_sibling_version = (
+        db.query(Section)
+        .filter(
+            Section.organization_id == org_id,
+            Section.parent_id == product_id,
+            Section.id != new_version_id,
+            Section.section_type == "version",
+        )
+        .order_by(Section.display_order.desc(), Section.id.desc())
+        .first()
+    )
+
     if explicit_source_id:
         source = db.query(Section).filter(
             Section.id == explicit_source_id,
@@ -153,9 +165,16 @@ def _resolve_clone_source_id(
         ).first()
         if not source:
             raise HTTPException(status_code=400, detail="clone_from_section_id is invalid")
+        # Guardrail: never clone a new version from product root when a newer version exists.
+        if source.id == product_id and latest_sibling_version:
+            return latest_sibling_version.id
         return source.id
 
-    # First-version creation path: duplicate current product tree (excluding existing version nodes).
+    # Preferred path: clone from latest sibling version when available.
+    if latest_sibling_version:
+        return latest_sibling_version.id
+
+    # First-version creation fallback: duplicate current product tree.
     has_non_version_children = db.query(Section).filter(
         Section.organization_id == org_id,
         Section.parent_id == product_id,
@@ -168,20 +187,7 @@ def _resolve_clone_source_id(
     ).first()
     if has_non_version_children or has_product_pages:
         return product_id
-
-    # Existing-version path: clone from the latest sibling version.
-    sibling_version = (
-        db.query(Section)
-        .filter(
-            Section.organization_id == org_id,
-            Section.parent_id == product_id,
-            Section.id != new_version_id,
-            Section.section_type == "version",
-        )
-        .order_by(Section.display_order.desc(), Section.id.desc())
-        .first()
-    )
-    return sibling_version.id if sibling_version else None
+    return None
 
 
 def _validate_version_parent(

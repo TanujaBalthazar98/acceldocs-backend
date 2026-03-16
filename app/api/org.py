@@ -3,6 +3,7 @@
 import logging
 import re
 import secrets
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -15,7 +16,12 @@ from app.auth.routes import get_current_user
 from app.config import settings
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
-from app.models import GoogleToken, Invitation, OrgRole, Organization, User
+from app.models import GoogleToken, Invitation, OrgRole, Organization, Page, User
+from app.services.drive_acl import (
+    revoke_member_drive_permission,
+    sync_member_drive_file_permission,
+    sync_member_drive_permission,
+)
 from app.services.email import send_invitation_email
 
 logger = logging.getLogger(__name__)
@@ -105,6 +111,71 @@ def _email_domain(email: str) -> str | None:
     if "@" not in value:
         return None
     return value.split("@", 1)[1].strip() or None
+
+
+def _run_async(coro):
+    """Execute a coroutine from sync route handlers."""
+    return asyncio.run(coro)
+
+
+def _sync_member_page_acl_backfill(
+    *,
+    db: Session,
+    org: Organization,
+    member_email: str | None,
+    org_role: str,
+    preferred_user_ids: list[int | None],
+    max_docs: int = 200,
+) -> dict:
+    """Best-effort ACL sync for existing Google Docs in an org."""
+    if not org or not org.id:
+        return {"ok": False, "reason": "organization_missing"}
+    if not member_email:
+        return {"ok": False, "reason": "member_email_missing"}
+
+    doc_rows = (
+        db.query(Page.google_doc_id)
+        .filter(Page.organization_id == org.id)
+        .distinct()
+        .limit(max_docs + 1)
+        .all()
+    )
+    doc_ids = [doc_id for (doc_id,) in doc_rows if doc_id]
+    truncated = len(doc_ids) > max_docs
+    doc_ids = doc_ids[:max_docs]
+    if not doc_ids:
+        return {"ok": True, "status": "skipped", "reason": "no_pages", "total": 0}
+
+    synced = 0
+    failed = 0
+    failures: list[dict[str, Any]] = []
+    for doc_id in doc_ids:
+        result = _run_async(
+            sync_member_drive_file_permission(
+                db=db,
+                org=org,
+                member_email=member_email,
+                org_role=org_role,
+                drive_file_id=doc_id,
+                preferred_user_ids=preferred_user_ids,
+            )
+        )
+        if result.get("ok"):
+            synced += 1
+        else:
+            failed += 1
+            if len(failures) < 10:
+                failures.append({"doc_id": doc_id, **result})
+
+    return {
+        "ok": failed == 0,
+        "status": "completed",
+        "total": len(doc_ids),
+        "synced": synced,
+        "failed": failed,
+        "truncated": truncated,
+        "failures": failures,
+    }
 
 
 
@@ -266,9 +337,37 @@ def update_member_role(
     if new_role not in ("owner", "admin", "editor", "reviewer", "viewer"):
         raise HTTPException(status_code=400, detail="Invalid role")
 
+    target_user = db.get(User, target.user_id)
     target.role = new_role
     db.commit()
-    return {"ok": True, "member_id": member_id, "role": new_role}
+    drive_sync = None
+    docs_sync = None
+    try:
+        drive_sync = _run_async(
+            sync_member_drive_permission(
+                db=db,
+                org=org,
+                member_email=target_user.email if target_user else None,
+                org_role=new_role,
+                preferred_user_ids=[org.owner_id, user.id, target.user_id],
+            )
+        )
+        docs_sync = _sync_member_page_acl_backfill(
+            db=db,
+            org=org,
+            member_email=target_user.email if target_user else None,
+            org_role=new_role,
+            preferred_user_ids=[org.owner_id, user.id, target.user_id],
+        )
+    except Exception as exc:
+        logger.warning("Failed to sync Drive permission for member role update %s: %s", target.user_id, exc)
+    return {
+        "ok": True,
+        "member_id": member_id,
+        "role": new_role,
+        "drive_sync": drive_sync,
+        "docs_sync": docs_sync,
+    }
 
 
 @router.delete("/members/{member_id}", status_code=204)
@@ -289,8 +388,21 @@ def remove_member(
     if not target:
         raise HTTPException(status_code=404, detail="Member not found")
 
+    target_user = db.get(User, target.user_id)
     db.delete(target)
     db.commit()
+
+    try:
+        _run_async(
+            revoke_member_drive_permission(
+                db=db,
+                org=org,
+                member_email=target_user.email if target_user else None,
+                preferred_user_ids=[org.owner_id, user.id],
+            )
+        )
+    except Exception as exc:
+        logger.warning("Failed to revoke Drive access for removed member %s: %s", target.user_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +601,36 @@ def accept_invitation(
         if invitation.accepted_at is None:
             invitation.accepted_at = datetime.now(timezone.utc)
             db.commit()
-        return {"ok": True, "status": "already_member", "role": existing.role}
+        org = db.get(Organization, org_id)
+        drive_sync = None
+        docs_sync = None
+        try:
+            drive_sync = _run_async(
+                sync_member_drive_permission(
+                    db=db,
+                    org=org,
+                    member_email=user.email,
+                    org_role=existing.role,
+                    preferred_user_ids=[org.owner_id if org else None, invitation.invited_by_id, user.id],
+                )
+            )
+            if org:
+                docs_sync = _sync_member_page_acl_backfill(
+                    db=db,
+                    org=org,
+                    member_email=user.email,
+                    org_role=existing.role,
+                    preferred_user_ids=[org.owner_id, invitation.invited_by_id, user.id],
+                )
+        except Exception as exc:
+            logger.warning("Failed to sync Drive permission for existing member %s: %s", user.id, exc)
+        return {
+            "ok": True,
+            "status": "already_member",
+            "role": existing.role,
+            "drive_sync": drive_sync,
+            "docs_sync": docs_sync,
+        }
 
     if invitation.accepted_at is not None:
         raise HTTPException(status_code=409, detail="Invitation already accepted")
@@ -507,9 +648,34 @@ def accept_invitation(
     db.commit()
 
     org = db.get(Organization, org_id)
+    drive_sync = None
+    docs_sync = None
+    try:
+        drive_sync = _run_async(
+            sync_member_drive_permission(
+                db=db,
+                org=org,
+                member_email=user.email,
+                org_role=invitation.role,
+                preferred_user_ids=[org.owner_id if org else None, invitation.invited_by_id, user.id],
+            )
+        )
+        if org:
+            docs_sync = _sync_member_page_acl_backfill(
+                db=db,
+                org=org,
+                member_email=user.email,
+                org_role=invitation.role,
+                preferred_user_ids=[org.owner_id, invitation.invited_by_id, user.id],
+            )
+    except Exception as exc:
+        logger.warning("Failed to sync Drive permission for accepted invitation %s: %s", invitation.id, exc)
+
     return {
         "ok": True,
         "status": "accepted",
         "role": invitation.role,
         "organization": {"id": org_id, "name": org.name if org else None, "slug": org.slug if org else None},
+        "drive_sync": drive_sync,
+        "docs_sync": docs_sync,
     }

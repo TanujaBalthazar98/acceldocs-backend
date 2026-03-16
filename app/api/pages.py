@@ -5,7 +5,6 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Header
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -14,17 +13,14 @@ from sqlalchemy.orm import Session
 
 from app.api.drive import _create_drive_doc, _trash_drive_item, _move_drive_item, get_drive_credentials as _get_drive_creds_drive
 from app.auth.routes import get_current_user
-from app.config import settings
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
-from app.models import GoogleToken, Organization, OrgRole, Page, PageRedirect, Section, User
-from app.services.encryption import get_encryption_service
+from app.models import Organization, OrgRole, Page, PageRedirect, Section, User
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
-GOOGLE_TOKEN_REFRESH_URL = "https://oauth2.googleapis.com/token"
 
 # Strip leading numeric sort-prefixes from Drive doc names ("01 ", "2. ")
 _NUM_PREFIX = re.compile(r"^\d+[\.\s]+")
@@ -79,35 +75,8 @@ def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def _get_drive_credentials(user: User, db: Session, org_id: int) -> Credentials:
-    """Return valid Google Credentials for user, refreshing stored token if needed."""
-    google_token = db.query(GoogleToken).filter(
-        GoogleToken.user_id == user.id,
-        GoogleToken.organization_id == org_id,
-    ).first()
-    if not google_token:
-        raise HTTPException(status_code=401, detail="No Google Drive credentials. Please reconnect.")
-
-    enc = get_encryption_service()
-    try:
-        refresh_token = enc.decrypt(google_token.encrypted_refresh_token)
-    except Exception:
-        raise HTTPException(status_code=401, detail="Failed to decrypt Drive credentials")
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(GOOGLE_TOKEN_REFRESH_URL, data={
-            "client_id": settings.google_client_id,
-            "client_secret": settings.google_client_secret,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        })
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Failed to refresh Google token. Please reconnect.")
-
-    access_token = resp.json().get("access_token")
-    google_token.last_refreshed_at = datetime.now(timezone.utc)
-    db.commit()
-    return Credentials(token=access_token)
+    """Shared credential lookup with workspace fallback logic."""
+    return await _get_drive_creds_drive(user, org_id, db)
 
 
 async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str | None, str | None]:

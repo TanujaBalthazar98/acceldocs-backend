@@ -28,6 +28,7 @@ from app.database import get_db
 from app.lib.slugify import to_slug as slugify
 from app.models import GoogleToken, OrgRole, Organization, Page, Section, User
 from app.services.encryption import get_encryption_service
+from app.services.drive import google_drive_handler
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -56,15 +57,47 @@ _NUM_PREFIX = re.compile(r"^\d+[\.\s]+")
 # ---------------------------------------------------------------------------
 
 async def get_drive_credentials(user: User, org_id: int, db: Session) -> Credentials:
-    """Return fresh Google Credentials for user by refreshing stored token."""
-    google_token = db.query(GoogleToken).filter(
-        GoogleToken.user_id == user.id,
-        GoogleToken.organization_id == org_id,
-    ).first()
+    """Return fresh Google Credentials for org operations.
+
+    Resolution order:
+    1. Current member's token for this org.
+    2. Current member's latest token from any org (multi-workspace login).
+    3. Owner/admin token for this org.
+    4. Owner/admin latest token from any org.
+    """
+
+    def _latest_token_for_user(user_id: int, preferred_org_id: int | None = None) -> GoogleToken | None:
+        query = db.query(GoogleToken).filter(GoogleToken.user_id == user_id)
+        if preferred_org_id is not None:
+            token = (
+                query.filter(GoogleToken.organization_id == preferred_org_id)
+                .order_by(GoogleToken.updated_at.desc(), GoogleToken.id.desc())
+                .first()
+            )
+            if token:
+                return token
+        return query.order_by(GoogleToken.updated_at.desc(), GoogleToken.id.desc()).first()
+
+    google_token = _latest_token_for_user(user.id, org_id)
+    if not google_token:
+        privileged_roles = (
+            db.query(OrgRole)
+            .filter(
+                OrgRole.organization_id == org_id,
+                OrgRole.role.in_(("owner", "admin")),
+            )
+            .order_by(OrgRole.created_at.asc(), OrgRole.id.asc())
+            .all()
+        )
+        for role in privileged_roles:
+            google_token = _latest_token_for_user(role.user_id, org_id)
+            if google_token:
+                break
+
     if not google_token:
         raise HTTPException(
             status_code=401,
-            detail="No Google Drive credentials found. Please reconnect your account.",
+            detail="No Google Drive credentials found for this workspace. Ask owner/admin to reconnect Drive.",
         )
 
     enc = get_encryption_service()
@@ -88,6 +121,11 @@ async def get_drive_credentials(user: User, org_id: int, db: Session) -> Credent
         )
 
     access_token = resp.json().get("access_token")
+    if not access_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Google token refresh did not return an access token. Please reconnect Drive.",
+        )
     google_token.last_refreshed_at = datetime.now(timezone.utc)
     db.commit()
     return Credentials(token=access_token)
@@ -113,6 +151,10 @@ class ScanRequest(BaseModel):
     folder_id: str
     parent_section_id: int | None = None
     target_type: Literal["product", "version", "tab", "section"] | None = None
+
+
+class EnsureDocAccessRequest(BaseModel):
+    doc_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -427,10 +469,14 @@ def drive_status(
     org_role = _resolve_org_role(user, db, x_org_id)
 
     org = db.get(Organization, org_role.organization_id)
-    token = db.query(GoogleToken).filter(
-        GoogleToken.user_id == user.id,
-        GoogleToken.organization_id == org_role.organization_id,
-    ).first()
+    # "connected" is workspace-level availability, not just the current user's token row.
+    token = (
+        db.query(GoogleToken)
+        .join(OrgRole, OrgRole.user_id == GoogleToken.user_id)
+        .filter(OrgRole.organization_id == org_role.organization_id)
+        .order_by(GoogleToken.updated_at.desc(), GoogleToken.id.desc())
+        .first()
+    )
     return {
         "connected": token is not None,
         "drive_folder_id": org.drive_folder_id if org else None,
@@ -438,6 +484,34 @@ def drive_status(
             token.last_refreshed_at.isoformat() if token and token.last_refreshed_at else None
         ),
     }
+
+
+@router.post("/ensure-doc-access")
+async def ensure_doc_access(
+    body: EnsureDocAccessRequest,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Ensure current member can open a Google Doc source file.
+
+    Uses the shared ACL sync handler and returns the Google Docs edit URL.
+    """
+    if not body.doc_id.strip():
+        raise HTTPException(status_code=400, detail="Document ID required")
+
+    result = await google_drive_handler(
+        body={
+            "action": "ensure_doc_access",
+            "docId": body.doc_id,
+            "_x_org_id": x_org_id,
+        },
+        db=db,
+        user=user,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=403, detail=result.get("error") or "Unable to grant Google Docs access")
+    return result
 
 
 @router.post("/scan")

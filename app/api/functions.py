@@ -29,6 +29,10 @@ async def invoke_function(
     except Exception:
         body = {}
 
+    selected_org_id = request.headers.get("x-org-id")
+    if selected_org_id and isinstance(body, dict):
+        body["_x_org_id"] = selected_org_id
+
     # Extract Google access token from header (for Drive operations)
     google_token = request.headers.get("x-google-token")
     if google_token and function_name in (

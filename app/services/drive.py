@@ -33,7 +33,12 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from sqlalchemy.orm import Session
 
-from app.models import Document, GoogleToken, OrgRole, Organization, User
+from app.models import Document, GoogleToken, OrgRole, Organization, Page, User
+from app.services.drive_acl import (
+    sync_member_drive_file_permission,
+    sync_member_drive_permission,
+    sync_org_drive_permissions,
+)
 from app.services.encryption import get_encryption_service
 
 logger = logging.getLogger(__name__)
@@ -637,6 +642,104 @@ async def google_drive_handler(body: dict, db: Session, user: User | None) -> di
             return {"ok": False, "error": "Document ID required"}
         return await service.get_doc_content(doc_id)
 
+    elif action == "ensure_doc_access":
+        doc_id = (body.get("docId") or body.get("googleDocId") or body.get("google_doc_id") or "").strip()
+        if not doc_id:
+            return {"ok": False, "error": "Document ID required"}
+
+        requested_org_id = _safe_int(
+            body.get("_x_org_id") or body.get("organizationId") or body.get("organization_id")
+        )
+        memberships = db.query(OrgRole).filter(OrgRole.user_id == user.id).all()
+        if not memberships:
+            return {"ok": False, "error": "No organization membership found"}
+
+        membership_by_org: dict[int, OrgRole] = {m.organization_id: m for m in memberships}
+        member_org_ids = list(membership_by_org.keys())
+
+        page_for_requested_org = None
+        requested_membership = membership_by_org.get(requested_org_id) if requested_org_id is not None else None
+        if requested_membership:
+            page_for_requested_org = (
+                db.query(Page)
+                .filter(Page.organization_id == requested_membership.organization_id, Page.google_doc_id == doc_id)
+                .first()
+            )
+
+        page_any_org = (
+            db.query(Page)
+            .filter(Page.google_doc_id == doc_id, Page.organization_id.in_(member_org_ids))
+            .first()
+        )
+
+        membership: OrgRole | None = None
+        # Prefer explicitly selected workspace if it contains this doc.
+        if requested_membership and page_for_requested_org:
+            membership = requested_membership
+        # Otherwise prefer the workspace that actually owns this doc.
+        elif page_any_org and page_any_org.organization_id in membership_by_org:
+            membership = membership_by_org[page_any_org.organization_id]
+        # If selected workspace is valid but this doc is not indexed there, still
+        # try selected workspace before falling back to first membership.
+        elif requested_membership:
+            membership = requested_membership
+
+        # Final fallback to first membership so we can still attempt ACL sync.
+        if not membership:
+            membership = memberships[0]
+
+        org = db.get(Organization, membership.organization_id)
+        if not org:
+            return {"ok": False, "error": "Organization not found"}
+
+        page = (
+            db.query(Page)
+            .filter(
+                Page.organization_id == org.id,
+                Page.google_doc_id == doc_id,
+            )
+            .first()
+        )
+        doc_row = db.query(Document.owner_id).filter(Document.google_doc_id == doc_id).first()
+        doc_owner_id = int(doc_row[0]) if doc_row and doc_row[0] is not None else None
+
+        preferred_user_ids: list[int] = []
+        for candidate_id in (page.owner_id if page else None, doc_owner_id, org.owner_id, user.id):
+            if candidate_id is None:
+                continue
+            value = int(candidate_id)
+            if value in preferred_user_ids:
+                continue
+            preferred_user_ids.append(value)
+
+        root_sync = await sync_member_drive_permission(
+            db=db,
+            org=org,
+            member_email=user.email,
+            org_role=membership.role,
+            preferred_user_ids=preferred_user_ids,
+        )
+        file_sync = await sync_member_drive_file_permission(
+            db=db,
+            org=org,
+            member_email=user.email,
+            org_role=membership.role,
+            drive_file_id=doc_id,
+            preferred_user_ids=preferred_user_ids,
+        )
+        ok = bool(root_sync.get("ok") or file_sync.get("ok"))
+
+        return {
+            "ok": ok,
+            "url": f"https://docs.google.com/document/d/{doc_id}/edit",
+            "orgId": org.id,
+            "role": membership.role,
+            "pageId": page.id if page else None,
+            "rootSync": root_sync,
+            "fileSync": file_sync,
+            "error": None if ok else "Unable to grant Google Docs access automatically",
+        }
+
     elif action == "sync_doc_content":
         doc_id = body.get("docId") or body.get("googleDocId") or body.get("google_doc_id")
         document_db_id = body.get("documentId") or body.get("document_id")
@@ -1089,8 +1192,24 @@ async def sync_drive_permissions(body: dict, db: Session, user: User | None) -> 
     if not user:
         return {"ok": False, "error": "Authentication required"}
 
-    # TODO: Implement permissions sync
-    return {
-        "ok": False,
-        "error": "Not yet implemented"
-    }
+    org_id = _safe_int(body.get("organizationId") or body.get("organization_id"))
+
+    role_query = db.query(OrgRole).filter(OrgRole.user_id == user.id)
+    if org_id is not None:
+        role_query = role_query.filter(OrgRole.organization_id == org_id)
+    org_role = role_query.first()
+    if not org_role:
+        return {"ok": False, "error": "No organization membership found"}
+    if org_role.role not in ("owner", "admin"):
+        return {"ok": False, "error": "Owner/Admin role required"}
+
+    org = db.get(Organization, org_role.organization_id)
+    if not org:
+        return {"ok": False, "error": "Organization not found"}
+
+    result = await sync_org_drive_permissions(
+        db=db,
+        org=org,
+        preferred_user_ids=[org.owner_id, user.id],
+    )
+    return result

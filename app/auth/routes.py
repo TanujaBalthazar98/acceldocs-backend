@@ -16,6 +16,7 @@ from app.config import settings
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
 from app.models import GoogleToken, Organization, OrgRole, User
+from app.services.drive_acl import sync_member_drive_permission
 from app.services.encryption import get_encryption_service
 
 logger = logging.getLogger(__name__)
@@ -737,6 +738,31 @@ async def callback(
             logger.error(f"Failed to store refresh token: {e}")
             # Don't fail the auth flow if token storage fails
             db.rollback()
+
+    # Keep Drive ACL aligned with RBAC across all memberships so invited users
+    # can open docs even when they log into a different default workspace.
+    try:
+        memberships = db.query(OrgRole).filter(OrgRole.user_id == user.id).all()
+        for membership in memberships:
+            member_org = db.get(Organization, membership.organization_id)
+            if not member_org or not member_org.drive_folder_id:
+                continue
+            sync_result = await sync_member_drive_permission(
+                db=db,
+                org=member_org,
+                member_email=user.email,
+                org_role=membership.role,
+                preferred_user_ids=[member_org.owner_id, user.id],
+            )
+            if not sync_result.get("ok"):
+                logger.warning(
+                    "Drive ACL sync after login was not fully successful for %s in org %s: %s",
+                    user.email,
+                    membership.organization_id,
+                    sync_result,
+                )
+    except Exception as exc:
+        logger.warning("Drive ACL sync after login failed for %s: %s", user.email, exc)
 
     # Create JWT session token
     jwt_token = _create_jwt(user.id, user.email)
