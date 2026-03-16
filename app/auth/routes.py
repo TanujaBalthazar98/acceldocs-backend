@@ -494,10 +494,10 @@ async def callback(
         raise HTTPException(status_code=500, detail=f"Token exchange request failed: {e}")
 
     if token_resp.status_code != 200:
-        logger.error("Token exchange failed (status %s): %s", token_resp.status_code, token_resp.text)
+        logger.error("Token exchange failed (status %s)", token_resp.status_code)
         raise HTTPException(
             status_code=400,
-            detail=f"Failed to exchange authorization code (redirect_uri={resolved_redirect_uri}): {token_resp.text}",
+            detail="Failed to exchange authorization code. Please try signing in again.",
         )
 
     tokens = token_resp.json()

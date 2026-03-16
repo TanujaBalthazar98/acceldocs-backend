@@ -67,3 +67,13 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Fail loudly if running with the default secret key in a production-like environment
+# (i.e. when DATABASE_URL points to a real database, not local SQLite)
+if settings.secret_key == "change-me-in-production" and not settings.is_sqlite:
+    import warnings
+    warnings.warn(
+        "CRITICAL: secret_key is still set to the default value. "
+        "Set the SECRET_KEY environment variable to a secure random string.",
+        stacklevel=1,
+    )

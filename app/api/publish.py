@@ -396,8 +396,11 @@ async def publish_mkdocs(
 
 
 @router.get("/publish/debug")
-async def publish_debug():
-    """Quick debug endpoint — show what's in the docs-site repo."""
+async def publish_debug(user: User = Depends(get_current_user_optional)):
+    """Debug endpoint — show what's in the docs-site repo. Requires auth."""
+    if not user:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Authentication required")
     import subprocess as _sp
     from pathlib import Path as _P
 
