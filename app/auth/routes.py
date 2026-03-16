@@ -145,6 +145,17 @@ def _extract_org_domain(email: str | None) -> str | None:
     return domain
 
 
+def _unique_org_slug(db: Session, name: str | None) -> str:
+    """Generate an organization slug that is unique across organizations."""
+    base = slugify(name or "workspace") or "workspace"
+    slug = base
+    suffix = 2
+    while db.query(Organization.id).filter(Organization.slug == slug).first():
+        slug = f"{base}-{suffix}"
+        suffix += 1
+    return slug
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -538,9 +549,6 @@ async def callback(
         db.flush()
         logger.info(f"Created new user {email} with role {role}")
 
-    db.commit()
-    db.refresh(user)
-
     # Handle organization assignment based on signup info
     org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
 
@@ -598,7 +606,7 @@ async def callback(
 
             organization = Organization(
                 name=org_name,
-                slug=slugify(org_name) if org_name else None,
+                slug=_unique_org_slug(db, org_name),
                 drive_folder_id=drive_folder_id,
                 domain=claimed_domain,
                 owner_id=user.id
@@ -617,39 +625,80 @@ async def callback(
 
     else:
         # No signup info — auto-join by email domain, or create default workspace
-        inferred_domain = _extract_org_domain(email)
-        existing_org = None
-        if inferred_domain:
-            existing_org = db.query(Organization).filter(Organization.domain == inferred_domain).first()
-
-        if existing_org:
-            # First member of an ownerless org becomes owner;
-            # otherwise auto-joined teammates get editor role.
-            existing_count = db.query(OrgRole).filter(OrgRole.organization_id == existing_org.id).count()
-            auto_role = "owner" if existing_count == 0 else "editor"
-            org_role = OrgRole(organization_id=existing_org.id, user_id=user.id, role=auto_role)
-            db.add(org_role)
-            db.flush()
-            organization_id = existing_org.id
-            logger.info(f"Auto-joined {user.email} to organization {existing_org.name} via domain {inferred_domain} as {auto_role}")
+        # Self-heal orphan owners from earlier partial signup states.
+        owned_org = (
+            db.query(Organization)
+            .filter(Organization.owner_id == user.id)
+            .order_by(Organization.id.asc())
+            .first()
+        )
+        if owned_org:
+            existing_owned_role = (
+                db.query(OrgRole)
+                .filter(OrgRole.organization_id == owned_org.id, OrgRole.user_id == user.id)
+                .first()
+            )
+            if not existing_owned_role:
+                db.add(OrgRole(organization_id=owned_org.id, user_id=user.id, role="owner"))
+                db.flush()
+                logger.info(
+                    "Restored missing owner membership for user %s in organization %s",
+                    user.email,
+                    owned_org.name,
+                )
+            organization_id = owned_org.id
+            org_role = (
+                db.query(OrgRole)
+                .filter(OrgRole.organization_id == owned_org.id, OrgRole.user_id == user.id)
+                .first()
+            )
+            logger.info("Using owned organization %s for user %s", owned_org.name, user.email)
         else:
-            # Create default workspace — dashboard onboarding will guide setup
-            default_name = f"{user.name}'s Workspace" if user.name else f"{user.email}'s Workspace"
-            claimed_domain = None
+            inferred_domain = _extract_org_domain(email)
+            existing_org = None
             if inferred_domain:
-                domain_in_use = db.query(Organization).filter(Organization.domain == inferred_domain).first()
-                if not domain_in_use:
-                    claimed_domain = inferred_domain
+                existing_org = db.query(Organization).filter(Organization.domain == inferred_domain).first()
 
-            organization = Organization(name=default_name, slug=slugify(default_name), domain=claimed_domain, owner_id=user.id)
-            db.add(organization)
-            db.flush()
+            if existing_org:
+                # First member of an ownerless org becomes owner;
+                # otherwise auto-joined teammates get editor role.
+                existing_count = db.query(OrgRole).filter(OrgRole.organization_id == existing_org.id).count()
+                auto_role = "owner" if existing_count == 0 else "editor"
+                org_role = OrgRole(organization_id=existing_org.id, user_id=user.id, role=auto_role)
+                db.add(org_role)
+                db.flush()
+                organization_id = existing_org.id
+                logger.info(
+                    f"Auto-joined {user.email} to organization {existing_org.name} via domain {inferred_domain} as {auto_role}"
+                )
+            else:
+                # Create default workspace — dashboard onboarding will guide setup
+                default_name = f"{user.name}'s Workspace" if user.name else f"{user.email}'s Workspace"
+                claimed_domain = None
+                if inferred_domain:
+                    domain_in_use = db.query(Organization).filter(Organization.domain == inferred_domain).first()
+                    if not domain_in_use:
+                        claimed_domain = inferred_domain
 
-            org_role = OrgRole(organization_id=organization.id, user_id=user.id, role="owner")
-            db.add(org_role)
-            db.flush()
-            organization_id = organization.id
-            logger.info(f"Created default workspace '{default_name}' for user {user.email}")
+                organization = Organization(
+                    name=default_name,
+                    slug=_unique_org_slug(db, default_name),
+                    domain=claimed_domain,
+                    owner_id=user.id,
+                )
+                db.add(organization)
+                db.flush()
+
+                org_role = OrgRole(organization_id=organization.id, user_id=user.id, role="owner")
+                db.add(org_role)
+                db.flush()
+                organization_id = organization.id
+                logger.info(f"Created default workspace '{default_name}' for user {user.email}")
+
+    # Persist user + org membership atomically before optional token storage.
+    # This avoids partial "user-only" records when org assignment fails.
+    db.commit()
+    db.refresh(user)
 
     # Store encrypted refresh token if provided
     if refresh_token:
