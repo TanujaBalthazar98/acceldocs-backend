@@ -44,7 +44,7 @@ async def invoke_function(
         body["_google_access_token"] = google_token
 
     # Import service modules (lazy import to avoid circular dependencies)
-    from app.services import workspace, projects, documents, drive, members, external_access
+    from app.services import workspace, projects, documents, drive, members, external_access, agent
     from app.api import approvals as approvals_mod
 
     # Function dispatch table
@@ -111,8 +111,13 @@ async def invoke_function(
         "normalize-structure": projects.normalize_structure,
         "repair-hierarchy": projects.repair_hierarchy,
 
-        # AI (1 function)
-        "docs-ai-assistant": documents.docs_ai_assistant,
+        # AI agent (6 functions)
+        "jira-connect": agent.jira_connect,
+        "jira-disconnect": agent.jira_disconnect,
+        "jira-status": agent.jira_status,
+        "jira-get-ticket": agent.jira_get_ticket,
+        "agent-generate-doc": agent.agent_generate_doc,
+        "create-template-page": agent.create_template_page,
 
         # Approvals (5 functions)
         "approvals-pending": approvals_mod.approvals_pending_fn,
