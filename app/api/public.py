@@ -2463,3 +2463,49 @@ async def external_docs_page_comments(
         access_scope="external",
         audience="external",
     )
+
+
+# ---------------------------------------------------------------------------
+# XML Sitemap — public docs only
+# ---------------------------------------------------------------------------
+
+@router.get("/docs/{org_slug}/sitemap.xml")
+async def public_docs_sitemap(org_slug: str, request: Request):
+    """Return an XML sitemap for all published public pages in this org."""
+    from fastapi.responses import Response as FastResponse
+    from html import escape as _escape
+
+    with SessionLocal() as db:
+        org = db.query(Organization).filter(Organization.slug == org_slug).first()
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
+        pages = (
+            db.query(Page)
+            .filter(
+                Page.organization_id == org.id,
+                Page.is_published == True,  # noqa: E712
+            )
+            .order_by(Page.updated_at.desc())
+            .all()
+        )
+
+    base = str(request.base_url).rstrip("/")
+    docs_base = f"{base}/docs/{org_slug}"
+
+    urls = [f"  <url><loc>{docs_base}</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>"]
+    for page in pages:
+        if not page.slug:
+            continue
+        loc = f"{docs_base}/{_escape(page.slug)}"
+        lastmod = ""
+        if page.updated_at:
+            lastmod = f"<lastmod>{page.updated_at.strftime('%Y-%m-%d')}</lastmod>"
+        urls.append(f"  <url><loc>{loc}</loc>{lastmod}<changefreq>weekly</changefreq><priority>0.8</priority></url>")
+
+    xml = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+    xml += "\n".join(urls)
+    xml += "\n</urlset>"
+
+    return FastResponse(content=xml, media_type="application/xml")
