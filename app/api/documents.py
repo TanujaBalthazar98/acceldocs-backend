@@ -1,8 +1,11 @@
 """Document CRUD API routes."""
 
+import logging
 import markdown
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -325,7 +328,7 @@ async def bulk_action(
             raise HTTPException(status_code=501, detail="Resync action not yet implemented")
 
         else:
-            raise HTTPException(status_code=400, detail=f"Unknown action: {body.action}")
+            raise HTTPException(status_code=400, detail="Unknown action. Supported: archive, restore, delete, resync")
 
         db.commit()
 
@@ -342,7 +345,8 @@ async def bulk_action(
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Bulk operation failed: {str(e)}")
+        logger.error("Bulk operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Bulk operation failed. Please try again.")
 
 
 @router.get("/{doc_id}/raw")

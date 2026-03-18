@@ -3,7 +3,7 @@
 import secrets
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
-from app.models import User, Invitation, OrgRole, ProjectMember, JoinRequest
+from app.models import User, Invitation, OrgRole, ProjectMember, JoinRequest, Organization
 
 
 def _int(val) -> int | None:
@@ -16,14 +16,44 @@ def _int(val) -> int | None:
         return None
 
 
+def _selected_org_id(body: dict) -> int | None:
+    """Read selected organization id from body payload or forwarded org header."""
+    return (
+        _int(body.get("_x_org_id"))
+        or _int(body.get("organizationId"))
+        or _int(body.get("organization_id"))
+        or _int(body.get("orgId"))
+        or _int(body.get("org_id"))
+    )
+
+
+def _resolve_org_role(
+    db: Session,
+    user: User,
+    body: dict,
+    *,
+    required_roles: list[str] | None = None,
+) -> OrgRole | None:
+    """Resolve caller org membership, honoring selected workspace when provided."""
+    query = db.query(OrgRole).filter(OrgRole.user_id == user.id)
+    selected_org_id = _selected_org_id(body)
+    if selected_org_id:
+        query = query.filter(OrgRole.organization_id == selected_org_id)
+    org_role = query.first()
+    if not org_role:
+        return None
+    if required_roles and org_role.role not in required_roles:
+        return None
+    return org_role
+
+
 async def create_invitation(body: dict, db: Session, user: User | None) -> dict:
     """Create organization invitation."""
     if not user:
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        # Find user's organization
-        org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+        org_role = _resolve_org_role(db, user, body, required_roles=["owner", "admin"])
         if not org_role or org_role.role not in ["owner", "admin"]:
             return {"ok": False, "error": "Insufficient permissions"}
 
@@ -119,7 +149,7 @@ async def update_member_role(body: dict, db: Session, user: User | None) -> dict
             return {"ok": False, "error": "Member ID and role required"}
 
         # Check if requester is owner/admin
-        requester_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+        requester_role = _resolve_org_role(db, user, body)
         if not requester_role:
             return {"ok": False, "error": "Insufficient permissions"}
 
@@ -136,7 +166,10 @@ async def update_member_role(body: dict, db: Session, user: User | None) -> dict
             return {"ok": False, "error": "Insufficient permissions"}
 
         # Update member role
-        member_role = db.query(OrgRole).filter(OrgRole.user_id == member_id).first()
+        member_role = db.query(OrgRole).filter(
+            OrgRole.user_id == member_id,
+            OrgRole.organization_id == requester_role.organization_id,
+        ).first()
         if not member_role:
             return {"ok": False, "error": "Member not found"}
 
@@ -217,26 +250,26 @@ async def list_join_requests(body: dict, db: Session, user: User | None) -> dict
         return {"ok": False, "error": "Authentication required"}
 
     try:
-        # Find user's organization
-        org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+        org_role = _resolve_org_role(db, user, body, required_roles=["owner", "admin"])
         if not org_role:
-            return {"ok": True, "requests": []}
+            return {"ok": False, "error": "Insufficient permissions"}
 
         requests = db.query(JoinRequest).filter(
             JoinRequest.organization_id == org_role.organization_id,
             JoinRequest.status == "pending"
-        ).all()
+        ).order_by(JoinRequest.created_at.desc()).all()
 
         request_list = []
         for req in requests:
             request_user = db.query(User).filter(User.id == req.user_id).first()
             request_list.append({
-                "id": req.id,
+                "id": str(req.id),
                 "user_id": req.user_id,
                 "user_email": request_user.email if request_user else None,
                 "user_name": request_user.name if request_user else None,
                 "message": req.message,
                 "status": req.status,
+                "requested_at": req.created_at.isoformat() if req.created_at else None,
                 "created_at": req.created_at.isoformat() if req.created_at else None,
             })
 
@@ -255,6 +288,18 @@ async def create_join_request(body: dict, db: Session, user: User | None) -> dic
         org_id = _int(body.get("organizationId"))
         if not org_id:
             return {"ok": False, "error": "Organization ID required"}
+
+        organization = db.query(Organization).filter(Organization.id == org_id).first()
+        if not organization:
+            return {"ok": False, "error": "Organization not found"}
+
+        # Domain-claimed workspaces only allow same-domain requests
+        org_domain = (organization.domain or "").strip().lower()
+        if org_domain:
+            user_email = (user.email or "").strip().lower()
+            email_domain = user_email.split("@", 1)[1] if "@" in user_email else ""
+            if email_domain != org_domain:
+                return {"ok": False, "error": f"Only @{org_domain} addresses can request access"}
 
         # Don't allow if already a member
         existing_role = db.query(OrgRole).filter(
@@ -282,7 +327,15 @@ async def create_join_request(body: dict, db: Session, user: User | None) -> dic
         db.add(req)
         db.commit()
 
-        return {"ok": True, "request": {"id": req.id, "status": req.status}}
+        return {
+            "ok": True,
+            "request": {
+                "id": str(req.id),
+                "status": req.status,
+                "organization_id": req.organization_id,
+                "created_at": req.created_at.isoformat() if req.created_at else None,
+            },
+        }
 
     except Exception as e:
         db.rollback()
@@ -300,7 +353,7 @@ async def approve_join_request(body: dict, db: Session, user: User | None) -> di
             return {"ok": False, "error": "Request ID required"}
 
         # Requester must be owner/admin
-        requester_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+        requester_role = _resolve_org_role(db, user, body, required_roles=["owner", "admin"])
         if not requester_role or requester_role.role not in ["owner", "admin"]:
             return {"ok": False, "error": "Insufficient permissions"}
 
@@ -313,7 +366,17 @@ async def approve_join_request(body: dict, db: Session, user: User | None) -> di
             return {"ok": False, "error": f"Request already {req.status}"}
 
         # Add user to org as viewer
-        role = body.get("role", "viewer")
+        role = str(body.get("role") or "viewer").strip().lower()
+        if role not in {"viewer", "editor", "reviewer", "admin"}:
+            role = "viewer"
+        existing_membership = db.query(OrgRole).filter(
+            OrgRole.organization_id == req.organization_id,
+            OrgRole.user_id == req.user_id,
+        ).first()
+        if existing_membership:
+            req.status = "approved"
+            db.commit()
+            return {"ok": True, "already_member": True}
         org_role = OrgRole(
             organization_id=req.organization_id,
             user_id=req.user_id,
@@ -340,7 +403,7 @@ async def reject_join_request(body: dict, db: Session, user: User | None) -> dic
         if not request_id:
             return {"ok": False, "error": "Request ID required"}
 
-        requester_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+        requester_role = _resolve_org_role(db, user, body, required_roles=["owner", "admin"])
         if not requester_role or requester_role.role not in ["owner", "admin"]:
             return {"ok": False, "error": "Insufficient permissions"}
 

@@ -9,6 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import Base, engine
 from app.services.encryption import init_encryption_service
+from app.middleware.security import (
+    SecurityHeadersMiddleware,
+    CSRFProtectionMiddleware,
+    RATE_LIMITING_ACTIVE,
+    limiter,
+    rate_limit_exceeded_handler,
+    RateLimitExceeded,
+    SlowAPIMiddleware,
+)
 
 # New clean-arch routers
 from app.api.health import router as health_router
@@ -19,6 +28,7 @@ from app.api.drive import router as drive_router
 from app.api.public import router as public_router
 from app.api.external_access import router as external_access_router
 from app.api.functions import router as functions_router
+from app.api.agent_chat import router as agent_chat_router
 from app.auth.routes import router as auth_router
 
 logging.basicConfig(
@@ -85,6 +95,14 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Org-Id", "X-Requested-With", "Accept"],
 )
 
+# Security middleware — headers, CSRF, rate limiting
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(CSRFProtectionMiddleware, allowed_origins=settings.allowed_origins_list)
+if RATE_LIMITING_ACTIVE:
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
+
 # Public docs site — no auth prefix, matched first
 app.include_router(public_router)
 
@@ -97,3 +115,4 @@ app.include_router(pages_router, prefix="/api/pages", tags=["pages"])
 app.include_router(drive_router, prefix="/api/drive", tags=["drive"])
 app.include_router(external_access_router, prefix="/api/external-access", tags=["external-access"])
 app.include_router(functions_router, tags=["functions"])
+app.include_router(agent_chat_router, tags=["agent-chat"])

@@ -390,7 +390,8 @@ async def create_section(
         except Exception as exc:
             if strict_clone_mode:
                 db.rollback()
-                raise HTTPException(status_code=400, detail=f"Drive setup required for version cloning: {exc}") from exc
+                logger.error("Drive setup required for version cloning: %s", exc)
+                raise HTTPException(status_code=400, detail="Drive setup required for version cloning. Please check your Drive configuration.") from exc
             logger.warning("Could not create Drive folder for section %d: %s", section.id, exc)
 
     cloned_sections = 0

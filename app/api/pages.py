@@ -15,7 +15,7 @@ from app.api.drive import _create_drive_doc, _trash_drive_item, _move_drive_item
 from app.auth.routes import get_current_user
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
-from app.models import Organization, OrgRole, Page, PageRedirect, Section, User
+from app.models import Approval, Organization, OrgRole, Page, PageRedirect, Section, User
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -155,6 +155,13 @@ def _require_editor(user: User, db: Session, requested_org_id: int | None = None
     role = _resolve_org_role(user, db, requested_org_id)
     if not role or role.role not in ("owner", "admin", "editor"):
         raise HTTPException(status_code=403, detail="Editor role required")
+    return role.organization_id
+
+
+def _require_reviewer(user: User, db: Session, requested_org_id: int | None = None) -> int:
+    role = _resolve_org_role(user, db, requested_org_id)
+    if not role or role.role not in ("owner", "admin", "reviewer"):
+        raise HTTPException(status_code=403, detail="Reviewer role required")
     return role.organization_id
 
 
@@ -642,3 +649,95 @@ def unpublish_page(
     page.status = "draft"
     db.commit()
     return {"ok": True}
+
+
+@router.post("/{page_id}/submit-review")
+def submit_page_for_review(
+    page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Submit page for approval review."""
+    org_id = _require_editor(user, db, x_org_id)
+    page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    if page.section_id is None:
+        raise HTTPException(status_code=400, detail="Assign this page to a section before submitting for review.")
+    if not page.html_content:
+        raise HTTPException(status_code=400, detail="Page has no content. Sync first.")
+    if page.status == "review":
+        return {"ok": True, "page": _page_dict(page, include_html=True), "status": "already_in_review"}
+
+    page.status = "review"
+    # Record submission event so approval history and notifications can reflect
+    # the review request lifecycle (not just approve/reject decisions).
+    db.add(
+        Approval(
+            document_id=page.id,
+            entity_type="page",
+            user_id=user.id,
+            action="submit",
+            comment=None,
+        )
+    )
+    db.commit()
+    db.refresh(page)
+    logger.info("Submitted page %d '%s' for review", page.id, page.title)
+    return {"ok": True, "page": _page_dict(page, include_html=True), "status": "in_review"}
+
+
+@router.post("/{page_id}/approve")
+def approve_page(
+    page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Approve a page in review and publish current draft snapshot."""
+    org_id = _require_reviewer(user, db, x_org_id)
+    page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+    if page.status != "review":
+        raise HTTPException(status_code=409, detail=f"Page is not in review (status={page.status})")
+    if not page.html_content:
+        raise HTTPException(status_code=400, detail="Page has no content. Sync first.")
+
+    page.published_html = page.html_content
+    page.is_published = True
+    page.status = "published"
+
+    if page.section_id:
+        section = db.get(Section, page.section_id)
+        if section and not section.is_published:
+            section.is_published = True
+
+    db.commit()
+    db.refresh(page)
+    logger.info("Approved page %d '%s'", page.id, page.title)
+    return {"ok": True, "page": _page_dict(page, include_html=True)}
+
+
+@router.post("/{page_id}/reject")
+def reject_page(
+    page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Reject a page in review and return it to draft."""
+    org_id = _require_reviewer(user, db, x_org_id)
+    page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+    if page.status != "review":
+        raise HTTPException(status_code=409, detail=f"Page is not in review (status={page.status})")
+
+    page.status = "draft"
+    db.commit()
+    db.refresh(page)
+    logger.info("Rejected page %d '%s'", page.id, page.title)
+    return {"ok": True, "page": _page_dict(page, include_html=True)}

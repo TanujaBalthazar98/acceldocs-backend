@@ -12,7 +12,7 @@ from app.conversion.html_to_md import convert_html_to_markdown
 from app.database import get_db
 from app.ingestion.drive import _get_service, export_doc_as_html
 from app.middleware.auth import AuthUser, require_auth, require_role
-from app.models import Approval, Document, OrgRole, Project, User
+from app.models import Approval, Document, OrgRole, Page, Project, Section, User
 from app.publishing.git_publisher import promote_preview_to_production, publish_to_production, unpublish_from_production
 from app.services.documents import _resolve_publish_path, _set_branding_from_doc, _auto_deploy_if_public
 
@@ -21,6 +21,18 @@ router = APIRouter()
 
 import logging as _logging
 _log = _logging.getLogger(__name__)
+
+
+def _iso_utc(dt: datetime | None) -> str | None:
+    """Serialize datetimes with explicit UTC offset.
+
+    SQLite often returns naive datetimes even when timezone=True. Treat those
+    as UTC to avoid client-side relative-time skew.
+    """
+    if not dt:
+        return None
+    normalized = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return normalized.astimezone(timezone.utc).isoformat()
 
 
 async def _get_drive_service_for_doc(
@@ -104,6 +116,54 @@ def _get_user_project_ids(db: Session, user_id: int) -> list[int]:
     ]
 
 
+def _get_user_org_ids(db: Session, user_id: int) -> list[int]:
+    """Return all organization IDs the user is a member of."""
+    return [
+        r.organization_id
+        for r in db.query(OrgRole).filter(OrgRole.user_id == user_id).all()
+    ]
+
+
+def _get_user_org_role_map(db: Session, user_id: int, org_ids: list[int]) -> dict[int, str]:
+    """Return organization -> role mapping for a user within scoped org ids."""
+    if not org_ids:
+        return {}
+    rows = (
+        db.query(OrgRole)
+        .filter(OrgRole.user_id == user_id, OrgRole.organization_id.in_(org_ids))
+        .all()
+    )
+    return {row.organization_id: (row.role or "").lower() for row in rows}
+
+
+def _get_scoped_org_ids(db: Session, user_id: int, body: dict | None) -> list[int]:
+    """Resolve org scope from selected workspace header/body, with membership safety."""
+    user_org_ids = _get_user_org_ids(db, user_id)
+    if not user_org_ids:
+        return []
+
+    selected_org_raw = (body or {}).get("_x_org_id")
+    if selected_org_raw in (None, "", 0):
+        return user_org_ids
+
+    try:
+        selected_org_id = int(selected_org_raw)
+    except (TypeError, ValueError):
+        return []
+
+    return [selected_org_id] if selected_org_id in user_org_ids else []
+
+
+def _get_project_ids_for_org_ids(db: Session, org_ids: list[int]) -> list[int]:
+    """Return project ids for provided org ids."""
+    if not org_ids:
+        return []
+    return [
+        p.id
+        for p in db.query(Project).filter(Project.organization_id.in_(org_ids)).all()
+    ]
+
+
 @router.get("/pending", response_model=list)
 async def list_pending(
     current_user: AuthUser = Depends(require_auth),
@@ -163,10 +223,12 @@ async def list_history(
             "id": a.id,
             "document_id": a.document_id,
             "document_title": a.document.title if a.document else None,
+            "document_owner_id": a.document.owner_id if a.document else None,
+            "user_id": a.user_id,
             "user_name": a.user.name if a.user else "Unknown",
             "action": a.action,
             "comment": a.comment,
-            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "created_at": _iso_utc(a.created_at),
         }
         for a in rows
     ]
@@ -195,7 +257,7 @@ async def list_my_submissions(
             "status": d.status,
             "project_name": d.project_rel.name if d.project_rel else d.project,
             "project_id": d.project_id,
-            "updated_at": d.updated_at.isoformat() if d.updated_at else None,
+            "updated_at": _iso_utc(d.updated_at),
         }
         for d in docs
     ]
@@ -227,7 +289,7 @@ def _serialize_pending_doc(d: Document) -> dict:
         "slug": d.slug,
         "owner_id": d.owner_id,
         "owner_name": d.owner.name if d.owner else None,
-        "updated_at": d.updated_at.isoformat() if d.updated_at else None,
+        "updated_at": _iso_utc(d.updated_at),
     }
 
 
@@ -297,6 +359,7 @@ async def perform_action(
                 db.add(
                     Approval(
                         document_id=body.document_id,
+                        entity_type="document",
                         user_id=actor.id,
                         action="publish",
                         comment=f"Published commit {commit_sha[:8]}",
@@ -305,7 +368,8 @@ async def perform_action(
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Publish failed: {exc}") from exc
+            _log.error("Publish failed: %s", exc)
+            raise HTTPException(status_code=500, detail="Publish failed. Please try again.") from exc
     else:
         doc.status = "draft"
         doc.is_published = False
@@ -321,6 +385,7 @@ async def perform_action(
 
     approval = Approval(
         document_id=body.document_id,
+        entity_type="document",
         user_id=actor.id,
         action=body.action,
         comment=body.comment,
@@ -342,28 +407,51 @@ async def approvals_pending_fn(body: dict, db: Session, user: User | None) -> di
     """List pending review docs for the user's org."""
     if not user:
         return {"ok": False, "error": "Authentication required"}
-    project_ids = _get_user_project_ids(db, user.id)
-    docs = (
-        db.query(Document)
-        .options(joinedload(Document.owner), joinedload(Document.project_rel))
+    org_ids = _get_scoped_org_ids(db, user.id, body)
+    if not org_ids:
+        return {"ok": True, "pending": []}
+    role_map = _get_user_org_role_map(db, user.id, org_ids)
+    allowed_review_roles = {"owner", "admin", "reviewer"}
+    pages = (
+        db.query(Page)
+        .options(joinedload(Page.owner), joinedload(Page.section))
         .filter(
-            Document.status == "review",
-            Document.project_id.in_(project_ids),
+            Page.status == "review",
+            Page.organization_id.in_(org_ids),
         )
-        .order_by(Document.updated_at.desc())
+        .order_by(Page.updated_at.desc())
         .all()
     )
-    return {"ok": True, "pending": [_serialize_pending_doc(d) for d in docs]}
+    pending = [
+        {
+            "id": p.id,
+            "entity_type": "page",
+            "title": p.title,
+            "project": p.section.name if p.section else "General",
+            "project_id": p.section_id,
+            "project_name": p.section.name if p.section else None,
+            "version": "default",
+            "slug": p.slug,
+            "owner_id": p.owner_id,
+            "owner_name": p.owner.name if p.owner else None,
+            "updated_at": _iso_utc(p.updated_at),
+            "can_review": role_map.get(p.organization_id, "") in allowed_review_roles,
+        }
+        for p in pages
+    ]
+    return {"ok": True, "pending": pending}
 
 
 async def approvals_count_fn(body: dict, db: Session, user: User | None) -> dict:
     """Count pending review docs for the user's org."""
     if not user:
         return {"ok": False, "error": "Authentication required"}
-    project_ids = _get_user_project_ids(db, user.id)
+    org_ids = _get_scoped_org_ids(db, user.id, body)
+    if not org_ids:
+        return {"ok": True, "count": 0}
     count = (
-        db.query(Document)
-        .filter(Document.status == "review", Document.project_id.in_(project_ids))
+        db.query(Page)
+        .filter(Page.status == "review", Page.organization_id.in_(org_ids))
         .count()
     )
     return {"ok": True, "count": count}
@@ -373,30 +461,104 @@ async def approvals_history_fn(body: dict, db: Session, user: User | None) -> di
     """List recent approval history for the user's org."""
     if not user:
         return {"ok": False, "error": "Authentication required"}
-    project_ids = _get_user_project_ids(db, user.id)
+    org_ids = _get_scoped_org_ids(db, user.id, body)
+    if not org_ids:
+        return {"ok": True, "history": []}
+    project_ids = _get_project_ids_for_org_ids(db, org_ids)
+
     rows = (
         db.query(Approval)
-        .options(joinedload(Approval.document), joinedload(Approval.user))
-        .join(Document, Approval.document_id == Document.id)
-        .filter(Document.project_id.in_(project_ids))
+        .options(joinedload(Approval.user))
         .order_by(Approval.created_at.desc())
-        .limit(50)
+        .limit(200)
         .all()
     )
-    return {
-        "ok": True,
-        "history": [
+    if not rows:
+        return {"ok": True, "history": []}
+
+    # Keep entity type explicit to avoid page/document ID collision mismatches.
+    page_ids = {
+        a.document_id
+        for a in rows
+        if str(getattr(a, "entity_type", "") or "").lower() == "page"
+    }
+    doc_ids = {
+        a.document_id
+        for a in rows
+        if str(getattr(a, "entity_type", "") or "").lower() == "document"
+    }
+    unknown_ids = {
+        a.document_id
+        for a in rows
+        if str(getattr(a, "entity_type", "") or "").lower() not in {"page", "document"}
+    }
+    # Unknown legacy rows are resolved with page-first fallback below.
+    doc_lookup_ids = sorted(doc_ids | unknown_ids)
+    page_lookup_ids = sorted(page_ids | unknown_ids)
+
+    docs = []
+    if doc_lookup_ids:
+        docs = (
+            db.query(Document)
+            .options(joinedload(Document.owner))
+            .filter(Document.id.in_(doc_lookup_ids), Document.project_id.in_(project_ids))
+            .all()
+        )
+    pages = []
+    if page_lookup_ids:
+        pages = (
+            db.query(Page)
+            .options(joinedload(Page.owner), joinedload(Page.section))
+            .filter(Page.id.in_(page_lookup_ids), Page.organization_id.in_(org_ids))
+            .all()
+        )
+    docs_by_id = {d.id: d for d in docs}
+    pages_by_id = {p.id: p for p in pages}
+
+    history: list[dict] = []
+    for a in rows:
+        entity_type = str(getattr(a, "entity_type", "") or "").lower()
+        doc = None
+        page = None
+        if entity_type == "page":
+            page = pages_by_id.get(a.document_id)
+            if page is None:
+                doc = docs_by_id.get(a.document_id)
+        elif entity_type == "document":
+            doc = docs_by_id.get(a.document_id)
+            if doc is None:
+                page = pages_by_id.get(a.document_id)
+        else:
+            # Legacy rows without entity_type: prefer page resolution for current flow.
+            page = pages_by_id.get(a.document_id)
+            if page is None:
+                doc = docs_by_id.get(a.document_id)
+
+        if doc is None and page is None:
+            continue
+
+        title = doc.title if doc else page.title
+        owner_id = doc.owner_id if doc else page.owner_id
+        history.append(
             {
                 "id": a.id,
                 "document_id": a.document_id,
-                "document_title": a.document.title if a.document else None,
+                "entity_type": "document" if doc else "page",
+                "document_title": title,
+                "document_owner_id": owner_id,
+                "user_id": a.user_id,
                 "user_name": a.user.name if a.user else "Unknown",
                 "action": a.action,
                 "comment": a.comment,
-                "created_at": a.created_at.isoformat() if a.created_at else None,
+                "created_at": _iso_utc(a.created_at),
             }
-            for a in rows
-        ],
+        )
+        if len(history) >= 50:
+            break
+
+    return {
+        "ok": True,
+        "history": history,
     }
 
 
@@ -404,30 +566,80 @@ async def approvals_my_submissions_fn(body: dict, db: Session, user: User | None
     """List the current user's submitted docs with approval status."""
     if not user:
         return {"ok": False, "error": "Authentication required"}
-    docs = (
-        db.query(Document)
-        .options(joinedload(Document.project_rel))
+    org_ids = _get_scoped_org_ids(db, user.id, body)
+    if not org_ids:
+        return {"ok": True, "submissions": []}
+    pages = (
+        db.query(Page)
+        .options(joinedload(Page.section))
         .filter(
-            Document.owner_id == user.id,
-            Document.status.in_(["review", "approved", "rejected"]),
+            Page.owner_id == user.id,
+            Page.organization_id.in_(org_ids),
+            Page.status.in_(["review", "published"]),
         )
-        .order_by(Document.updated_at.desc())
+        .order_by(Page.updated_at.desc())
         .all()
     )
     return {
         "ok": True,
         "submissions": [
             {
-                "id": d.id,
-                "title": d.title,
-                "status": d.status,
-                "project_name": d.project_rel.name if d.project_rel else d.project,
-                "project_id": d.project_id,
-                "updated_at": d.updated_at.isoformat() if d.updated_at else None,
+                "id": p.id,
+                "entity_type": "page",
+                "title": p.title,
+                "status": p.status,
+                "project_name": p.section.name if p.section else None,
+                "project_id": p.section_id,
+                "updated_at": _iso_utc(p.updated_at),
             }
-            for d in docs
+            for p in pages
         ],
     }
+
+
+def _resolve_entity_org_role(
+    db: Session,
+    user_id: int,
+    entity_type: str,
+    entity_id: int,
+) -> str | None:
+    """Resolve the actor's org-scoped role for a page/document entity."""
+    org_id: int | None = None
+
+    if entity_type == "page":
+        page = db.get(Page, entity_id)
+        org_id = page.organization_id if page else None
+    else:
+        doc = db.get(Document, entity_id)
+        if doc and doc.project_id:
+            proj = db.get(Project, doc.project_id)
+            org_id = proj.organization_id if proj else None
+
+    if not org_id:
+        return None
+
+    org_role = (
+        db.query(OrgRole)
+        .filter(OrgRole.user_id == user_id, OrgRole.organization_id == org_id)
+        .first()
+    )
+    if not org_role or not org_role.role:
+        return None
+    return org_role.role.lower()
+
+
+def _can_review_entity(
+    db: Session,
+    actor: User,
+    entity_type: str,
+    entity_id: int,
+) -> bool:
+    """Authorize review action with org-scoped role; fallback to legacy global role."""
+    allowed = {"owner", "admin", "reviewer"}
+    scoped_role = _resolve_entity_org_role(db, actor.id, entity_type, entity_id)
+    if scoped_role:
+        return scoped_role in allowed
+    return (actor.role or "").lower() in allowed
 
 
 async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dict:
@@ -448,13 +660,76 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
     comment = body.get("comment")
     google_access_token = body.get("_google_access_token")
 
-    doc = db.get(Document, doc_id)
-    if not doc:
-        return {"ok": False, "error": "Document not found"}
-
     actor = db.get(User, user.id)
     if not actor:
         return {"ok": False, "error": "User not found"}
+
+    entity_type = str(body.get("entity_type") or body.get("entityType") or "document").strip().lower()
+    if entity_type not in {"document", "page"}:
+        entity_type = "document"
+
+    scoped_org_ids = _get_scoped_org_ids(db, actor.id, body)
+    if not scoped_org_ids:
+        return {"ok": False, "error": "No workspace access for approval action."}
+
+    target_org_id: int | None = None
+    if entity_type == "page":
+        target_page = db.get(Page, doc_id)
+        target_org_id = target_page.organization_id if target_page else None
+    else:
+        target_doc = db.get(Document, doc_id)
+        if target_doc and target_doc.project_id:
+            target_project = db.get(Project, target_doc.project_id)
+            target_org_id = target_project.organization_id if target_project else None
+
+    if target_org_id and target_org_id not in scoped_org_ids:
+        return {"ok": False, "error": "Item is not in the selected workspace."}
+
+    if not _can_review_entity(db, actor, entity_type, doc_id):
+        return {"ok": False, "error": "Insufficient permissions. Reviewer/Admin/Owner required."}
+
+    page = None
+    doc = None
+    if entity_type == "page":
+        page = db.get(Page, doc_id)
+        if not page:
+            return {"ok": False, "error": "Page not found"}
+    else:
+        doc = db.get(Document, doc_id)
+        if not doc:
+            # Backward-compatible fallback: if no document exists, try page with same id.
+            page = db.get(Page, doc_id)
+            if page:
+                entity_type = "page"
+            else:
+                return {"ok": False, "error": "Document not found"}
+
+    if entity_type == "page":
+        if action == "approve":
+            if not page.html_content:
+                return {"ok": False, "error": "Page has no content. Sync first."}
+            page.published_html = page.html_content
+            page.is_published = True
+            page.status = "published"
+            if page.section_id:
+                section = db.get(Section, page.section_id)
+                if section and not section.is_published:
+                    section.is_published = True
+        else:
+            page.status = "draft"
+            page.is_published = False
+
+        db.add(
+            Approval(
+                document_id=doc_id,
+                entity_type="page",
+                user_id=actor.id,
+                action=action,
+                comment=comment,
+            )
+        )
+        db.commit()
+        return {"ok": True, "document_status": page.status, "entity_type": "page"}
 
     if action == "approve":
         try:
@@ -525,6 +800,7 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
                 db.add(
                     Approval(
                         document_id=doc_id,
+                        entity_type="document",
                         user_id=actor.id,
                         action="publish",
                         comment=f"Published commit {commit_sha[:8]}",
@@ -543,7 +819,15 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
             pass
         doc.last_published_at = None
 
-    db.add(Approval(document_id=doc_id, user_id=actor.id, action=action, comment=comment))
+    db.add(
+        Approval(
+            document_id=doc_id,
+            entity_type="document",
+            user_id=actor.id,
+            action=action,
+            comment=comment,
+        )
+    )
     db.commit()
 
     # Rebuild and deploy the Zensical site for public projects
