@@ -41,7 +41,10 @@ PORT=8000
 SECRET_KEY=CHANGE-THIS-TO-A-STRONG-RANDOM-SECRET-KEY-IN-PRODUCTION
 
 # CORS Origins (your frontend URLs)
-ALLOWED_ORIGINS=https://your-frontend.netlify.app,https://docs.yourcompany.com
+ALLOWED_ORIGINS=https://acceldocs.vercel.app,https://docs.yourcompany.com
+
+# AI Documentation Agent (required for agent chat and template generation)
+ANTHROPIC_API_KEY=sk-ant-...
 
 # Netlify (for docs site deployment)
 NETLIFY_SITE_ID=your-netlify-site-id

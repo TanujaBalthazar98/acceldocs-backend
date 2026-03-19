@@ -344,6 +344,8 @@ class Approval(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    # "document" (legacy) or "page" (current clean-arch flow)
+    entity_type: Mapped[str | None] = mapped_column(String(20))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     action: Mapped[str] = mapped_column(String(50), nullable=False)
     comment: Mapped[str | None] = mapped_column(Text)
@@ -593,4 +595,29 @@ class ExternalAccessGrant(Base):
     __table_args__ = (
         UniqueConstraint("organization_id", "email", name="uq_external_access_org_email"),
         Index("ix_external_access_org_active", "organization_id", "is_active"),
+    )
+
+
+class JiraCredential(Base):
+    """Encrypted Jira API token per user per org."""
+    __tablename__ = "jira_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    jira_domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    jira_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    encrypted_api_token: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
+    organization: Mapped["Organization"] = relationship("Organization", foreign_keys=[organization_id])
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "organization_id", name="uq_jira_credential_user_org"),
     )

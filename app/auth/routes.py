@@ -15,9 +15,10 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
-from app.models import GoogleToken, Organization, OrgRole, User
+from app.models import GoogleToken, JoinRequest, Organization, OrgRole, User
 from app.services.drive_acl import sync_member_drive_permission
 from app.services.encryption import get_encryption_service
+from app.middleware.security import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
 
 @router.post("/prepare-signup")
+@limiter.limit("10/minute")
 async def prepare_signup(request: Request, db: Session = Depends(get_db)):
     """Prepare signup with organization selection.
 
@@ -289,6 +291,7 @@ async def prepare_signup(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/search-organizations")
+@limiter.limit("20/minute")
 async def search_organizations(request: Request, db: Session = Depends(get_db)):
     """Public org search endpoint used by sign-up UI."""
     try:
@@ -337,6 +340,7 @@ async def search_organizations(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/login")
+@limiter.limit("15/minute")
 async def login(
     request: Request,
     state: str | None = None,
@@ -393,6 +397,7 @@ async def login(
 
 
 @router.get("/docs-login")
+@limiter.limit("15/minute")
 async def docs_login(request: Request, next: str | None = None):
     """Browser-redirect login for docs gate pages.
 
@@ -444,6 +449,7 @@ async def docs_login(request: Request, next: str | None = None):
 
 
 @router.get("/callback")
+@limiter.limit("10/minute")
 async def callback(
     request: Request,
     code: str | None = None,
@@ -491,7 +497,7 @@ async def callback(
             )
     except Exception as e:
         logger.exception("Token exchange HTTP request failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"Token exchange request failed: {e}")
+        raise HTTPException(status_code=500, detail="Token exchange request failed. Please try again.")
 
     if token_resp.status_code != 200:
         logger.error("Token exchange failed (status %s)", token_resp.status_code)
@@ -552,48 +558,85 @@ async def callback(
 
     # Handle organization assignment based on signup info
     org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
+    organization_id: int | None = None
+    pending_join_result: dict | None = None
 
-    if signup_info and signup_info.get("action") == "connect":
-        target_org_id = signup_info.get("org_id")
-        if not target_org_id:
-            raise HTTPException(status_code=400, detail="org_id required for connect action")
-        target_role = (
-            db.query(OrgRole)
-            .filter(OrgRole.user_id == user.id, OrgRole.organization_id == target_org_id)
-            .first()
-        )
-        if not target_role:
-            raise HTTPException(status_code=403, detail="You are not a member of the selected workspace")
-        if target_role.role not in ("owner", "admin"):
-            raise HTTPException(status_code=403, detail="Only workspace owner/admin can connect Drive")
-        organization_id = target_role.organization_id
-        org_role = target_role
-    elif org_role:
-        # User already has an organization
-        organization_id = org_role.organization_id
-    elif signup_info:
-        # Process signup with org selection
+    if signup_info:
         action = signup_info.get("action")
 
-        if action == "join":
+        if action == "connect":
+            target_org_id = signup_info.get("org_id")
+            if not target_org_id:
+                raise HTTPException(status_code=400, detail="org_id required for connect action")
+            target_role = (
+                db.query(OrgRole)
+                .filter(OrgRole.user_id == user.id, OrgRole.organization_id == target_org_id)
+                .first()
+            )
+            if not target_role:
+                raise HTTPException(status_code=403, detail="You are not a member of the selected workspace")
+            if target_role.role not in ("owner", "admin"):
+                raise HTTPException(status_code=403, detail="Only workspace owner/admin can connect Drive")
+            organization_id = target_role.organization_id
+            org_role = target_role
+
+        elif action == "join":
             org_id = signup_info.get("org_id")
             organization = db.query(Organization).filter(Organization.id == org_id).first()
-
             if not organization:
                 raise HTTPException(status_code=400, detail="Organization not found")
 
-            # First member to join an ownerless org becomes the owner;
-            # otherwise default to editor so teammates can contribute.
-            existing_members = db.query(OrgRole).filter(OrgRole.organization_id == organization.id).count()
-            if existing_members == 0:
-                join_role = "owner"
+            existing_target_role = (
+                db.query(OrgRole)
+                .filter(OrgRole.user_id == user.id, OrgRole.organization_id == organization.id)
+                .first()
+            )
+            if existing_target_role:
+                organization_id = organization.id
+                org_role = existing_target_role
             else:
-                join_role = "editor"
-            org_role = OrgRole(organization_id=organization.id, user_id=user.id, role=join_role)
-            db.add(org_role)
-            db.flush()
-            organization_id = organization.id
-            logger.info(f"Added user {user.email} to organization {organization.name} as {join_role}")
+                org_domain = (organization.domain or "").strip().lower()
+                if org_domain:
+                    user_domain = (email.split("@", 1)[1] if "@" in (email or "") else "").strip().lower()
+                    if user_domain != org_domain:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Only @{org_domain} accounts can request access to this workspace",
+                        )
+
+                pending_request = (
+                    db.query(JoinRequest)
+                    .filter(
+                        JoinRequest.organization_id == organization.id,
+                        JoinRequest.user_id == user.id,
+                        JoinRequest.status == "pending",
+                    )
+                    .first()
+                )
+                if not pending_request:
+                    pending_request = JoinRequest(
+                        organization_id=organization.id,
+                        user_id=user.id,
+                        message=None,
+                        status="pending",
+                    )
+                    db.add(pending_request)
+                    db.flush()
+                    logger.info(
+                        "Created join request for %s into organization %s",
+                        user.email,
+                        organization.name,
+                    )
+
+                pending_join_result = {
+                    "organization": {
+                        "id": organization.id,
+                        "name": organization.name,
+                        "slug": organization.slug,
+                    },
+                    "request_id": pending_request.id,
+                    "requested_at": pending_request.created_at.isoformat() if pending_request.created_at else None,
+                }
 
         elif action == "create":
             org_name = signup_info.get("org_name")
@@ -623,6 +666,9 @@ async def callback(
 
         else:
             raise HTTPException(status_code=400, detail=f"Invalid signup action: {action}")
+    elif org_role:
+        # User already has an organization
+        organization_id = org_role.organization_id
 
     else:
         # No signup info — auto-join by email domain, or create default workspace
@@ -701,8 +747,21 @@ async def callback(
     db.commit()
     db.refresh(user)
 
+    if pending_join_result:
+        accept_header = (request.headers.get("accept") or "").lower()
+        wants_json = api or ("application/json" in accept_header) or (request.headers.get("x-requested-with") == "XMLHttpRequest")
+        redirect_target = f"{settings.frontend_url.rstrip('/')}/signup?requested=1&org={pending_join_result['organization']['id']}"
+        if wants_json:
+            return {
+                "error": "join_request_pending",
+                "message": "Join request submitted for owner approval",
+                "redirect": redirect_target,
+                **pending_join_result,
+            }
+        return RedirectResponse(url=redirect_target, status_code=302)
+
     # Store encrypted refresh token if provided
-    if refresh_token:
+    if refresh_token and organization_id:
         try:
             encryption_service = get_encryption_service()
             encrypted_refresh_token = encryption_service.encrypt(refresh_token)
@@ -895,6 +954,7 @@ async def me(request: Request, user: User = Depends(get_current_user)):
 
 
 @router.post("/refresh")
+@limiter.limit("10/minute")
 async def refresh_token(request: Request, db: Session = Depends(get_db)):
     """Issue a fresh JWT if the current token is valid or recently expired (within 7-day grace).
 

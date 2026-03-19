@@ -1,7 +1,10 @@
 """Settings management API routes."""
 
+import logging
 import subprocess
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException
 from googleapiclient.discovery import build
@@ -193,7 +196,8 @@ async def backup_database(current_user: User = Depends(get_current_user)):
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
+        logger.error("Backup failed: %s", e)
+        raise HTTPException(status_code=500, detail="Backup failed. Please try again.")
 
 
 @router.post("/deploy-netlify", response_model=DeployResponse)

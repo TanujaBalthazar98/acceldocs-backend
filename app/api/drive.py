@@ -571,7 +571,8 @@ async def scan_folder(
             supportsAllDrives=True,
         ).execute()
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not access folder: {e}")
+        logger.error("Could not access Drive folder: %s", e)
+        raise HTTPException(status_code=400, detail="Could not access the specified folder. Please check the folder ID and your permissions.")
 
     if folder_meta.get("mimeType") != DRIVE_FOLDER_MIME:
         raise HTTPException(status_code=400, detail="Provided ID is not a Drive folder")

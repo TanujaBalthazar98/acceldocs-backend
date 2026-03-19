@@ -7,7 +7,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.auth.routes import get_current_user
 from app.config import settings
 from app.database import get_db
+from app.middleware.security import limiter
 from app.lib.slugify import to_slug as slugify
 from app.models import GoogleToken, Invitation, OrgRole, Organization, Page, User
 from app.services.drive_acl import (
@@ -410,7 +411,9 @@ def remove_member(
 # ---------------------------------------------------------------------------
 
 @router.post("/invitations", status_code=201)
+@limiter.limit("20/minute")
 def create_invitation(
+    request: Request,
     body: InviteCreate,
     x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
@@ -422,6 +425,9 @@ def create_invitation(
         raise HTTPException(status_code=403, detail="Admin role required to invite members")
 
     email = body.email.strip().lower()
+    # Validate email format
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+        raise HTTPException(status_code=400, detail="Invalid email address format")
     role = body.role if body.role in ("owner", "admin", "editor", "reviewer", "viewer") else "viewer"
     email_domain = _email_domain(email)
     is_placeholder = email_domain == PLACEHOLDER_INVITE_DOMAIN
@@ -568,7 +574,9 @@ def revoke_invitation(
 
 
 @router.post("/invitations/accept")
+@limiter.limit("10/minute")
 def accept_invitation(
+    request: Request,
     body: dict,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),

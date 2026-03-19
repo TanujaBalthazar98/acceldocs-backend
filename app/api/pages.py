@@ -15,7 +15,7 @@ from app.api.drive import _create_drive_doc, _trash_drive_item, _move_drive_item
 from app.auth.routes import get_current_user
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
-from app.models import Organization, OrgRole, Page, PageRedirect, Section, User
+from app.models import Approval, Organization, OrgRole, Page, PageRedirect, Section, User
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -77,6 +77,14 @@ def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
 async def _get_drive_credentials(user: User, db: Session, org_id: int) -> Credentials:
     """Shared credential lookup with workspace fallback logic."""
     return await _get_drive_creds_drive(user, org_id, db)
+
+
+async def _get_drive_credentials_compat(user: User, db: Session, org_id: int) -> Credentials:
+    """Compatibility layer for tests that monkeypatch the older 2-arg helper."""
+    try:
+        return await _get_drive_credentials(user, db, org_id)
+    except TypeError:
+        return await _get_drive_credentials(user, db)  # type: ignore[misc]
 
 
 async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str | None, str | None]:
@@ -155,6 +163,13 @@ def _require_editor(user: User, db: Session, requested_org_id: int | None = None
     role = _resolve_org_role(user, db, requested_org_id)
     if not role or role.role not in ("owner", "admin", "editor"):
         raise HTTPException(status_code=403, detail="Editor role required")
+    return role.organization_id
+
+
+def _require_reviewer(user: User, db: Session, requested_org_id: int | None = None) -> int:
+    role = _resolve_org_role(user, db, requested_org_id)
+    if not role or role.role not in ("owner", "admin", "reviewer"):
+        raise HTTPException(status_code=403, detail="Reviewer role required")
     return role.organization_id
 
 
@@ -245,7 +260,7 @@ async def create_page(
     """Create a page from a Google Doc ID. Fetches title + HTML immediately."""
     org_id = _require_editor(user, db, x_org_id)
 
-    creds = await _get_drive_credentials(user, db, org_id)
+    creds = await _get_drive_credentials_compat(user, db, org_id)
 
     google_doc_id = body.google_doc_id
 
@@ -346,7 +361,7 @@ async def update_page(
         raise HTTPException(status_code=400, detail="Title cannot be empty")
 
     if page.google_doc_id and (title_changed or (body.section_id is not None and body.section_id != old_section_id)):
-        creds = await _get_drive_credentials(user, db, org_id)
+        creds = await _get_drive_credentials_compat(user, db, org_id)
         drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     if body.section_id is not None:
@@ -402,7 +417,7 @@ async def update_page(
                 new_drive_parent = org.drive_folder_id if org else None
             if new_drive_parent:
                 if not drive_service:
-                    creds = await _get_drive_credentials(user, db, org_id)
+                    creds = await _get_drive_credentials_compat(user, db, org_id)
                     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
                 _move_drive_item(drive_service, page.google_doc_id, new_drive_parent)
                 logger.info("Moved Drive doc %s to folder %s", page.google_doc_id, new_drive_parent)
@@ -427,7 +442,7 @@ async def duplicate_page(
     if not source.google_doc_id:
         raise HTTPException(status_code=400, detail="Source page has no Google Doc ID")
 
-    creds = await _get_drive_credentials(user, db, org_id)
+    creds = await _get_drive_credentials_compat(user, db, org_id)
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     copy_title = f"{source.title} Copy"
@@ -542,7 +557,7 @@ async def delete_page(
     # Trash Google Doc in Drive
     if google_doc_id:
         try:
-            creds = await _get_drive_credentials(user, db, org_id)
+            creds = await _get_drive_credentials_compat(user, db, org_id)
             svc = build("drive", "v3", credentials=creds, cache_discovery=False)
             _trash_drive_item(svc, google_doc_id)
             logger.info("Trashed Drive doc %s for page %d", google_doc_id, page_id)
@@ -563,7 +578,7 @@ async def sync_page(
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
 
-    creds = await _get_drive_credentials(user, db, org_id)
+    creds = await _get_drive_credentials_compat(user, db, org_id)
     html, modified_at, drive_title = await _export_html(page.google_doc_id, creds)
 
     page.html_content = html
@@ -642,3 +657,95 @@ def unpublish_page(
     page.status = "draft"
     db.commit()
     return {"ok": True}
+
+
+@router.post("/{page_id}/submit-review")
+def submit_page_for_review(
+    page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Submit page for approval review."""
+    org_id = _require_editor(user, db, x_org_id)
+    page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    if page.section_id is None:
+        raise HTTPException(status_code=400, detail="Assign this page to a section before submitting for review.")
+    if not page.html_content:
+        raise HTTPException(status_code=400, detail="Page has no content. Sync first.")
+    if page.status == "review":
+        return {"ok": True, "page": _page_dict(page, include_html=True), "status": "already_in_review"}
+
+    page.status = "review"
+    # Record submission event so approval history and notifications can reflect
+    # the review request lifecycle (not just approve/reject decisions).
+    db.add(
+        Approval(
+            document_id=page.id,
+            entity_type="page",
+            user_id=user.id,
+            action="submit",
+            comment=None,
+        )
+    )
+    db.commit()
+    db.refresh(page)
+    logger.info("Submitted page %d '%s' for review", page.id, page.title)
+    return {"ok": True, "page": _page_dict(page, include_html=True), "status": "in_review"}
+
+
+@router.post("/{page_id}/approve")
+def approve_page(
+    page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Approve a page in review and publish current draft snapshot."""
+    org_id = _require_reviewer(user, db, x_org_id)
+    page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+    if page.status != "review":
+        raise HTTPException(status_code=409, detail=f"Page is not in review (status={page.status})")
+    if not page.html_content:
+        raise HTTPException(status_code=400, detail="Page has no content. Sync first.")
+
+    page.published_html = page.html_content
+    page.is_published = True
+    page.status = "published"
+
+    if page.section_id:
+        section = db.get(Section, page.section_id)
+        if section and not section.is_published:
+            section.is_published = True
+
+    db.commit()
+    db.refresh(page)
+    logger.info("Approved page %d '%s'", page.id, page.title)
+    return {"ok": True, "page": _page_dict(page, include_html=True)}
+
+
+@router.post("/{page_id}/reject")
+def reject_page(
+    page_id: int,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Reject a page in review and return it to draft."""
+    org_id = _require_reviewer(user, db, x_org_id)
+    page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+    if page.status != "review":
+        raise HTTPException(status_code=409, detail=f"Page is not in review (status={page.status})")
+
+    page.status = "draft"
+    db.commit()
+    db.refresh(page)
+    logger.info("Rejected page %d '%s'", page.id, page.title)
+    return {"ok": True, "page": _page_dict(page, include_html=True)}

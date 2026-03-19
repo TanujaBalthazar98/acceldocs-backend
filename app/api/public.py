@@ -64,7 +64,19 @@ _jinja_env = Environment(
 # ---------------------------------------------------------------------------
 
 def _get_db() -> Session:
-    return SessionLocal()
+    db = SessionLocal()
+    setattr(db, "_public_router_managed", True)
+    return db
+
+
+def _close_db(db: Session) -> None:
+    """Close only sessions created by this module.
+
+    Tests often monkeypatch `_get_db` to return a shared fixture session.
+    Closing that shared session in route handlers detaches fixture instances.
+    """
+    if getattr(db, "_public_router_managed", False):
+        db.close()
 
 
 def _org_initials(name: str) -> str:
@@ -872,6 +884,17 @@ def _canonical_page_href(
     audience_for_links: str | None = None,
 ) -> str:
     suffix = _audience_suffix_for_links(docs_root, audience_for_links)
+    return f"{docs_root}/{org_slug}/{page.slug}{suffix}"
+
+
+def _page_fallback_href(
+    page: Page,
+    *,
+    org_slug: str,
+    docs_root: str,
+    audience_for_links: str | None = None,
+) -> str:
+    suffix = _audience_suffix_for_links(docs_root, audience_for_links)
     return f"{docs_root}/{org_slug}/p/{page.id}/{page.slug}{suffix}"
 
 
@@ -1415,7 +1438,7 @@ def _docs_landing_impl(
         )
         return HTMLResponse(content=html)
     finally:
-        db.close()
+        _close_db(db)
 
 
 @router.get("/docs/{org_slug}", response_class=HTMLResponse)
@@ -1562,7 +1585,7 @@ def _docs_search_impl(
             ]
         })
     finally:
-        db.close()
+        _close_db(db)
 
 
 @router.get("/docs/{org_slug}/search")
@@ -1696,14 +1719,19 @@ def _render_docs_page(
     ctx["product_header"] = nav_meta["product_header"]
     ctx["base_version_href"] = None
     ctx["base_version_label"] = None
+    base_page_id = None
+    base_page_slug = None
     if hierarchy_mode == "product" and nav_meta.get("product_header"):
         product_id = nav_meta["product_header"].get("id")
         if product_id:
             product_node = next((node for node in all_top_nodes if node.get("id") == product_id), None)
             base_page_id, base_page_slug = _find_first_page_excluding_versions(product_node)
-        if base_page_id and base_page_slug:
-            ctx["base_version_href"] = f"{docs_root}/{org.slug or org.id}/p/{base_page_id}/{base_page_slug}{_audience_suffix_for_links(docs_root, audience_for_links)}"
-            ctx["base_version_label"] = nav_meta["product_header"].get("name") or "Original"
+    if base_page_id and base_page_slug:
+        ctx["base_version_href"] = (
+            f"{docs_root}/{org.slug or org.id}/{base_page_slug}"
+            f"{_audience_suffix_for_links(docs_root, audience_for_links)}"
+        )
+        ctx["base_version_label"] = nav_meta["product_header"].get("name") or "Original"
     ctx["page_last_updated"] = page_last_updated
     ctx["feedback_summary"] = feedback_summary
     ctx["viewer_signed_in"] = bool(request_user)
@@ -1814,10 +1842,51 @@ def _docs_page_by_id_impl(
         ):
             raise HTTPException(status_code=404, detail="Page not found or not published")
         if page.slug != page_slug:
-            canonical_url = f"{docs_root}/{org_slug}/p/{page.id}/{page.slug}"
-            if template_audience and docs_root == "/docs":
-                canonical_url += f"?audience={template_audience}"
-            return RedirectResponse(url=canonical_url, status_code=307)
+            return RedirectResponse(
+                url=_page_fallback_href(
+                    page,
+                    org_slug=org_slug,
+                    docs_root=docs_root,
+                    audience_for_links=template_audience,
+                ),
+                status_code=307,
+            )
+        visible_with_same_slug = (
+            db.query(Page)
+            .filter(
+                Page.organization_id == org.id,
+                Page.slug == page.slug,
+                Page.is_published == True,
+            )
+            .all()
+        )
+        section_ids = {candidate.section_id for candidate in visible_with_same_slug if candidate.section_id is not None}
+        candidate_sections_by_id = {
+            section.id: section
+            for section in db.query(Section).filter(Section.id.in_(section_ids)).all()
+        } if section_ids else {}
+        visible_same_slug_count = 0
+        for candidate in visible_with_same_slug:
+            candidate_section = candidate_sections_by_id.get(candidate.section_id) if candidate.section_id else None
+            if _is_page_visible(
+                candidate,
+                candidate_section.visibility if candidate_section else "public",
+                viewer_scope,
+                effective_audience,
+            ):
+                visible_same_slug_count += 1
+                if visible_same_slug_count > 1:
+                    break
+        if visible_same_slug_count <= 1:
+            return RedirectResponse(
+                url=_canonical_page_href(
+                    page,
+                    org_slug=org_slug,
+                    docs_root=docs_root,
+                    audience_for_links=template_audience,
+                ),
+                status_code=307,
+            )
         return _render_docs_page(
             org,
             page,
@@ -1830,7 +1899,7 @@ def _docs_page_by_id_impl(
             version_slug=version,
         )
     finally:
-        db.close()
+        _close_db(db)
 
 
 @router.get("/docs/{org_slug}/p/{page_id}/{page_slug}", response_class=HTMLResponse)
@@ -1988,10 +2057,15 @@ def _docs_page_impl(
 
         page = visible_pages[0]
         if len(visible_pages) > 1:
-            canonical_url = f"{docs_root}/{org_slug}/p/{page.id}/{page.slug}"
-            if template_audience and docs_root == "/docs":
-                canonical_url += f"?audience={template_audience}"
-            return RedirectResponse(url=canonical_url, status_code=307)
+            return RedirectResponse(
+                url=_page_fallback_href(
+                    page,
+                    org_slug=org_slug,
+                    docs_root=docs_root,
+                    audience_for_links=template_audience,
+                ),
+                status_code=307,
+            )
         return _render_docs_page(
             org,
             page,
@@ -2004,7 +2078,7 @@ def _docs_page_impl(
             version_slug=version,
         )
     finally:
-        db.close()
+        _close_db(db)
 
 
 @router.get("/docs/{org_slug}/{page_slug}", response_class=HTMLResponse)
@@ -2098,7 +2172,7 @@ def _load_page_for_engagement(
         .first()
     )
     if not page or page.slug != page_slug:
-        db.close()
+        _close_db(db)
         raise HTTPException(status_code=404, detail="Page not found")
 
     section = db.get(Section, page.section_id) if page.section_id else None
@@ -2108,7 +2182,7 @@ def _load_page_for_engagement(
         viewer_scope,
         effective_audience,
     ):
-        db.close()
+        _close_db(db)
         raise HTTPException(status_code=404, detail="Page not found")
     return db, org, page, viewer_scope, request_user
 
@@ -2188,7 +2262,7 @@ def _engagement_impl(
             }
         )
     finally:
-        db.close()
+        _close_db(db)
 
 
 async def _submit_feedback_impl(
@@ -2245,7 +2319,7 @@ async def _submit_feedback_impl(
             status_code=201,
         )
     finally:
-        db.close()
+        _close_db(db)
 
 
 async def _submit_comment_impl(
@@ -2297,7 +2371,7 @@ async def _submit_comment_impl(
         db.refresh(comment)
         return JSONResponse({"status": "ok", "comment": _serialize_comment(comment)}, status_code=201)
     finally:
-        db.close()
+        _close_db(db)
 
 
 @router.get("/docs/{org_slug}/p/{page_id}/{page_slug}/engagement")
@@ -2463,3 +2537,49 @@ async def external_docs_page_comments(
         access_scope="external",
         audience="external",
     )
+
+
+# ---------------------------------------------------------------------------
+# XML Sitemap — public docs only
+# ---------------------------------------------------------------------------
+
+@router.get("/docs/{org_slug}/sitemap.xml")
+async def public_docs_sitemap(org_slug: str, request: Request):
+    """Return an XML sitemap for all published public pages in this org."""
+    from fastapi.responses import Response as FastResponse
+    from html import escape as _escape
+
+    with SessionLocal() as db:
+        org = db.query(Organization).filter(Organization.slug == org_slug).first()
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
+        pages = (
+            db.query(Page)
+            .filter(
+                Page.organization_id == org.id,
+                Page.is_published == True,  # noqa: E712
+            )
+            .order_by(Page.updated_at.desc())
+            .all()
+        )
+
+    base = str(request.base_url).rstrip("/")
+    docs_base = f"{base}/docs/{org_slug}"
+
+    urls = [f"  <url><loc>{docs_base}</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>"]
+    for page in pages:
+        if not page.slug:
+            continue
+        loc = f"{docs_base}/{_escape(page.slug)}"
+        lastmod = ""
+        if page.updated_at:
+            lastmod = f"<lastmod>{page.updated_at.strftime('%Y-%m-%d')}</lastmod>"
+        urls.append(f"  <url><loc>{loc}</loc>{lastmod}<changefreq>weekly</changefreq><priority>0.8</priority></url>")
+
+    xml = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+    xml += "\n".join(urls)
+    xml += "\n</urlset>"
+
+    return FastResponse(content=xml, media_type="application/xml")
