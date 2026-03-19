@@ -93,13 +93,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.allowed_origins_list,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Org-Id", "X-Requested-With", "Accept"],
-)
+logger.info("CORS allowed origins: %s", settings.allowed_origins_list)
 
 # Security middleware — headers, CSRF, rate limiting
 app.add_middleware(SecurityHeadersMiddleware)
@@ -108,6 +102,16 @@ if RATE_LIMITING_ACTIVE:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
     app.add_middleware(SlowAPIMiddleware)
+
+# CORS must be the outermost middleware so all responses (including preflight,
+# 4xx/5xx, and rate-limit responses) include CORS headers.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins_list,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Org-Id", "X-Requested-With", "Accept"],
+)
 
 # Public docs site — no auth prefix, matched first
 app.include_router(public_router)
