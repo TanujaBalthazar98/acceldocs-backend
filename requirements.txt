@@ -21,3 +21,4 @@ slowapi>=0.1.9
 anthropic>=0.40.0
 google-genai>=1.0.0
 sse-starlette>=2.0.0
+markdown>=3.5.0
