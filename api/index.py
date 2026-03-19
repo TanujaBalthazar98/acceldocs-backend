@@ -5,7 +5,12 @@ requests always succeed, even when inner middleware or route handlers crash.
 """
 
 import json
+import os
 import traceback
+
+# GitPython crashes on import if git binary is missing (e.g. Vercel serverless).
+# Setting this env var makes it silently degrade instead of raising ImportError.
+os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
 
 # Attempt to load the real app — capture any startup crash
 _fastapi_app = None
