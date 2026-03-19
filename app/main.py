@@ -28,7 +28,13 @@ from app.api.drive import router as drive_router
 from app.api.public import router as public_router
 from app.api.external_access import router as external_access_router
 from app.api.functions import router as functions_router
-from app.api.agent_chat import router as agent_chat_router
+# Agent chat is optional. Do not let optional AI provider deps block core auth/docs API.
+try:
+    from app.api.agent_chat import router as agent_chat_router
+    _agent_chat_import_error: Exception | None = None
+except Exception as _err:  # pragma: no cover - defensive for production startup
+    agent_chat_router = None
+    _agent_chat_import_error = _err
 from app.api.documents import router as documents_router
 from app.api.approvals import router as approvals_router
 from app.api.analytics import router as analytics_router
@@ -42,6 +48,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+if _agent_chat_import_error is not None:
+    logger.warning("Agent chat router disabled during startup: %s", _agent_chat_import_error)
 
 
 @asynccontextmanager
@@ -130,5 +138,6 @@ app.include_router(users_router, prefix="/api/users", tags=["users"])
 app.include_router(drive_router, prefix="/api/drive", tags=["drive"])
 app.include_router(external_access_router, prefix="/api/external-access", tags=["external-access"])
 app.include_router(functions_router, tags=["functions"])
-app.include_router(agent_chat_router, tags=["agent-chat"])
+if agent_chat_router is not None:
+    app.include_router(agent_chat_router, tags=["agent-chat"])
 app.include_router(ui_router, tags=["ui"])
