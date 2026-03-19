@@ -8,7 +8,7 @@ router = APIRouter()
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "service": "acceldocs"}
+    return {"status": "ok", "service": "acceldocs-backend"}
 
 
 @router.get("/robots.txt", response_class=PlainTextResponse)

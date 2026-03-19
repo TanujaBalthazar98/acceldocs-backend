@@ -29,6 +29,12 @@ from app.api.public import router as public_router
 from app.api.external_access import router as external_access_router
 from app.api.functions import router as functions_router
 from app.api.agent_chat import router as agent_chat_router
+from app.api.documents import router as documents_router
+from app.api.approvals import router as approvals_router
+from app.api.analytics import router as analytics_router
+from app.api.projects import router as projects_router
+from app.api.users import router as users_router
+from app.api.ui import router as ui_router
 from app.auth.routes import router as auth_router
 
 logging.basicConfig(
@@ -112,7 +118,13 @@ app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.include_router(org_router, prefix="/api/org", tags=["org"])
 app.include_router(sections_router, prefix="/api/sections", tags=["sections"])
 app.include_router(pages_router, prefix="/api/pages", tags=["pages"])
+app.include_router(documents_router, prefix="/api/documents", tags=["documents"])
+app.include_router(approvals_router, prefix="/api/approvals", tags=["approvals"])
+app.include_router(analytics_router, prefix="/api/analytics", tags=["analytics"])
+app.include_router(projects_router, prefix="/api/projects", tags=["projects"])
+app.include_router(users_router, prefix="/api/users", tags=["users"])
 app.include_router(drive_router, prefix="/api/drive", tags=["drive"])
 app.include_router(external_access_router, prefix="/api/external-access", tags=["external-access"])
 app.include_router(functions_router, tags=["functions"])
 app.include_router(agent_chat_router, tags=["agent-chat"])
+app.include_router(ui_router, tags=["ui"])

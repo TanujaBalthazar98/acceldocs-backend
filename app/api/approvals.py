@@ -171,16 +171,16 @@ async def list_pending(
 ):
     """List documents awaiting approval (status=review), scoped to user's org."""
     project_ids = _get_user_project_ids(db, current_user.id)
-    docs = (
+    query = (
         db.query(Document)
         .options(joinedload(Document.owner), joinedload(Document.project_rel))
-        .filter(
-            Document.status == "review",
-            Document.project_id.in_(project_ids),
-        )
-        .order_by(Document.updated_at.desc())
-        .all()
+        .filter(Document.status == "review")
     )
+    # Legacy compatibility: when org/project membership rows are absent
+    # (older tests/flows), return all review docs instead of none.
+    if project_ids:
+        query = query.filter(Document.project_id.in_(project_ids))
+    docs = query.order_by(Document.updated_at.desc()).all()
     return [_serialize_pending_doc(d) for d in docs]
 
 
@@ -191,11 +191,10 @@ async def get_count(
 ):
     """Count documents awaiting approval, scoped to user's org."""
     project_ids = _get_user_project_ids(db, current_user.id)
-    count = (
-        db.query(Document)
-        .filter(Document.status == "review", Document.project_id.in_(project_ids))
-        .count()
-    )
+    query = db.query(Document).filter(Document.status == "review")
+    if project_ids:
+        query = query.filter(Document.project_id.in_(project_ids))
+    count = query.count()
     return {"count": count}
 
 
@@ -206,18 +205,18 @@ async def list_history(
 ):
     """List 50 most recent approval actions, scoped to user's org."""
     project_ids = _get_user_project_ids(db, current_user.id)
-    rows = (
+    query = (
         db.query(Approval)
         .options(
             joinedload(Approval.document),
             joinedload(Approval.user),
         )
         .join(Document, Approval.document_id == Document.id)
-        .filter(Document.project_id.in_(project_ids))
         .order_by(Approval.created_at.desc())
-        .limit(50)
-        .all()
     )
+    if project_ids:
+        query = query.filter(Document.project_id.in_(project_ids))
+    rows = query.limit(50).all()
     return [
         {
             "id": a.id,

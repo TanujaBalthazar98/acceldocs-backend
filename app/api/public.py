@@ -64,7 +64,19 @@ _jinja_env = Environment(
 # ---------------------------------------------------------------------------
 
 def _get_db() -> Session:
-    return SessionLocal()
+    db = SessionLocal()
+    setattr(db, "_public_router_managed", True)
+    return db
+
+
+def _close_db(db: Session) -> None:
+    """Close only sessions created by this module.
+
+    Tests often monkeypatch `_get_db` to return a shared fixture session.
+    Closing that shared session in route handlers detaches fixture instances.
+    """
+    if getattr(db, "_public_router_managed", False):
+        db.close()
 
 
 def _org_initials(name: str) -> str:
@@ -1426,7 +1438,7 @@ def _docs_landing_impl(
         )
         return HTMLResponse(content=html)
     finally:
-        db.close()
+        _close_db(db)
 
 
 @router.get("/docs/{org_slug}", response_class=HTMLResponse)
@@ -1573,7 +1585,7 @@ def _docs_search_impl(
             ]
         })
     finally:
-        db.close()
+        _close_db(db)
 
 
 @router.get("/docs/{org_slug}/search")
@@ -1887,7 +1899,7 @@ def _docs_page_by_id_impl(
             version_slug=version,
         )
     finally:
-        db.close()
+        _close_db(db)
 
 
 @router.get("/docs/{org_slug}/p/{page_id}/{page_slug}", response_class=HTMLResponse)
@@ -2066,7 +2078,7 @@ def _docs_page_impl(
             version_slug=version,
         )
     finally:
-        db.close()
+        _close_db(db)
 
 
 @router.get("/docs/{org_slug}/{page_slug}", response_class=HTMLResponse)
@@ -2160,7 +2172,7 @@ def _load_page_for_engagement(
         .first()
     )
     if not page or page.slug != page_slug:
-        db.close()
+        _close_db(db)
         raise HTTPException(status_code=404, detail="Page not found")
 
     section = db.get(Section, page.section_id) if page.section_id else None
@@ -2170,7 +2182,7 @@ def _load_page_for_engagement(
         viewer_scope,
         effective_audience,
     ):
-        db.close()
+        _close_db(db)
         raise HTTPException(status_code=404, detail="Page not found")
     return db, org, page, viewer_scope, request_user
 
@@ -2250,7 +2262,7 @@ def _engagement_impl(
             }
         )
     finally:
-        db.close()
+        _close_db(db)
 
 
 async def _submit_feedback_impl(
@@ -2307,7 +2319,7 @@ async def _submit_feedback_impl(
             status_code=201,
         )
     finally:
-        db.close()
+        _close_db(db)
 
 
 async def _submit_comment_impl(
@@ -2359,7 +2371,7 @@ async def _submit_comment_impl(
         db.refresh(comment)
         return JSONResponse({"status": "ok", "comment": _serialize_comment(comment)}, status_code=201)
     finally:
-        db.close()
+        _close_db(db)
 
 
 @router.get("/docs/{org_slug}/p/{page_id}/{page_slug}/engagement")

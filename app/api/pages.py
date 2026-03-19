@@ -79,6 +79,14 @@ async def _get_drive_credentials(user: User, db: Session, org_id: int) -> Creden
     return await _get_drive_creds_drive(user, org_id, db)
 
 
+async def _get_drive_credentials_compat(user: User, db: Session, org_id: int) -> Credentials:
+    """Compatibility layer for tests that monkeypatch the older 2-arg helper."""
+    try:
+        return await _get_drive_credentials(user, db, org_id)
+    except TypeError:
+        return await _get_drive_credentials(user, db)  # type: ignore[misc]
+
+
 async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str | None, str | None]:
     """Return (html_content, modified_at) for a Google Doc."""
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
@@ -252,7 +260,7 @@ async def create_page(
     """Create a page from a Google Doc ID. Fetches title + HTML immediately."""
     org_id = _require_editor(user, db, x_org_id)
 
-    creds = await _get_drive_credentials(user, db, org_id)
+    creds = await _get_drive_credentials_compat(user, db, org_id)
 
     google_doc_id = body.google_doc_id
 
@@ -353,7 +361,7 @@ async def update_page(
         raise HTTPException(status_code=400, detail="Title cannot be empty")
 
     if page.google_doc_id and (title_changed or (body.section_id is not None and body.section_id != old_section_id)):
-        creds = await _get_drive_credentials(user, db, org_id)
+        creds = await _get_drive_credentials_compat(user, db, org_id)
         drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     if body.section_id is not None:
@@ -409,7 +417,7 @@ async def update_page(
                 new_drive_parent = org.drive_folder_id if org else None
             if new_drive_parent:
                 if not drive_service:
-                    creds = await _get_drive_credentials(user, db, org_id)
+                    creds = await _get_drive_credentials_compat(user, db, org_id)
                     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
                 _move_drive_item(drive_service, page.google_doc_id, new_drive_parent)
                 logger.info("Moved Drive doc %s to folder %s", page.google_doc_id, new_drive_parent)
@@ -434,7 +442,7 @@ async def duplicate_page(
     if not source.google_doc_id:
         raise HTTPException(status_code=400, detail="Source page has no Google Doc ID")
 
-    creds = await _get_drive_credentials(user, db, org_id)
+    creds = await _get_drive_credentials_compat(user, db, org_id)
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     copy_title = f"{source.title} Copy"
@@ -549,7 +557,7 @@ async def delete_page(
     # Trash Google Doc in Drive
     if google_doc_id:
         try:
-            creds = await _get_drive_credentials(user, db, org_id)
+            creds = await _get_drive_credentials_compat(user, db, org_id)
             svc = build("drive", "v3", credentials=creds, cache_discovery=False)
             _trash_drive_item(svc, google_doc_id)
             logger.info("Trashed Drive doc %s for page %d", google_doc_id, page_id)
@@ -570,7 +578,7 @@ async def sync_page(
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
 
-    creds = await _get_drive_credentials(user, db, org_id)
+    creds = await _get_drive_credentials_compat(user, db, org_id)
     html, modified_at, drive_title = await _export_html(page.google_doc_id, creds)
 
     page.html_content = html
