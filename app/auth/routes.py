@@ -830,7 +830,7 @@ async def callback(
     wants_json = api or ("application/json" in accept_header) or (request.headers.get("x-requested-with") == "XMLHttpRequest")
 
     if wants_json:
-        return {
+        resp: dict = {
             "access_token": jwt_token,
             "token_type": "bearer",
             "google_access_token": access_token,
@@ -843,6 +843,9 @@ async def callback(
                 "created_at": user.created_at.isoformat() if user.created_at else None,
             },
         }
+        if organization_id:
+            resp["organization_id"] = organization_id
+        return resp
 
     # If the OAuth state contains a ``next`` URL (from /auth/docs-login),
     # redirect back to that docs page with auth_token so the cookie
@@ -862,10 +865,13 @@ async def callback(
     # The frontend AuthCallback page reads the token and stores it in localStorage.
     import urllib.parse
     frontend_url = settings.frontend_url.rstrip("/")
-    params = urllib.parse.urlencode({
+    cb_params: dict = {
         "token": jwt_token,
         "google_access_token": access_token,
-    })
+    }
+    if organization_id:
+        cb_params["org_id"] = str(organization_id)
+    params = urllib.parse.urlencode(cb_params)
     return RedirectResponse(url=f"{frontend_url}/auth/callback?{params}")
 
 
@@ -930,8 +936,8 @@ async def clear_docs_session_cookie():
 
 
 @router.get("/me")
-async def me(request: Request, user: User = Depends(get_current_user)):
-    """Return the current authenticated user with token expiry info."""
+async def me(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return the current authenticated user with token expiry info and orgs."""
     # Extract expiry from the JWT so the frontend can schedule refresh
     auth_header = request.headers.get("Authorization", "")
     expires_at = None
@@ -944,12 +950,26 @@ async def me(request: Request, user: User = Depends(get_current_user)):
         except Exception:
             pass
 
+    # Include org memberships so the frontend can always set X-Org-Id
+    roles = db.query(OrgRole).filter(OrgRole.user_id == user.id).all()
+    organizations = []
+    for r in roles:
+        org = db.get(Organization, r.organization_id)
+        if org:
+            organizations.append({
+                "id": org.id,
+                "name": org.name,
+                "slug": org.slug,
+                "user_role": r.role,
+            })
+
     return {
         "id": user.id,
         "email": user.email,
         "name": user.name,
         "role": user.role,
         "expires_at": expires_at,
+        "organizations": organizations,
     }
 
 
