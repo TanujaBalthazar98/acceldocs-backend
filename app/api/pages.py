@@ -515,13 +515,13 @@ async def duplicate_page(
     return _page_dict(duplicate, include_html=True)
 
 
-@router.delete("/{page_id}", status_code=204)
+@router.delete("/{page_id}")
 async def delete_page(
     page_id: int,
     x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> None:
+) -> dict:
     org_id = _require_editor(user, db, x_org_id)
     page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
     if not page:
@@ -555,14 +555,24 @@ async def delete_page(
     db.commit()
 
     # Trash Google Doc in Drive
+    drive_trashed = False
+    drive_error = None
     if google_doc_id:
         try:
             creds = await _get_drive_credentials_compat(user, db, org_id)
             svc = build("drive", "v3", credentials=creds, cache_discovery=False)
             _trash_drive_item(svc, google_doc_id)
+            drive_trashed = True
             logger.info("Trashed Drive doc %s for page %d", google_doc_id, page_id)
         except Exception as exc:
+            drive_error = str(exc)
             logger.exception("Could not trash Drive doc %s for page %d: %s", google_doc_id, page_id, exc)
+
+    return {
+        "ok": True,
+        "drive_trashed": drive_trashed,
+        "drive_error": drive_error,
+    }
 
 
 @router.post("/{page_id}/sync")
