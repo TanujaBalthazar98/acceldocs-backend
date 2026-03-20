@@ -85,6 +85,14 @@ def _require_editor(user: User, db: Session, requested_org_id: int | None = None
     return role.organization_id
 
 
+def _require_admin(user: User, db: Session, requested_org_id: int | None = None) -> int:
+    """Return org_id; raise 403 if user is not at least admin."""
+    role = _resolve_org_role(user, db, requested_org_id)
+    if not role or role.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return role.organization_id
+
+
 def _unique_slug(name: str, org_id: int, parent_id: int | None, db: Session, exclude_id: int | None = None) -> str:
     base = slugify(name)
     slug = base
@@ -540,7 +548,7 @@ async def delete_section(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    org_id = _require_editor(user, db, x_org_id)
+    org_id = _require_admin(user, db, x_org_id)
     section = db.query(Section).filter(
         Section.id == section_id,
         Section.organization_id == org_id,

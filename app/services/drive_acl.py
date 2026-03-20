@@ -28,7 +28,7 @@ RBAC_TO_DRIVE_ROLE = {
     "owner": "writer",
     "admin": "writer",
     "editor": "writer",
-    "reviewer": "reader",
+    "reviewer": "commenter",
     "viewer": "reader",
 }
 

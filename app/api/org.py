@@ -17,7 +17,7 @@ from app.config import settings
 from app.database import get_db
 from app.middleware.security import limiter
 from app.lib.slugify import to_slug as slugify
-from app.models import GoogleToken, Invitation, OrgRole, Organization, Page, User
+from app.models import AuditLog, GoogleToken, Invitation, OrgRole, Organization, Page, User
 from app.services.drive_acl import (
     revoke_member_drive_permission,
     sync_member_drive_file_permission,
@@ -338,9 +338,35 @@ def update_member_role(
     if new_role not in ("owner", "admin", "editor", "reviewer", "viewer"):
         raise HTTPException(status_code=400, detail="Invalid role")
 
+    # Only the owner can promote someone to owner
+    if new_role == "owner" and caller_role.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the workspace owner can assign the owner role")
+
+    # Prevent demoting an owner unless the caller is also an owner
+    if target.role == "owner" and caller_role.role != "owner":
+        raise HTTPException(status_code=403, detail="Only a workspace owner can change another owner's role")
+
     target_user = db.get(User, target.user_id)
+    old_role = target.role
     target.role = new_role
+
+    # Audit trail
+    import json as _json
+    db.add(AuditLog(
+        user_id=user.id,
+        action="member_role_changed",
+        entity_type="OrgRole",
+        entity_id=target.id,
+        audit_metadata=_json.dumps({
+            "target_user_id": target.user_id,
+            "target_email": target_user.email if target_user else None,
+            "old_role": old_role,
+            "new_role": new_role,
+            "organization_id": org.id,
+        }),
+    ))
     db.commit()
+
     drive_sync = None
     docs_sync = None
     try:
@@ -390,6 +416,21 @@ def remove_member(
         raise HTTPException(status_code=404, detail="Member not found")
 
     target_user = db.get(User, target.user_id)
+
+    # Audit trail
+    import json as _json
+    db.add(AuditLog(
+        user_id=user.id,
+        action="member_removed",
+        entity_type="OrgRole",
+        entity_id=target.id,
+        audit_metadata=_json.dumps({
+            "target_user_id": target.user_id,
+            "target_email": target_user.email if target_user else None,
+            "role_at_removal": target.role,
+            "organization_id": org.id,
+        }),
+    ))
     db.delete(target)
     db.commit()
 
@@ -429,6 +470,9 @@ def create_invitation(
     if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
         raise HTTPException(status_code=400, detail="Invalid email address format")
     role = body.role if body.role in ("owner", "admin", "editor", "reviewer", "viewer") else "viewer"
+    # Only owner can invite as owner
+    if role == "owner" and caller_role.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the workspace owner can invite someone as owner")
     email_domain = _email_domain(email)
     is_placeholder = email_domain == PLACEHOLDER_INVITE_DOMAIN
 

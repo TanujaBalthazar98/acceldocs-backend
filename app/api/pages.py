@@ -242,10 +242,14 @@ def list_pages(
     db: Session = Depends(get_db),
 ) -> dict:
     """List all pages for the current org, optionally filtered by section."""
-    org_id = _get_org_id(user, db, x_org_id)
+    role = _resolve_org_role(user, db, x_org_id)
+    org_id = role.organization_id
     q = db.query(Page).filter(Page.organization_id == org_id)
     if section_id is not None:
         q = q.filter(Page.section_id == section_id)
+    # Viewers can only see published pages
+    if role.role == "viewer":
+        q = q.filter(Page.is_published == True)  # noqa: E712
     pages = q.order_by(Page.section_id.nulls_last(), Page.display_order, Page.title).all()
     return {"pages": [_page_dict(p) for p in pages]}
 
@@ -330,10 +334,18 @@ def get_page(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org_id = _get_org_id(user, db, x_org_id)
+    role = _resolve_org_role(user, db, x_org_id)
+    org_id = role.organization_id
     page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
+    # Viewers can only access published pages; hide draft HTML content
+    if role.role == "viewer":
+        if not page.is_published:
+            raise HTTPException(status_code=403, detail="Page not published")
+        d = _page_dict(page, include_html=True)
+        d["html_content"] = d.get("published_html") or d.get("html_content")
+        return d
     return _page_dict(page, include_html=True)
 
 
