@@ -39,6 +39,7 @@ from app.api.documents import router as documents_router
 from app.api.approvals import router as approvals_router
 from app.api.analytics import router as analytics_router
 from app.api.projects import router as projects_router
+from app.api.search import router as search_router
 from app.api.users import router as users_router
 from app.api.ui import router as ui_router
 from app.auth.routes import router as auth_router
@@ -134,6 +135,7 @@ app.include_router(documents_router, prefix="/api/documents", tags=["documents"]
 app.include_router(approvals_router, prefix="/api/approvals", tags=["approvals"])
 app.include_router(analytics_router, prefix="/api/analytics", tags=["analytics"])
 app.include_router(projects_router, prefix="/api/projects", tags=["projects"])
+app.include_router(search_router, prefix="/api/docs", tags=["search"])
 app.include_router(users_router, prefix="/api/users", tags=["users"])
 app.include_router(drive_router, prefix="/api/drive", tags=["drive"])
 app.include_router(external_access_router, prefix="/api/external-access", tags=["external-access"])

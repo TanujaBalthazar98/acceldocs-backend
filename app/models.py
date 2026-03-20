@@ -474,6 +474,7 @@ class Page(Base):
     visibility_override: Mapped[str | None] = mapped_column(String(20))
     html_content: Mapped[str | None] = mapped_column(Text)          # latest synced from Drive
     published_html: Mapped[str | None] = mapped_column(Text)        # snapshot at publish time
+    search_text: Mapped[str | None] = mapped_column(Text)            # plain text for full-text search
     is_published: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(50), default="draft")  # draft | published
     display_order: Mapped[int] = mapped_column(Integer, default=0)

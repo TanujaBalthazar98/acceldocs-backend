@@ -651,6 +651,13 @@ def publish_page(
     page.is_published = True
     page.status = "published"
 
+    # Populate plain text for full-text search indexing
+    try:
+        import bleach
+        page.search_text = bleach.clean(page.html_content or "", tags=[], strip=True).strip()
+    except Exception:
+        page.search_text = None
+
     # Auto-publish parent section so it appears in the public docs sidebar
     if page.section_id:
         section = db.get(Section, page.section_id)
@@ -739,6 +746,12 @@ def approve_page(
     page.published_html = page.html_content
     page.is_published = True
     page.status = "published"
+
+    try:
+        import bleach
+        page.search_text = bleach.clean(page.html_content or "", tags=[], strip=True).strip()
+    except Exception:
+        page.search_text = None
 
     if page.section_id:
         section = db.get(Section, page.section_id)
