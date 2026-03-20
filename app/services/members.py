@@ -1,9 +1,12 @@
 """Member and invitation management functions."""
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from app.models import User, Invitation, OrgRole, ProjectMember, JoinRequest, Organization
+
+logger = logging.getLogger(__name__)
 
 
 def _int(val) -> int | None:
@@ -376,6 +379,21 @@ async def approve_join_request(body: dict, db: Session, user: User | None) -> di
         if existing_membership:
             req.status = "approved"
             db.commit()
+            # Still sync Drive access for existing members (may be missing)
+            try:
+                org = db.get(Organization, req.organization_id)
+                member = db.get(User, req.user_id)
+                if org and org.drive_folder_id and member:
+                    from app.services.drive_acl import sync_member_drive_permission
+                    await sync_member_drive_permission(
+                        db=db,
+                        org=org,
+                        member_email=member.email,
+                        org_role=existing_membership.role,
+                        preferred_user_ids=[org.owner_id, user.id, req.user_id],
+                    )
+            except Exception as exc:
+                logger.warning("Drive ACL sync for existing member %s failed: %s", req.user_id, exc)
             return {"ok": True, "already_member": True}
         org_role = OrgRole(
             organization_id=req.organization_id,
@@ -386,7 +404,29 @@ async def approve_join_request(body: dict, db: Session, user: User | None) -> di
         req.status = "approved"
         db.commit()
 
-        return {"ok": True}
+        # Grant Drive folder access to the newly approved member
+        drive_sync = None
+        try:
+            org = db.get(Organization, req.organization_id)
+            member = db.get(User, req.user_id)
+            if org and org.drive_folder_id and member:
+                from app.services.drive_acl import sync_member_drive_permission
+                drive_sync = await sync_member_drive_permission(
+                    db=db,
+                    org=org,
+                    member_email=member.email,
+                    org_role=role,
+                    preferred_user_ids=[org.owner_id, user.id, req.user_id],
+                )
+                if not drive_sync.get("ok"):
+                    logger.warning(
+                        "Drive ACL sync after join approval not fully successful for user %s in org %s: %s",
+                        req.user_id, req.organization_id, drive_sync,
+                    )
+        except Exception as exc:
+            logger.warning("Drive ACL sync after join approval failed for user %s: %s", req.user_id, exc)
+
+        return {"ok": True, "drive_sync": drive_sync}
 
     except Exception as e:
         db.rollback()
