@@ -562,7 +562,7 @@ async def delete_page(
             _trash_drive_item(svc, google_doc_id)
             logger.info("Trashed Drive doc %s for page %d", google_doc_id, page_id)
         except Exception as exc:
-            logger.warning("Could not trash Drive doc %s: %s", google_doc_id, exc)
+            logger.exception("Could not trash Drive doc %s for page %d: %s", google_doc_id, page_id, exc)
 
 
 @router.post("/{page_id}/sync")

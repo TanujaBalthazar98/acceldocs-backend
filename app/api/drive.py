@@ -688,9 +688,23 @@ async def import_local(
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
 
-    creds = await get_drive_credentials(user, org_id, db)
+    try:
+        creds = await get_drive_credentials(user, org_id, db)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Drive credentials failed during import")
+        raise HTTPException(status_code=500, detail=f"Drive credentials error: {exc}")
+
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
-    target_drive_folder_id = _ensure_section_drive_folder(service=service, org=org, section=target_section, db=db)
+
+    try:
+        target_drive_folder_id = _ensure_section_drive_folder(service=service, org=org, section=target_section, db=db)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to ensure section Drive folder")
+        raise HTTPException(status_code=500, detail=f"Drive folder setup error: {exc}")
 
     relative_paths: list[str] = []
     if relative_paths_json:
@@ -730,13 +744,22 @@ async def import_local(
             folder_cache[parent_path] = created_folder
             parent_drive = created_folder
 
-        await _upload_local_as_google_doc(
-            service=service,
-            upload=upload,
-            parent_drive_folder_id=parent_drive,
-            destination_name=file_name,
-        )
-        uploaded += 1
+        try:
+            await _upload_local_as_google_doc(
+                service=service,
+                upload=upload,
+                parent_drive_folder_id=parent_drive,
+                destination_name=file_name,
+            )
+            uploaded += 1
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Failed to upload file '%s' to Drive", file_name)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upload '{file_name}' to Google Drive: {exc}",
+            )
 
     counts = _scan_folder(
         service=service,
