@@ -43,6 +43,10 @@ class PageUpdate(BaseModel):
     slug: str | None = None
     visibility_override: Literal["public", "internal", "external"] | None = None
     display_order: int | None = None
+    hide_toc: bool | None = None
+    full_width: bool | None = None
+    page_custom_css: str | None = None
+    featured_image_url: str | None = None
 
 
 def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
@@ -63,6 +67,10 @@ def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
         "owner_id": p.owner_id,
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        "hide_toc": getattr(p, "hide_toc", False) or False,
+        "full_width": getattr(p, "full_width", False) or False,
+        "page_custom_css": getattr(p, "page_custom_css", None),
+        "featured_image_url": getattr(p, "featured_image_url", None),
     }
     if include_html:
         d["html_content"] = p.html_content
@@ -413,6 +421,14 @@ async def update_page(
         page.display_order = body.display_order
     if "visibility_override" in body.model_fields_set:
         page.visibility_override = body.visibility_override
+    if body.hide_toc is not None:
+        page.hide_toc = body.hide_toc
+    if body.full_width is not None:
+        page.full_width = body.full_width
+    if "page_custom_css" in body.model_fields_set:
+        page.page_custom_css = body.page_custom_css
+    if "featured_image_url" in body.model_fields_set:
+        page.featured_image_url = body.featured_image_url
 
     db.commit()
     db.refresh(page)
@@ -713,7 +729,7 @@ def submit_page_for_review(
     # the review request lifecycle (not just approve/reject decisions).
     db.add(
         Approval(
-            document_id=page.id,
+            page_id=page.id,
             entity_type="page",
             user_id=user.id,
             action="submit",
@@ -758,6 +774,15 @@ def approve_page(
         if section and not section.is_published:
             section.is_published = True
 
+    db.add(
+        Approval(
+            page_id=page.id,
+            entity_type="page",
+            user_id=user.id,
+            action="approve",
+            comment=None,
+        )
+    )
     db.commit()
     db.refresh(page)
     logger.info("Approved page %d '%s'", page.id, page.title)
@@ -780,6 +805,15 @@ def reject_page(
         raise HTTPException(status_code=409, detail=f"Page is not in review (status={page.status})")
 
     page.status = "draft"
+    db.add(
+        Approval(
+            page_id=page.id,
+            entity_type="page",
+            user_id=user.id,
+            action="reject",
+            comment=None,
+        )
+    )
     db.commit()
     db.refresh(page)
     logger.info("Rejected page %d '%s'", page.id, page.title)

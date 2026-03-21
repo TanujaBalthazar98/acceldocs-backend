@@ -73,6 +73,14 @@ class Organization(Base):
     # Zensical / docs-site configuration
     analytics_property_id: Mapped[str | None] = mapped_column(String(50))  # Google Analytics G-XXXXXXXX
     copyright: Mapped[str | None] = mapped_column(String(500))
+    # Docs display settings
+    sidebar_position: Mapped[str | None] = mapped_column(String(10))  # "left" | "right"
+    show_toc: Mapped[bool] = mapped_column(Boolean, default=True)
+    code_theme: Mapped[str | None] = mapped_column(String(50))  # Shiki theme name
+    max_content_width: Mapped[str | None] = mapped_column(String(10))  # "4xl" | "5xl" | "6xl" | "full"
+    header_html: Mapped[str | None] = mapped_column(Text)
+    footer_html: Mapped[str | None] = mapped_column(Text)
+    landing_blocks: Mapped[str | None] = mapped_column(Text)  # JSON block config
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -343,7 +351,10 @@ class Approval(Base):
     __tablename__ = "approvals"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    # Legacy FK — nullable so page-based approvals don't require a documents row
+    document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"), nullable=True)
+    # Clean-arch FK — points to pages.id for page-based approvals
+    page_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # "document" (legacy) or "page" (current clean-arch flow)
     entity_type: Mapped[str | None] = mapped_column(String(20))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
@@ -351,7 +362,7 @@ class Approval(Base):
     comment: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
-    document: Mapped["Document"] = relationship(back_populates="approvals")
+    document: Mapped["Document | None"] = relationship(back_populates="approvals")
     user: Mapped["User"] = relationship(back_populates="approvals")
 
 
@@ -483,6 +494,12 @@ class Page(Base):
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    # Per-page display settings
+    hide_toc: Mapped[bool] = mapped_column(Boolean, default=False)
+    full_width: Mapped[bool] = mapped_column(Boolean, default=False)
+    page_custom_css: Mapped[str | None] = mapped_column(Text)
+    featured_image_url: Mapped[str | None] = mapped_column(String(500))
 
     organization: Mapped["Organization"] = relationship("Organization", foreign_keys=[organization_id])
     section: Mapped["Section | None"] = relationship(back_populates="pages")

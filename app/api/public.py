@@ -1128,6 +1128,28 @@ def _base_ctx(
     else:
         docs_visibility_label = "Public"
         docs_mode = "public"
+    # Workspace display settings
+    sidebar_position = getattr(org, "sidebar_position", None) or "left"
+    show_toc = True if getattr(org, "show_toc", None) is None else bool(org.show_toc)
+    code_theme = getattr(org, "code_theme", None) or "github-dark"
+    max_content_width = getattr(org, "max_content_width", None) or "4xl"
+    header_html = getattr(org, "header_html", None) or ""
+    footer_html = getattr(org, "footer_html", None) or ""
+    custom_css = getattr(org, "custom_css", None) or ""
+    font_heading = getattr(org, "font_heading", None) or ""
+    font_body = getattr(org, "font_body", None) or ""
+    secondary_color = getattr(org, "secondary_color", None) or ""
+    accent_color = getattr(org, "accent_color", None) or ""
+    hero_title = getattr(org, "hero_title", None) or ""
+    hero_description = getattr(org, "hero_description", None) or ""
+    show_search_on_landing = getattr(org, "show_search_on_landing", True)
+    if show_search_on_landing is None:
+        show_search_on_landing = True
+    show_featured_projects = getattr(org, "show_featured_projects", True)
+    if show_featured_projects is None:
+        show_featured_projects = True
+    copyright_text = getattr(org, "copyright", None) or ""
+
     return {
         "org_name": org.name,
         "org_slug": org.slug or str(org.id),
@@ -1135,6 +1157,24 @@ def _base_ctx(
         "org_initials": _org_initials(org.name),
         "org_tagline": org.tagline,
         "primary_color": primary_color,
+        # Workspace display settings
+        "sidebar_position": sidebar_position,
+        "show_toc": show_toc,
+        "code_theme": code_theme,
+        "max_content_width": max_content_width,
+        "header_html": header_html,
+        "footer_html": footer_html,
+        "custom_css": custom_css,
+        "font_heading": font_heading,
+        "font_body": font_body,
+        "secondary_color": secondary_color,
+        "accent_color": accent_color,
+        "hero_title": hero_title,
+        "hero_description": hero_description,
+        "show_search_on_landing": show_search_on_landing,
+        "show_featured_projects": show_featured_projects,
+        "copyright": copyright_text,
+        # Navigation
         "nav_sections": nav_sections,
         "top_sections": top_sections,
         "top_tabs": [],

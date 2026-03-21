@@ -8,7 +8,11 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  {% set _heading_font = font_heading or "Space Grotesk" %}
+  {% set _body_font = font_body or "Space Grotesk" %}
+  {% set _font_families = [_heading_font] %}
+  {% if _body_font != _heading_font %}{% set _font_families = [_heading_font, _body_font] %}{% endif %}
+  <link href="https://fonts.googleapis.com/css2?{% for f in _font_families %}family={{ f | replace(' ', '+') }}:wght@400;500;600;700{% if not loop.last %}&{% endif %}{% endfor %}&display=swap" rel="stylesheet" />
 
   <style>
     :root {
@@ -25,7 +29,7 @@
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; }
     body {
-      font-family: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: "{{ _body_font }}", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: var(--ink);
       background:
         radial-gradient(1100px 480px at 85% -10%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%),
@@ -476,9 +480,21 @@
       .groups-grid { grid-template-columns: 1fr; }
       .hero { padding-top: 34px; }
     }
+
+    h1, h2, h3, h4, h5, h6, .brand, .hero-heading, .section-heading {
+      font-family: "{{ _heading_font }}", -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    {% if custom_css %}
+    /* ── Custom CSS (workspace settings) ──────────────────────────── */
+    {{ custom_css }}
+    {% endif %}
   </style>
 </head>
 <body>
+  {% if header_html %}
+  <div class="custom-header">{{ header_html | safe }}</div>
+  {% endif %}
   <header class="topbar">
     <div class="container topbar-inner">
       <a class="brand" href="{{ docs_root }}/{{ org_slug }}{{ audience_suffix }}">
@@ -503,9 +519,11 @@
 
   <section class="hero container">
     <span class="eyebrow">Documentation</span>
-    <h1>{{ org_name }} Developer Hub</h1>
+    <h1>{{ hero_title or org_name }}</h1>
     <p>
-      {% if org_tagline %}
+      {% if hero_description %}
+        {{ hero_description }}
+      {% elif org_tagline %}
         {{ org_tagline }}
       {% elif hierarchy_mode == "flat" %}
         Find the right docs fast. Open a section and jump straight to the page you need.
@@ -815,5 +833,8 @@
       });
     }
   </script>
+  {% if footer_html %}
+  <div class="custom-footer">{{ footer_html | safe }}</div>
+  {% endif %}
 </body>
 </html>

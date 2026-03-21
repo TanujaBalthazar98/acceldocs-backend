@@ -504,7 +504,7 @@ def test_public_landing_renders_hub_layout_with_product_groups(client, db, monke
     assert resp.status_code == 200
     html = resp.text
 
-    assert "Developer Hub" in html
+    assert "Developer Hub" not in html
     assert "product-rail" in html
     assert "Get Started" in html
     assert "Open Section" in html

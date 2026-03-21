@@ -42,6 +42,7 @@ from app.api.projects import router as projects_router
 from app.api.search import router as search_router
 from app.api.users import router as users_router
 from app.api.ui import router as ui_router
+from app.api.brand_extract import router as brand_extract_router
 from app.auth.routes import router as auth_router
 
 logging.basicConfig(
@@ -94,6 +95,22 @@ def _add_missing_columns() -> None:
     except Exception as e:
         logger.error("_add_missing_columns failed (non-fatal): %s", e)
 
+    # Make approvals.document_id nullable (was NOT NULL, now pages use page_id instead)
+    try:
+        from sqlalchemy import text as _text
+        with engine.begin() as conn:
+            dialect_name = engine.dialect.name
+            if dialect_name == "postgresql":
+                conn.execute(_text(
+                    'ALTER TABLE "approvals" ALTER COLUMN "document_id" DROP NOT NULL'
+                ))
+                logger.info("Made approvals.document_id nullable")
+            # SQLite doesn't support ALTER COLUMN, but also doesn't enforce NOT NULL
+            # on existing rows, so it's fine.
+    except Exception as e:
+        # Column might already be nullable, or table might not exist yet.
+        logger.debug("approvals.document_id nullable migration (non-fatal): %s", e)
+
 
 app = FastAPI(
     title="AccelDocs",
@@ -129,6 +146,7 @@ app.include_router(public_router)
 app.include_router(health_router)
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.include_router(org_router, prefix="/api/org", tags=["org"])
+app.include_router(brand_extract_router, prefix="/api/org", tags=["org"])
 app.include_router(sections_router, prefix="/api/sections", tags=["sections"])
 app.include_router(pages_router, prefix="/api/pages", tags=["pages"])
 app.include_router(documents_router, prefix="/api/documents", tags=["documents"])

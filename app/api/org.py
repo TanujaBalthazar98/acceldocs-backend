@@ -38,9 +38,28 @@ class OrgUpdate(BaseModel):
     name: str | None = None
     logo_url: str | None = None
     primary_color: str | None = None
+    secondary_color: str | None = None
+    accent_color: str | None = None
+    font_heading: str | None = None
+    font_body: str | None = None
+    custom_css: str | None = None
     tagline: str | None = None
     hierarchy_mode: str | None = None
     custom_docs_domain: str | None = None
+    hero_title: str | None = None
+    hero_description: str | None = None
+    show_search_on_landing: bool | None = None
+    show_featured_projects: bool | None = None
+    analytics_property_id: str | None = None
+    copyright: str | None = None
+    custom_links: str | None = None
+    sidebar_position: str | None = None
+    show_toc: bool | None = None
+    code_theme: str | None = None
+    max_content_width: str | None = None
+    header_html: str | None = None
+    footer_html: str | None = None
+    landing_blocks: str | None = None
 
 
 class InviteCreate(BaseModel):
@@ -76,11 +95,39 @@ def _org_dict(org: Organization, role: OrgRole, member_count: int, has_drive: bo
         "name": org.name,
         "slug": org.slug,
         "logo_url": org.logo_url,
-        "primary_color": org.primary_color,
         "tagline": org.tagline,
         "domain": org.domain,
         "custom_docs_domain": org.custom_docs_domain,
+        # Branding
+        "primary_color": org.primary_color,
+        "secondary_color": org.secondary_color,
+        "accent_color": org.accent_color,
+        "font_heading": org.font_heading,
+        "font_body": org.font_body,
+        "custom_css": org.custom_css,
+        # Landing
+        "hero_title": org.hero_title,
+        "hero_description": org.hero_description,
+        "show_search_on_landing": org.show_search_on_landing if org.show_search_on_landing is not None else True,
+        "show_featured_projects": org.show_featured_projects if org.show_featured_projects is not None else True,
+        # Docs display
         "hierarchy_mode": org.hierarchy_mode or "product",
+        "sidebar_position": org.sidebar_position or "left",
+        "show_toc": True if org.show_toc is None else bool(org.show_toc),
+        "code_theme": org.code_theme or "github-dark",
+        "max_content_width": org.max_content_width or "4xl",
+        "header_html": org.header_html,
+        "footer_html": org.footer_html,
+        "landing_blocks": org.landing_blocks,
+        # Analytics & metadata
+        "analytics_property_id": getattr(org, "analytics_property_id", None),
+        "copyright": getattr(org, "copyright", None),
+        "custom_links": org.custom_links,
+        # MCP/OpenAPI
+        "mcp_enabled": org.mcp_enabled if org.mcp_enabled is not None else False,
+        "openapi_spec_json": org.openapi_spec_json,
+        "openapi_spec_url": org.openapi_spec_url,
+        # Infrastructure
         "drive_folder_id": org.drive_folder_id,
         "has_drive_connected": has_drive,
         "user_role": role.role,
@@ -253,10 +300,57 @@ def update_org(
         org.logo_url = body.logo_url
     if body.primary_color is not None:
         org.primary_color = body.primary_color
+    if body.secondary_color is not None:
+        org.secondary_color = body.secondary_color
+    if body.accent_color is not None:
+        org.accent_color = body.accent_color
+    if body.font_heading is not None:
+        org.font_heading = body.font_heading
+    if body.font_body is not None:
+        org.font_body = body.font_body
+    if body.custom_css is not None:
+        org.custom_css = body.custom_css
     if body.tagline is not None:
         org.tagline = body.tagline
+    if body.hero_title is not None:
+        org.hero_title = body.hero_title
+    if body.hero_description is not None:
+        org.hero_description = body.hero_description
+    if body.show_search_on_landing is not None:
+        org.show_search_on_landing = bool(body.show_search_on_landing)
+    if body.show_featured_projects is not None:
+        org.show_featured_projects = bool(body.show_featured_projects)
+    if body.analytics_property_id is not None:
+        org.analytics_property_id = body.analytics_property_id.strip() or None
+    if body.copyright is not None:
+        org.copyright = body.copyright
+    if body.custom_links is not None:
+        org.custom_links = body.custom_links
     if body.hierarchy_mode is not None:
         org.hierarchy_mode = "flat" if body.hierarchy_mode == "flat" else "product"
+    if body.sidebar_position is not None:
+        value = body.sidebar_position.strip().lower()
+        if value not in ("left", "right"):
+            raise HTTPException(status_code=400, detail="sidebar_position must be 'left' or 'right'")
+        org.sidebar_position = value
+    if body.show_toc is not None:
+        org.show_toc = bool(body.show_toc)
+    if body.code_theme is not None:
+        org.code_theme = body.code_theme.strip() if body.code_theme else None
+    if body.max_content_width is not None:
+        value = body.max_content_width.strip().lower() if body.max_content_width else ""
+        if value and value not in ("4xl", "5xl", "6xl", "full"):
+            raise HTTPException(
+                status_code=400,
+                detail="max_content_width must be one of: 4xl, 5xl, 6xl, full",
+            )
+        org.max_content_width = value or None
+    if body.header_html is not None:
+        org.header_html = body.header_html
+    if body.footer_html is not None:
+        org.footer_html = body.footer_html
+    if body.landing_blocks is not None:
+        org.landing_blocks = body.landing_blocks
     if body.custom_docs_domain is not None:
         value = body.custom_docs_domain.strip().lower()
         if value == "":

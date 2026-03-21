@@ -165,6 +165,13 @@ async def get_organization(body: dict, db: Session, user: User | None) -> dict:
             "hero_title": org.hero_title,
             "hero_description": org.hero_description,
             "hierarchy_mode": org.hierarchy_mode or "product",
+            "sidebar_position": org.sidebar_position or "left",
+            "show_toc": True if org.show_toc is None else bool(org.show_toc),
+            "code_theme": org.code_theme or "github-dark",
+            "max_content_width": org.max_content_width or "4xl",
+            "header_html": org.header_html,
+            "footer_html": org.footer_html,
+            "landing_blocks": org.landing_blocks,
             "show_search_on_landing": org.show_search_on_landing,
             "show_featured_projects": org.show_featured_projects,
             "custom_links": org.custom_links,
@@ -223,7 +230,8 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
             "name", "slug", "domain", "custom_docs_domain", "subdomain",
             "logo_url", "tagline", "primary_color", "secondary_color", "accent_color",
             "font_heading", "font_body", "custom_css", "hero_title", "hero_description",
-            "hierarchy_mode",
+            "hierarchy_mode", "sidebar_position", "show_toc", "code_theme",
+            "max_content_width", "header_html", "footer_html", "landing_blocks",
             "show_search_on_landing", "show_featured_projects", "custom_links",
             "mcp_enabled", "openapi_spec_json", "openapi_spec_url", "drive_folder_id",
             "analytics_property_id", "copyright",
@@ -242,6 +250,16 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
                 value = merged[field]
                 if field == "hierarchy_mode":
                     value = "flat" if value == "flat" else "product"
+                elif field == "sidebar_position":
+                    normalized = str(value or "").strip().lower()
+                    value = normalized if normalized in {"left", "right"} else "left"
+                elif field == "max_content_width":
+                    normalized = str(value or "").strip().lower()
+                    value = normalized if normalized in {"4xl", "5xl", "6xl", "full"} else "4xl"
+                elif field == "show_toc":
+                    value = bool(value)
+                elif field in {"code_theme", "header_html", "footer_html", "landing_blocks"}:
+                    value = str(value).strip() if value is not None else None
                 setattr(org, field, value)
                 updated_fields.append(field)
 
@@ -262,6 +280,13 @@ async def update_organization(body: dict, db: Session, user: User | None) -> dic
                 "slug": _ensure_org_slug(org, db),
                 "domain": org.domain,
                 "drive_folder_id": org.drive_folder_id,
+                "sidebar_position": org.sidebar_position or "left",
+                "show_toc": True if org.show_toc is None else bool(org.show_toc),
+                "code_theme": org.code_theme or "github-dark",
+                "max_content_width": org.max_content_width or "4xl",
+                "header_html": org.header_html,
+                "footer_html": org.footer_html,
+                "landing_blocks": org.landing_blocks,
             }
         }
 

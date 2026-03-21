@@ -476,21 +476,25 @@ async def approvals_history_fn(body: dict, db: Session, user: User | None) -> di
         return {"ok": True, "history": []}
 
     # Keep entity type explicit to avoid page/document ID collision mismatches.
+    # New approvals use page_id; legacy ones used document_id for both.
+    def _page_ref(a: Approval) -> int | None:
+        return getattr(a, "page_id", None) or a.document_id
+
     page_ids = {
-        a.document_id
+        _page_ref(a)
         for a in rows
         if str(getattr(a, "entity_type", "") or "").lower() == "page"
-    }
+    } - {None}
     doc_ids = {
         a.document_id
         for a in rows
         if str(getattr(a, "entity_type", "") or "").lower() == "document"
-    }
+    } - {None}
     unknown_ids = {
         a.document_id
         for a in rows
         if str(getattr(a, "entity_type", "") or "").lower() not in {"page", "document"}
-    }
+    } - {None}
     # Unknown legacy rows are resolved with page-first fallback below.
     doc_lookup_ids = sorted(doc_ids | unknown_ids)
     page_lookup_ids = sorted(page_ids | unknown_ids)
@@ -520,7 +524,7 @@ async def approvals_history_fn(body: dict, db: Session, user: User | None) -> di
         doc = None
         page = None
         if entity_type == "page":
-            page = pages_by_id.get(a.document_id)
+            page = pages_by_id.get(_page_ref(a))
             if page is None:
                 doc = docs_by_id.get(a.document_id)
         elif entity_type == "document":
@@ -529,8 +533,9 @@ async def approvals_history_fn(body: dict, db: Session, user: User | None) -> di
                 page = pages_by_id.get(a.document_id)
         else:
             # Legacy rows without entity_type: prefer page resolution for current flow.
-            page = pages_by_id.get(a.document_id)
-            if page is None:
+            ref = _page_ref(a)
+            page = pages_by_id.get(ref) if ref else None
+            if page is None and a.document_id:
                 doc = docs_by_id.get(a.document_id)
 
         if doc is None and page is None:
@@ -720,7 +725,7 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
 
         db.add(
             Approval(
-                document_id=doc_id,
+                page_id=doc_id,
                 entity_type="page",
                 user_id=actor.id,
                 action=action,
