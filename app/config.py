@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     docs_repo_url: str = ""
 
     # Server
+    environment: str = "development"  # development | staging | production
     host: str = "0.0.0.0"
     port: int = 8000
     secret_key: str = "change-me-in-production"
@@ -80,6 +81,10 @@ class Settings(BaseSettings):
         return self.database_url.startswith("sqlite")
 
     @property
+    def is_production(self) -> bool:
+        return self.environment.strip().lower() in {"prod", "production"}
+
+    @property
     def service_account_path(self) -> Path:
         return Path(self.google_service_account_file)
 
@@ -90,12 +95,63 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Fail loudly if running with the default secret key in a production-like environment
-# (i.e. when DATABASE_URL points to a real database, not local SQLite)
-if settings.secret_key == "change-me-in-production" and not settings.is_sqlite:
-    import warnings
-    warnings.warn(
-        "CRITICAL: secret_key is still set to the default value. "
-        "Set the SECRET_KEY environment variable to a secure random string.",
-        stacklevel=1,
-    )
+
+def _normalize_origin(origin: str) -> str:
+    return origin.strip().rstrip("/")
+
+
+def _validate_runtime_settings() -> None:
+    """Fail fast on unsafe production configuration."""
+    if not settings.is_production:
+        return
+
+    errors: list[str] = []
+
+    if settings.is_sqlite:
+        errors.append("DATABASE_URL cannot use sqlite in production.")
+
+    if not settings.secret_key or settings.secret_key == "change-me-in-production":
+        errors.append("SECRET_KEY must be set to a secure random value in production.")
+    elif len(settings.secret_key) < 32:
+        errors.append("SECRET_KEY must be at least 32 characters in production.")
+
+    if settings.rate_limit_enabled and settings.rate_limit_storage_uri.strip().lower() == "memory://":
+        errors.append("RATE_LIMIT_STORAGE_URI must use Redis in production (memory:// is single-instance only).")
+
+    allowed_origins = settings.allowed_origins_list
+    if not allowed_origins:
+        errors.append("ALLOWED_ORIGINS cannot be empty in production.")
+    else:
+        local_origins = [
+            origin
+            for origin in allowed_origins
+            if "localhost" in origin.lower() or "127.0.0.1" in origin
+        ]
+        if local_origins:
+            errors.append(f"ALLOWED_ORIGINS contains local origins in production: {', '.join(local_origins)}")
+
+        non_https_origins = [origin for origin in allowed_origins if not origin.lower().startswith("https://")]
+        if non_https_origins:
+            errors.append(f"ALLOWED_ORIGINS must use https in production: {', '.join(non_https_origins)}")
+
+        normalized_allowed = {_normalize_origin(origin) for origin in allowed_origins}
+        normalized_frontend = _normalize_origin(settings.frontend_url)
+        if normalized_frontend not in normalized_allowed:
+            errors.append("FRONTEND_URL must be present in ALLOWED_ORIGINS for production CORS.")
+
+    if not settings.frontend_url.startswith("https://"):
+        errors.append("FRONTEND_URL must use https in production.")
+
+    if not settings.google_client_id.strip() or not settings.google_client_secret.strip():
+        errors.append("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be configured in production.")
+
+    if settings.google_oauth_redirect_uri and not settings.google_oauth_redirect_uri.startswith("https://"):
+        errors.append("GOOGLE_OAUTH_REDIRECT_URI must use https in production.")
+
+    if errors:
+        raise RuntimeError(
+            "Invalid production configuration:\n- " + "\n- ".join(errors)
+        )
+
+
+_validate_runtime_settings()

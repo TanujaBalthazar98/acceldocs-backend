@@ -1,14 +1,108 @@
 """Health check endpoint and utility routes."""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
+from sqlalchemy import text
+
+from app.config import settings
+from app.database import engine
 
 router = APIRouter()
+
+
+def _normalize_origin(origin: str) -> str:
+    return origin.strip().rstrip("/")
+
+
+def _database_check() -> tuple[bool, str]:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True, "Database connection is healthy."
+    except Exception as exc:  # pragma: no cover - defensive runtime check
+        return False, f"Database check failed: {exc}"
 
 
 @router.get("/health")
 async def health():
     return {"status": "ok", "service": "acceldocs-backend"}
+
+
+@router.get("/ready")
+async def ready():
+    """Readiness check for operators and load balancers.
+
+    Returns 200 when the service is ready to serve traffic.
+    Returns 503 when required production guarantees are not met.
+    """
+    checks: list[dict[str, str | bool]] = []
+
+    db_ok, db_message = _database_check()
+    checks.append({"name": "database", "ok": db_ok, "message": db_message})
+
+    oauth_ok = bool(settings.google_client_id.strip() and settings.google_client_secret.strip())
+    oauth_message = "Google OAuth credentials are configured."
+    if not oauth_ok:
+        oauth_message = "Google OAuth credentials are missing."
+    checks.append({"name": "google_oauth", "ok": oauth_ok, "message": oauth_message})
+
+    cors_origins = settings.allowed_origins_list
+    cors_ok = bool(cors_origins)
+    cors_message = "CORS origins are configured."
+    if not cors_ok:
+        cors_message = "CORS origins are not configured."
+
+    if settings.is_production and cors_ok:
+        local_origins = [
+            origin for origin in cors_origins if "localhost" in origin.lower() or "127.0.0.1" in origin
+        ]
+        if local_origins:
+            cors_ok = False
+            cors_message = f"CORS contains local origins in production: {', '.join(local_origins)}"
+        elif any(not origin.lower().startswith("https://") for origin in cors_origins):
+            cors_ok = False
+            cors_message = "All CORS origins must be https in production."
+        else:
+            normalized_allowed = {_normalize_origin(origin) for origin in cors_origins}
+            if _normalize_origin(settings.frontend_url) not in normalized_allowed:
+                cors_ok = False
+                cors_message = "FRONTEND_URL must be present in ALLOWED_ORIGINS."
+
+    checks.append({"name": "cors", "ok": cors_ok, "message": cors_message})
+
+    rate_limit_ok = True
+    rate_limit_message = "Rate limiting storage is configured."
+    if settings.rate_limit_enabled:
+        if settings.rate_limit_storage_uri.strip().lower() == "memory://":
+            if settings.is_production:
+                rate_limit_ok = False
+                rate_limit_message = "Rate limiting uses memory:// in production (use Redis)."
+            else:
+                rate_limit_message = "Rate limiting uses memory:// (acceptable for development only)."
+    else:
+        rate_limit_message = "Rate limiting is disabled by configuration."
+
+    checks.append({"name": "rate_limiting", "ok": rate_limit_ok, "message": rate_limit_message})
+
+    if settings.is_production:
+        ready_ok = all(bool(c["ok"]) for c in checks)
+    else:
+        # In non-prod, only DB check is mandatory.
+        ready_ok = db_ok
+
+    payload = {
+        "status": "ready" if ready_ok else "degraded",
+        "environment": settings.environment,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
+    }
+
+    if settings.is_production and not ready_ok:
+        return JSONResponse(status_code=503, content=payload)
+
+    return payload
 
 
 @router.get("/robots.txt", response_class=PlainTextResponse)
