@@ -160,4 +160,8 @@ app.include_router(external_access_router, prefix="/api/external-access", tags=[
 app.include_router(functions_router, tags=["functions"])
 if agent_chat_router is not None:
     app.include_router(agent_chat_router, tags=["agent-chat"])
+from app.api.agent_inline import router as agent_inline_router
+app.include_router(agent_inline_router, tags=["agent-inline"])
+from app.api.agent_history import router as agent_history_router
+app.include_router(agent_history_router, tags=["agent-history"])
 app.include_router(ui_router, tags=["ui"])

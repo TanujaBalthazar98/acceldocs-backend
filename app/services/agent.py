@@ -258,24 +258,36 @@ async def agent_generate_doc(body: dict, db: Session, user: User | None) -> dict
     if not ticket_result.get("ok"):
         return ticket_result
 
-    # 2. Gather existing published pages as context
+    # 2. Gather relevant published pages as context (BM25-ranked)
     org = db.get(Organization, org_id)
     org_name = org.name if org else "the organization"
 
-    query = db.query(Page).filter(
-        Page.organization_id == org_id,
-        Page.is_published == True,  # noqa: E712
-        Page.published_html.isnot(None),
-    )
-    if section_id:
-        query = query.filter(Page.section_id == int(section_id))
-    context_pages = query.order_by(Page.updated_at.desc()).limit(10).all()
-
-    context_docs = ""
-    for p in context_pages:
-        text = _html_to_text(p.published_html or "")
-        if text:
-            context_docs += f"\n--- {p.title} ---\n{text[:2000]}\n"
+    search_query = f"{ticket_result['summary']} {ticket_result.get('description_text', '')[:200]}"
+    try:
+        from app.services.search import search_pages_bm25
+        bm25_results = search_pages_bm25(org_id, search_query, db, limit=10)
+        context_docs = ""
+        for r in bm25_results:
+            page = db.get(Page, r["id"])
+            if page:
+                text = _html_to_text(page.published_html or "")
+                if text:
+                    context_docs += f"\n--- {page.title} (relevance: {r['score']}) ---\n{text[:2000]}\n"
+    except Exception:
+        # Fallback to recent pages if BM25 fails
+        fallback_query = db.query(Page).filter(
+            Page.organization_id == org_id,
+            Page.is_published == True,  # noqa: E712
+            Page.published_html.isnot(None),
+        )
+        if section_id:
+            fallback_query = fallback_query.filter(Page.section_id == int(section_id))
+        context_pages = fallback_query.order_by(Page.updated_at.desc()).limit(10).all()
+        context_docs = ""
+        for p in context_pages:
+            text = _html_to_text(p.published_html or "")
+            if text:
+                context_docs += f"\n--- {p.title} ---\n{text[:2000]}\n"
 
     # 3. Call Claude
     import anthropic

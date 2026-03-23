@@ -9,13 +9,24 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from pydantic import BaseModel
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.api.drive import _create_drive_doc, _trash_drive_item, _move_drive_item, get_drive_credentials as _get_drive_creds_drive
 from app.auth.routes import get_current_user
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
-from app.models import Approval, Organization, OrgRole, Page, PageRedirect, Section, User
+from app.models import (
+    Approval,
+    Organization,
+    OrgRole,
+    Page,
+    PageComment,
+    PageFeedback,
+    PageRedirect,
+    Section,
+    User,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -241,6 +252,240 @@ def _upsert_page_redirect(
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@router.get("/engagement/overview")
+def engagement_overview(
+    limit: int = 10,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Organization-level feedback/comment insights for dashboard analytics."""
+    role = _resolve_org_role(user, db, x_org_id)
+    org_id = role.organization_id
+    safe_limit = max(1, min(limit, 50))
+
+    feedback_agg = (
+        db.query(
+            PageFeedback.page_id.label("page_id"),
+            func.sum(case((PageFeedback.vote == "up", 1), else_=0)).label("up"),
+            func.sum(case((PageFeedback.vote == "down", 1), else_=0)).label("down"),
+            func.max(PageFeedback.created_at).label("last_feedback_at"),
+        )
+        .filter(PageFeedback.organization_id == org_id)
+        .group_by(PageFeedback.page_id)
+        .subquery()
+    )
+
+    comments_agg = (
+        db.query(
+            PageComment.page_id.label("page_id"),
+            func.count(PageComment.id).label("comments"),
+            func.max(PageComment.created_at).label("last_comment_at"),
+        )
+        .filter(
+            PageComment.organization_id == org_id,
+            PageComment.is_deleted == False,  # noqa: E712
+        )
+        .group_by(PageComment.page_id)
+        .subquery()
+    )
+
+    page_rows = (
+        db.query(
+            Page.id.label("page_id"),
+            Page.title.label("page_title"),
+            Page.slug.label("page_slug"),
+            func.coalesce(feedback_agg.c.up, 0).label("up"),
+            func.coalesce(feedback_agg.c.down, 0).label("down"),
+            func.coalesce(comments_agg.c.comments, 0).label("comments"),
+            feedback_agg.c.last_feedback_at.label("last_feedback_at"),
+            comments_agg.c.last_comment_at.label("last_comment_at"),
+        )
+        .outerjoin(feedback_agg, feedback_agg.c.page_id == Page.id)
+        .outerjoin(comments_agg, comments_agg.c.page_id == Page.id)
+        .filter(Page.organization_id == org_id)
+        .filter(
+            (func.coalesce(feedback_agg.c.up, 0) + func.coalesce(feedback_agg.c.down, 0) + func.coalesce(comments_agg.c.comments, 0))
+            > 0
+        )
+        .order_by(
+            (
+                func.coalesce(feedback_agg.c.up, 0)
+                + func.coalesce(feedback_agg.c.down, 0)
+                + func.coalesce(comments_agg.c.comments, 0)
+            ).desc(),
+            func.coalesce(comments_agg.c.last_comment_at, feedback_agg.c.last_feedback_at).desc(),
+        )
+        .limit(safe_limit)
+        .all()
+    )
+
+    pages_payload: list[dict[str, Any]] = []
+    for row in page_rows:
+        up = int(row.up or 0)
+        down = int(row.down or 0)
+        total_feedback = up + down
+        total_comments = int(row.comments or 0)
+        helpful_ratio = round((up / total_feedback) * 100, 1) if total_feedback > 0 else None
+        last_feedback_at = row.last_feedback_at.isoformat() if row.last_feedback_at else None
+        last_comment_at = row.last_comment_at.isoformat() if row.last_comment_at else None
+        last_activity_at = max(filter(None, [last_feedback_at, last_comment_at]), default=None)
+        pages_payload.append(
+            {
+                "page_id": int(row.page_id),
+                "page_title": row.page_title,
+                "page_slug": row.page_slug,
+                "up": up,
+                "down": down,
+                "total_feedback": total_feedback,
+                "total_comments": total_comments,
+                "helpful_ratio": helpful_ratio,
+                "last_feedback_at": last_feedback_at,
+                "last_comment_at": last_comment_at,
+                "last_activity_at": last_activity_at,
+            }
+        )
+
+    recent_comments_rows = (
+        db.query(PageComment, Page.title)
+        .join(Page, Page.id == PageComment.page_id)
+        .filter(
+            PageComment.organization_id == org_id,
+            PageComment.is_deleted == False,  # noqa: E712
+        )
+        .order_by(PageComment.created_at.desc())
+        .limit(safe_limit)
+        .all()
+    )
+    recent_comments = [
+        {
+            "id": comment.id,
+            "page_id": comment.page_id,
+            "page_title": page_title,
+            "display_name": comment.display_name or "User",
+            "user_email": comment.user_email,
+            "body": comment.body,
+            "source": comment.source,
+            "created_at": comment.created_at.isoformat() if comment.created_at else None,
+        }
+        for comment, page_title in recent_comments_rows
+    ]
+
+    feedback_totals = (
+        db.query(
+            func.sum(case((PageFeedback.vote == "up", 1), else_=0)).label("up"),
+            func.sum(case((PageFeedback.vote == "down", 1), else_=0)).label("down"),
+            func.count(PageFeedback.id).label("total"),
+        )
+        .filter(PageFeedback.organization_id == org_id)
+        .one()
+    )
+    total_comments = (
+        db.query(func.count(PageComment.id))
+        .filter(
+            PageComment.organization_id == org_id,
+            PageComment.is_deleted == False,  # noqa: E712
+        )
+        .scalar()
+        or 0
+    )
+
+    return {
+        "summary": {
+            "total_feedback": int(feedback_totals.total or 0),
+            "helpful": int(feedback_totals.up or 0),
+            "not_helpful": int(feedback_totals.down or 0),
+            "total_comments": int(total_comments),
+            "pages_with_feedback": int(
+                db.query(func.count(func.distinct(PageFeedback.page_id)))
+                .filter(PageFeedback.organization_id == org_id)
+                .scalar()
+                or 0
+            ),
+            "commented_pages": int(
+                db.query(func.count(func.distinct(PageComment.page_id)))
+                .filter(
+                    PageComment.organization_id == org_id,
+                    PageComment.is_deleted == False,  # noqa: E712
+                )
+                .scalar()
+                or 0
+            ),
+        },
+        "pages": pages_payload,
+        "recent_comments": recent_comments,
+    }
+
+
+@router.get("/{page_id}/engagement")
+def page_engagement_detail(
+    page_id: int,
+    limit: int = 20,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Page-level feedback/comment feed for dashboard moderation."""
+    org_id = _get_org_id(user, db, x_org_id)
+    safe_limit = max(1, min(limit, 100))
+    page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    feedback_rows = (
+        db.query(PageFeedback)
+        .filter(PageFeedback.organization_id == org_id, PageFeedback.page_id == page_id)
+        .order_by(PageFeedback.created_at.desc())
+        .limit(safe_limit)
+        .all()
+    )
+    comments_rows = (
+        db.query(PageComment)
+        .filter(
+            PageComment.organization_id == org_id,
+            PageComment.page_id == page_id,
+            PageComment.is_deleted == False,  # noqa: E712
+        )
+        .order_by(PageComment.created_at.desc())
+        .limit(safe_limit)
+        .all()
+    )
+
+    up_count = sum(1 for row in feedback_rows if row.vote == "up")
+    down_count = sum(1 for row in feedback_rows if row.vote == "down")
+
+    return {
+        "page": {"id": page.id, "title": page.title, "slug": page.slug},
+        "feedback": {
+            "up": up_count,
+            "down": down_count,
+            "total": up_count + down_count,
+            "items": [
+                {
+                    "id": row.id,
+                    "vote": row.vote,
+                    "message": row.message,
+                    "user_email": row.user_email,
+                    "source": row.source,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in feedback_rows
+            ],
+        },
+        "comments": [
+            {
+                "id": row.id,
+                "display_name": row.display_name or "User",
+                "user_email": row.user_email,
+                "body": row.body,
+                "source": row.source,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in comments_rows
+        ],
+    }
+
 
 @router.get("")
 def list_pages(

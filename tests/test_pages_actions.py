@@ -6,7 +6,7 @@ import jwt
 
 from app.api import pages as pages_api
 from app.config import settings
-from app.models import Organization, OrgRole, Page, Section, User
+from app.models import Organization, OrgRole, Page, PageComment, PageFeedback, Section, User
 
 
 def _auth_header(user_id: int, email: str) -> dict[str, str]:
@@ -373,3 +373,88 @@ def test_update_page_visibility_override(client, db):
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["visibility_override"] == "internal"
+
+
+def test_engagement_overview_returns_feedback_and_comments(client, db):
+    user, org = _seed_user_org(db)
+    section = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Docs",
+        slug="docs",
+        section_type="section",
+        is_published=True,
+        display_order=0,
+    )
+    db.add(section)
+    db.flush()
+
+    page = Page(
+        organization_id=org.id,
+        section_id=section.id,
+        google_doc_id="doc-engage-1",
+        title="Engagement Page",
+        slug="engagement-page",
+        html_content="<h1>Engage</h1>",
+        status="published",
+        is_published=True,
+        display_order=0,
+        owner_id=user.id,
+    )
+    db.add(page)
+    db.flush()
+
+    db.add_all(
+        [
+            PageFeedback(
+                organization_id=org.id,
+                page_id=page.id,
+                user_id=user.id,
+                user_email=user.email,
+                vote="up",
+                message="Great page",
+                source="internal",
+            ),
+            PageFeedback(
+                organization_id=org.id,
+                page_id=page.id,
+                user_id=user.id,
+                user_email=user.email,
+                vote="down",
+                message="Needs examples",
+                source="internal",
+            ),
+            PageComment(
+                organization_id=org.id,
+                page_id=page.id,
+                user_id=user.id,
+                user_email=user.email,
+                display_name=user.name,
+                body="Please add one more troubleshooting section.",
+                source="internal",
+            ),
+        ]
+    )
+    db.commit()
+
+    headers = _auth_header(user.id, user.email)
+    overview = client.get("/api/pages/engagement/overview", headers=headers)
+    assert overview.status_code == 200
+    payload = overview.json()
+
+    assert payload["summary"]["total_feedback"] == 2
+    assert payload["summary"]["helpful"] == 1
+    assert payload["summary"]["not_helpful"] == 1
+    assert payload["summary"]["total_comments"] == 1
+    assert len(payload["pages"]) == 1
+    assert payload["pages"][0]["page_id"] == page.id
+    assert payload["pages"][0]["total_feedback"] == 2
+    assert payload["pages"][0]["total_comments"] == 1
+    assert payload["recent_comments"][0]["page_id"] == page.id
+
+    detail = client.get(f"/api/pages/{page.id}/engagement", headers=headers)
+    assert detail.status_code == 200
+    detail_payload = detail.json()
+    assert detail_payload["feedback"]["up"] == 1
+    assert detail_payload["feedback"]["down"] == 1
+    assert len(detail_payload["comments"]) == 1

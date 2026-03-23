@@ -726,7 +726,8 @@ def test_docs_page_renders_last_updated_metadata(client, db, monkeypatch):
 
     resp = client.get("/docs/updated-org/release-notes")
     assert resp.status_code == 200
-    assert "Last updated: Mar 14, 2026 10:15 UTC" in resp.text
+    assert "Last updated:" in resp.text
+    assert "Mar 14, 2026 10:15 UTC" in resp.text
 
 
 def test_docs_page_feedback_and_comments_api(client, db, monkeypatch):

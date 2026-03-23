@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode, urlparse
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -1100,6 +1100,29 @@ def _render(template_name: str, **ctx) -> str:
     return tpl.render(**ctx)
 
 
+def _html_to_text_snippet(html: str, max_chars: int = 160) -> str:
+    """Strip HTML tags and return the first *max_chars* characters of plain text."""
+    from html.parser import HTMLParser
+
+    class _Extractor(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self._parts: list[str] = []
+
+        def handle_data(self, data: str):
+            self._parts.append(data)
+
+        def text(self) -> str:
+            return " ".join(self._parts).strip()
+
+    ext = _Extractor()
+    ext.feed(html or "")
+    txt = ext.text()
+    if len(txt) > max_chars:
+        txt = txt[:max_chars].rsplit(" ", 1)[0] + "..."
+    return txt
+
+
 def _base_ctx(
     org: Organization,
     nav_sections: list,
@@ -1108,6 +1131,8 @@ def _base_ctx(
     hierarchy_mode: str,
     audience: str | None = None,
     docs_root: str = "/docs",
+    *,
+    base_url: str = "",
 ) -> dict:
     normalized_audience = _normalize_audience(audience)
     normalized_docs_root = docs_root.rstrip("/") or "/docs"
@@ -1174,6 +1199,14 @@ def _base_ctx(
         "show_search_on_landing": show_search_on_landing,
         "show_featured_projects": show_featured_projects,
         "copyright": copyright_text,
+        # SEO
+        "base_url": base_url,
+        "canonical_url": "",       # set by caller
+        "meta_description": "",    # set by caller
+        "og_image": "",            # set by caller
+        "page_published_at": "",   # set by caller (ISO date)
+        "page_modified_at": "",    # set by caller (ISO date)
+        "breadcrumbs": [],         # set by caller [{name, url}]
         # Navigation
         "nav_sections": nav_sections,
         "top_sections": top_sections,
@@ -1448,6 +1481,7 @@ def _docs_landing_impl(
             landing_get_started_slug = first_page[1] if first_page else None
         search_index = _build_search_index(all_top_nodes)
 
+        _base = str(request.base_url).rstrip("/")
         ctx = _base_ctx(
             org,
             [],
@@ -1456,7 +1490,12 @@ def _docs_landing_impl(
             hierarchy_mode,
             template_audience,
             docs_root=docs_root,
+            base_url=_base,
         )
+        _org_s = org.slug or str(org.id)
+        ctx["canonical_url"] = f"{_base}{docs_root}/{_org_s}"
+        ctx["meta_description"] = org.tagline or f"{org.name} documentation"
+        ctx["og_image"] = org.logo_url or ""
         ctx["landing_products"] = cards if hierarchy_mode == "product" else []
         ctx["landing_selected_product"] = selected_product_node.get("slug") if selected_product_node else None
         ctx["landing_versions"] = landing_versions
@@ -1690,6 +1729,8 @@ def _render_docs_page(
     audience_for_links: str | None = None,
     docs_root: str = "/docs",
     version_slug: str | None = None,
+    *,
+    request: Request | None = None,
 ) -> HTMLResponse:
     section = db.get(Section, page.section_id) if page.section_id else None
     primary = org.primary_color or DEFAULT_PRIMARY_COLOR
@@ -1743,6 +1784,7 @@ def _render_docs_page(
             feedback_summary[vote] = int(count or 0)
     feedback_summary["total"] = feedback_summary["up"] + feedback_summary["down"]
 
+    _base = str(request.base_url).rstrip("/") if request else ""
     ctx = _base_ctx(
         org,
         nav_meta["nav_sections"],
@@ -1751,7 +1793,21 @@ def _render_docs_page(
         hierarchy_mode,
         audience_for_links,
         docs_root=docs_root,
+        base_url=_base,
     )
+    # SEO context
+    _org_s = org.slug or str(org.id)
+    ctx["canonical_url"] = f"{_base}{docs_root}/{_org_s}/p/{page.id}/{page.slug}"
+    ctx["meta_description"] = _html_to_text_snippet(page.published_html or page.html_content or "", 160) or f"{page.title} documentation"
+    ctx["og_image"] = getattr(page, "featured_image_url", None) or org.logo_url or ""
+    ctx["page_published_at"] = page.created_at.isoformat() if page.created_at else ""
+    ctx["page_modified_at"] = page.updated_at.isoformat() if page.updated_at else ""
+    _section = db.get(Section, page.section_id) if page.section_id else None
+    _crumbs = [{"name": org.name, "url": f"{_base}{docs_root}/{_org_s}"}]
+    if _section:
+        _crumbs.append({"name": _section.name, "url": ""})
+    _crumbs.append({"name": page.title, "url": ctx["canonical_url"]})
+    ctx["breadcrumbs"] = _crumbs
     ctx["top_tabs"] = nav_meta["top_tabs"]
     ctx["top_versions"] = nav_meta["top_versions"]
     ctx["current_tab_slug"] = nav_meta["current_tab_slug"]
@@ -1777,7 +1833,7 @@ def _render_docs_page(
     ctx["viewer_signed_in"] = bool(request_user)
     ctx["viewer_email"] = request_user.email if request_user and request_user.email else None
     ctx["viewer_name"] = _viewer_display_name(request_user)
-    ctx["can_comment"] = bool(viewer_scope.is_org_member or viewer_scope.is_external_allowed)
+    ctx["can_comment"] = bool(request_user and (viewer_scope.is_org_member or viewer_scope.is_external_allowed))
     ctx["can_feedback"] = True
 
     html = _render(
@@ -1937,6 +1993,7 @@ def _docs_page_by_id_impl(
             audience_for_links=template_audience,
             docs_root=docs_root,
             version_slug=version,
+            request=request,
         )
     finally:
         _close_db(db)
@@ -2116,6 +2173,7 @@ def _docs_page_impl(
             audience_for_links=template_audience,
             docs_root=docs_root,
             version_slug=version,
+            request=request,
         )
     finally:
         _close_db(db)
@@ -2611,7 +2669,7 @@ async def public_docs_sitemap(org_slug: str, request: Request):
     for page in pages:
         if not page.slug:
             continue
-        loc = f"{docs_base}/{_escape(page.slug)}"
+        loc = f"{docs_base}/p/{page.id}/{_escape(page.slug)}"
         lastmod = ""
         if page.updated_at:
             lastmod = f"<lastmod>{page.updated_at.strftime('%Y-%m-%d')}</lastmod>"
@@ -2623,3 +2681,95 @@ async def public_docs_sitemap(org_slug: str, request: Request):
     xml += "\n</urlset>"
 
     return FastResponse(content=xml, media_type="application/xml")
+
+
+# ---------------------------------------------------------------------------
+# GEO: Per-org llms.txt / llms-full.txt
+# ---------------------------------------------------------------------------
+
+def _org_published_pages_with_sections(org_slug: str, db: Session):
+    """Shared helper: return (org, pages, sections_by_id) for GEO endpoints."""
+    org = db.query(Organization).filter(Organization.slug == org_slug).first()
+    if not org and org_slug.isdigit():
+        org = db.get(Organization, int(org_slug))
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    sections = {
+        s.id: s
+        for s in db.query(Section).filter(Section.organization_id == org.id).all()
+    }
+    pages = (
+        db.query(Page)
+        .filter(Page.organization_id == org.id, Page.is_published == True)  # noqa: E712
+        .order_by(Page.display_order)
+        .all()
+    )
+    return org, pages, sections
+
+
+@router.get("/docs/{org_slug}/llms.txt")
+def org_llms_txt(org_slug: str, request: Request) -> Response:
+    """Per-org llms.txt — page index for AI crawlers (llmstxt.org spec)."""
+    db = _get_db()
+    try:
+        org, pages, sections = _org_published_pages_with_sections(org_slug, db)
+        base = str(request.base_url).rstrip("/")
+        lines = [
+            f"# {org.name}",
+            "",
+            f"> {org.tagline or (org.name + ' documentation')}",
+            "",
+            "## Pages",
+            "",
+        ]
+        for page in pages:
+            sec = sections.get(page.section_id)
+            sec_label = f" ({sec.name})" if sec else ""
+            url = f"{base}/docs/{org_slug}/p/{page.id}/{page.slug}"
+            snippet = _html_to_text_snippet(page.published_html or "", 160)
+            lines.append(f"- [{page.title}]({url}){sec_label}")
+            if snippet:
+                lines.append(f"  {snippet}")
+            lines.append("")
+        return Response(
+            content="\n".join(lines),
+            media_type="text/plain; charset=utf-8",
+        )
+    finally:
+        _close_db(db)
+
+
+@router.get("/docs/{org_slug}/llms-full.txt")
+def org_llms_full_txt(org_slug: str, request: Request) -> Response:
+    """Per-org llms-full.txt — full text of all published pages for AI crawlers."""
+    db = _get_db()
+    try:
+        org, pages, sections = _org_published_pages_with_sections(org_slug, db)
+        base = str(request.base_url).rstrip("/")
+        parts = [
+            f"# {org.name}",
+            f"> {org.tagline or (org.name + ' documentation')}",
+            "",
+        ]
+        for page in pages[:100]:  # cap at 100 pages
+            sec = sections.get(page.section_id)
+            url = f"{base}/docs/{org_slug}/p/{page.id}/{page.slug}"
+            full_text = _html_to_text_snippet(page.published_html or "", max_chars=50000)
+            updated = page.updated_at.strftime("%Y-%m-%d") if page.updated_at else ""
+            parts.append(f"# {page.title}")
+            parts.append(f"URL: {url}")
+            if sec:
+                parts.append(f"Section: {sec.name}")
+            if updated:
+                parts.append(f"Last updated: {updated}")
+            parts.append("")
+            parts.append(full_text)
+            parts.append("")
+            parts.append("---")
+            parts.append("")
+        return Response(
+            content="\n".join(parts),
+            media_type="text/plain; charset=utf-8",
+        )
+    finally:
+        _close_db(db)

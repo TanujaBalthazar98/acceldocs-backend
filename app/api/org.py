@@ -127,6 +127,11 @@ def _org_dict(org: Organization, role: OrgRole, member_count: int, has_drive: bo
         "mcp_enabled": org.mcp_enabled if org.mcp_enabled is not None else False,
         "openapi_spec_json": org.openapi_spec_json,
         "openapi_spec_url": org.openapi_spec_url,
+        # AI agent (BYOK)
+        "ai_provider": getattr(org, "ai_provider", None),
+        "ai_has_key": bool(getattr(org, "ai_api_key_encrypted", None)),
+        "ai_model": getattr(org, "ai_model", None),
+        "ai_base_url": getattr(org, "ai_base_url", None),
         # Infrastructure
         "drive_folder_id": org.drive_folder_id,
         "has_drive_connected": has_drive,
@@ -380,6 +385,94 @@ def update_org(
         GoogleToken.organization_id == org.id,
     ).first() is not None
     return _org_dict(org, role, member_count, has_drive)
+
+
+# ---------------------------------------------------------------------------
+# AI Settings (BYOK — Bring Your Own Key)
+# ---------------------------------------------------------------------------
+
+class AISettingsUpdate(BaseModel):
+    ai_provider: str | None = None  # gemini | anthropic | groq | openai_compat
+    ai_api_key: str | None = None  # plaintext — will be encrypted before storage
+    ai_model: str | None = None
+    ai_base_url: str | None = None  # for openai_compat
+
+
+@router.get("/ai-settings")
+def get_ai_settings(
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    org, role = _get_org(user, db, org_id=x_org_id)
+    return {
+        "ai_provider": getattr(org, "ai_provider", None),
+        "ai_has_key": bool(getattr(org, "ai_api_key_encrypted", None)),
+        "ai_model": getattr(org, "ai_model", None),
+        "ai_base_url": getattr(org, "ai_base_url", None),
+    }
+
+
+@router.patch("/ai-settings")
+def update_ai_settings(
+    body: AISettingsUpdate,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    org, role = _get_org(user, db, org_id=x_org_id)
+    if role.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Owner or admin role required to manage AI settings")
+
+    valid_providers = {"gemini", "anthropic", "groq", "openai_compat"}
+
+    if body.ai_provider is not None:
+        if body.ai_provider and body.ai_provider not in valid_providers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid provider. Must be one of: {', '.join(sorted(valid_providers))}",
+            )
+        org.ai_provider = body.ai_provider or None
+
+    if body.ai_api_key is not None:
+        if body.ai_api_key.strip():
+            from app.services.encryption import get_encryption_service
+            enc = get_encryption_service()
+            org.ai_api_key_encrypted = enc.encrypt(body.ai_api_key.strip())
+        else:
+            org.ai_api_key_encrypted = None
+
+    if body.ai_model is not None:
+        org.ai_model = body.ai_model.strip() or None
+
+    if body.ai_base_url is not None:
+        org.ai_base_url = body.ai_base_url.strip() or None
+
+    db.commit()
+    return {
+        "ok": True,
+        "ai_provider": org.ai_provider,
+        "ai_has_key": bool(org.ai_api_key_encrypted),
+        "ai_model": org.ai_model,
+        "ai_base_url": org.ai_base_url,
+    }
+
+
+@router.delete("/ai-settings")
+def delete_ai_settings(
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    org, role = _get_org(user, db, org_id=x_org_id)
+    if role.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Owner or admin role required")
+    org.ai_provider = None
+    org.ai_api_key_encrypted = None
+    org.ai_model = None
+    org.ai_base_url = None
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/members")

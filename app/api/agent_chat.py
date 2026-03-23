@@ -7,6 +7,7 @@ Supports LLM providers:
   - openai_compat — any OpenAI-compatible endpoint (Ollama, vLLM, etc.)
 """
 
+import dataclasses
 import json
 import logging
 from datetime import datetime, timezone
@@ -35,12 +36,62 @@ GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 
 
 # ---------------------------------------------------------------------------
+# LLM configuration — per-org BYOK with env-var fallback
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class LLMConfig:
+    provider: str
+    api_key: str
+    model: str
+    base_url: str = ""
+
+
+def _resolve_llm_config(org_id: int, db: Session) -> LLMConfig:
+    """Resolve LLM config: org BYOK settings first, then env-var fallback."""
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+
+    # Check org-level BYOK settings
+    if org and org.ai_provider and org.ai_api_key_encrypted:
+        try:
+            from app.services.encryption import get_encryption_service
+            enc = get_encryption_service()
+            api_key = enc.decrypt(org.ai_api_key_encrypted)
+            return LLMConfig(
+                provider=org.ai_provider,
+                api_key=api_key,
+                model=org.ai_model or "",
+                base_url=org.ai_base_url or "",
+            )
+        except Exception:
+            logger.warning("Failed to decrypt org %s AI key, falling back to env vars", org_id)
+
+    # Fall back to global env vars
+    provider = (settings.agent_provider or "gemini").lower()
+    if provider == "gemini":
+        return LLMConfig(provider="gemini", api_key=settings.gemini_api_key or "", model=settings.gemini_model or "gemini-2.0-flash")
+    if provider == "groq":
+        return LLMConfig(provider="groq", api_key=settings.groq_api_key or "", model=settings.groq_model or "meta-llama/llama-4-scout-17b-16e-instruct")
+    if provider == "anthropic":
+        return LLMConfig(provider="anthropic", api_key=settings.anthropic_api_key or "", model=settings.anthropic_model or "claude-sonnet-4-5-20250514")
+    if provider == "openai_compat":
+        return LLMConfig(
+            provider="openai_compat",
+            api_key=settings.openai_compat_api_key or "",
+            model=settings.openai_compat_model or "",
+            base_url=settings.openai_compat_base_url or "",
+        )
+    return LLMConfig(provider=provider, api_key="", model="")
+
+
+# ---------------------------------------------------------------------------
 # Request schema
 # ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []
+    conversation_id: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +155,7 @@ TOOL_DEFS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "section_id": {"type": "integer", "description": "The section ID to list pages for."},
+                "section_id": {"type": ["integer", "string"], "description": "The numeric section ID to list pages for. Must be a number. Use list_sections first."},
             },
             "required": ["section_id"],
         },
@@ -115,7 +166,7 @@ TOOL_DEFS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "page_id": {"type": "integer", "description": "The page ID to read."},
+                "page_id": {"type": ["integer", "string"], "description": "The numeric page ID to read. Must be a number."},
             },
             "required": ["page_id"],
         },
@@ -132,6 +183,37 @@ TOOL_DEFS = [
         },
     },
     {
+        "name": "search_knowledge_base",
+        "description": "Semantic search across all published documentation using relevance ranking (BM25). Returns the most relevant pages with content snippets. Better than keyword search for finding related content to use as context when writing new docs.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Natural language search query."},
+                "limit": {"type": ["integer", "string"], "description": "Max results to return (default 5)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "list_templates",
+        "description": "List available documentation templates (API Reference, Getting Started, FAQ, Changelog, How-To Guide, Troubleshooting). Use this to help users create structured documentation.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "create_from_template",
+        "description": "Create a new documentation page from a template. The template structure is filled with content based on the user's description and existing knowledge base context.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "template_slug": {"type": "string", "description": "Template to use (e.g. 'api-reference', 'getting-started', 'faq', 'changelog', 'how-to-guide', 'troubleshooting')."},
+                "title": {"type": "string", "description": "The page title."},
+                "description": {"type": "string", "description": "What the page should cover. Be specific — the AI uses this to fill in the template."},
+                "section_id": {"type": ["integer", "string"], "description": "The numeric section ID to place the page in. Must be a number. Use list_sections first."},
+            },
+            "required": ["template_slug", "title", "description"],
+        },
+    },
+    {
         "name": "list_members",
         "description": "List all team members in the workspace with their roles (owner, admin, editor, reviewer, viewer). Use this to understand who has access and what roles exist.",
         "parameters": {"type": "object", "properties": {}},
@@ -145,9 +227,9 @@ TOOL_DEFS = [
             "properties": {
                 "title": {"type": "string", "description": "The page title."},
                 "content": {"type": "string", "description": "The documentation content in markdown format."},
-                "section_id": {"type": "integer", "description": "The section ID to place the page in."},
+                "section_id": {"type": ["integer", "string"], "description": "The numeric section ID to place the page in. Must be a number (e.g. 5), not a name or slug. Use list_sections first to find available section IDs."},
             },
-            "required": ["title", "content", "section_id"],
+            "required": ["title", "content"],
         },
     },
     {
@@ -157,7 +239,7 @@ TOOL_DEFS = [
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "The section name."},
-                "parent_id": {"type": "integer", "description": "Optional parent section ID for nesting. Omit for a top-level section."},
+                "parent_id": {"type": ["integer", "string", "null"], "description": "Optional numeric parent section ID for nesting. Omit or null for a top-level section."},
             },
             "required": ["name"],
         },
@@ -169,10 +251,10 @@ TOOL_DEFS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "page_id": {"type": "integer", "description": "The page ID to update."},
-                "title": {"type": "string", "description": "New title for the page."},
-                "section_id": {"type": "integer", "description": "New section ID to move the page to."},
-                "display_order": {"type": "integer", "description": "New display order (0-based)."},
+                "page_id": {"type": ["integer", "string"], "description": "The numeric page ID to update. Must be a number."},
+                "title": {"type": ["string", "null"], "description": "New title for the page."},
+                "section_id": {"type": ["integer", "string", "null"], "description": "New numeric section ID to move the page to."},
+                "display_order": {"type": ["integer", "string", "null"], "description": "New display order (0-based)."},
             },
             "required": ["page_id"],
         },
@@ -183,7 +265,7 @@ TOOL_DEFS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "page_id": {"type": "integer", "description": "The page ID to publish."},
+                "page_id": {"type": ["integer", "string"], "description": "The numeric page ID to publish."},
             },
             "required": ["page_id"],
         },
@@ -194,7 +276,7 @@ TOOL_DEFS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "page_id": {"type": "integer", "description": "The page ID to unpublish."},
+                "page_id": {"type": ["integer", "string"], "description": "The numeric page ID to unpublish."},
             },
             "required": ["page_id"],
         },
@@ -205,7 +287,7 @@ TOOL_DEFS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "page_id": {"type": "integer", "description": "The page ID to sync."},
+                "page_id": {"type": ["integer", "string"], "description": "The numeric page ID to sync."},
             },
             "required": ["page_id"],
         },
@@ -216,7 +298,7 @@ TOOL_DEFS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "page_id": {"type": "integer", "description": "The page ID to duplicate."},
+                "page_id": {"type": ["integer", "string"], "description": "The numeric page ID to duplicate."},
             },
             "required": ["page_id"],
         },
@@ -227,7 +309,7 @@ TOOL_DEFS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "page_id": {"type": "integer", "description": "The page ID to delete."},
+                "page_id": {"type": ["integer", "string"], "description": "The numeric page ID to delete."},
             },
             "required": ["page_id"],
         },
@@ -251,6 +333,18 @@ TOOL_DEFS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query for Confluence."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_search",
+        "description": "Search the internet for up-to-date information. Use this when the user asks about external topics, current releases, news, or anything not found in the internal knowledge base. Returns web search results with titles, URLs, and snippets.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query to look up on the web."},
+                "max_results": {"type": ["integer", "string"], "description": "Maximum number of results to return (default 5, max 10)."},
             },
             "required": ["query"],
         },
@@ -281,15 +375,21 @@ def _tools_for_gemini():
         # Gemini needs properties to be non-empty for function declarations
         schema = None
         if params.get("properties"):
+            gemini_props = {}
+            for k, v in params["properties"].items():
+                raw_type = v.get("type", "string")
+                # Gemini doesn't support union types — pick the first non-null type
+                if isinstance(raw_type, list):
+                    primary = next((t for t in raw_type if t not in ("null",)), "string")
+                else:
+                    primary = raw_type
+                gemini_props[k] = types.Schema(
+                    type=primary.upper(),
+                    description=v.get("description", ""),
+                )
             schema = types.Schema(
                 type="OBJECT",
-                properties={
-                    k: types.Schema(
-                        type=v.get("type", "string").upper(),
-                        description=v.get("description", ""),
-                    )
-                    for k, v in params["properties"].items()
-                },
+                properties=gemini_props,
                 required=params.get("required", []),
             )
         else:
@@ -311,20 +411,42 @@ def _tools_for_gemini():
 async def _tool_list_sections(
     _input: dict, user: User, org_id: int, db: Session,
 ) -> dict:
-    sections = db.query(Section).filter(Section.organization_id == org_id).all()
+    sections = db.query(Section).filter(
+        Section.organization_id == org_id,
+    ).order_by(Section.display_order).all()
+
+    # Build a lookup for hierarchy display
+    by_id = {s.id: s for s in sections}
     result = []
     for s in sections:
         page_count = db.query(func.count(Page.id)).filter(
             Page.section_id == s.id,
         ).scalar() or 0
+
+        # Build a human-readable path like "Product > Getting Started > Tutorials"
+        path_parts = []
+        current = s
+        while current:
+            path_parts.insert(0, current.name)
+            current = by_id.get(current.parent_id) if current.parent_id else None
+
+        section_type = getattr(s, "section_type", "section")
+        # Only leaf sections (those with no children) should have pages created in them
+        has_children = any(c.parent_id == s.id for c in sections)
+
         result.append({
             "id": s.id,
             "name": s.name,
+            "full_path": " > ".join(path_parts),
             "parent_id": s.parent_id,
-            "section_type": getattr(s, "section_type", "section"),
+            "section_type": section_type,
+            "is_container": has_children,  # True = has sub-sections, prefer placing pages in children
             "page_count": page_count,
         })
-    return {"sections": result}
+    return {
+        "sections": result,
+        "hint": "Use the 'id' field when creating pages. Prefer placing pages in leaf sections (is_container=false). The full_path shows where each section sits in the hierarchy.",
+    }
 
 
 async def _tool_list_pages(
@@ -402,6 +524,181 @@ async def _tool_search_docs(
     return {"results": results, "count": len(results)}
 
 
+async def _tool_search_knowledge_base(
+    input_data: dict, user: User, org_id: int, db: Session,
+) -> dict:
+    """BM25-ranked semantic search across published pages."""
+    from app.services.search import search_pages_bm25
+
+    query = (input_data.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    limit = input_data.get("limit", 5)
+    results = search_pages_bm25(org_id, query, db, limit=limit)
+    # Enrich with longer content for agent context
+    enriched = []
+    for r in results:
+        page = db.get(Page, r["id"])
+        text = _html_to_text(page.published_html or page.html_content or "") if page else ""
+        enriched.append({**r, "content": text[:3000]})
+    return {"results": enriched, "count": len(enriched)}
+
+
+async def _tool_list_templates(
+    input_data: dict, user: User, org_id: int, db: Session,
+) -> dict:
+    from app.services.templates import list_template_summaries
+    return {"templates": list_template_summaries()}
+
+
+async def _tool_create_from_template(
+    input_data: dict, user: User, org_id: int, db: Session,
+) -> dict:
+    """Create a page from a template, filled with AI-generated content."""
+    from app.services.templates import get_template_by_slug
+    from app.services.search import search_pages_bm25
+
+    template_slug = (input_data.get("template_slug") or "").strip()
+    title = (input_data.get("title") or "").strip()
+    description = (input_data.get("description") or "").strip()
+    section_id = input_data.get("section_id")
+
+    if not template_slug or not title:
+        return {"error": "template_slug and title are required"}
+
+    # Resolve section — same logic as create_draft
+    if not section_id:
+        all_sections = db.query(Section).filter(
+            Section.organization_id == org_id,
+        ).order_by(Section.display_order).all()
+        if not all_sections:
+            return {"error": "No sections exist. Create a section first using create_section."}
+        parent_ids = {s.parent_id for s in all_sections if s.parent_id}
+        leaves = [s for s in all_sections if s.id not in parent_ids]
+        if len(leaves) == 1:
+            section_id = leaves[0].id
+        elif len(all_sections) == 1:
+            section_id = all_sections[0].id
+        else:
+            section_names = [f"  - id={s.id}: {s.name}" for s in leaves[:10]]
+            return {
+                "error": "section_id is required when multiple sections exist. "
+                "Call list_sections first to find the right section. "
+                "Available sections:\n" + "\n".join(section_names),
+            }
+
+    template = get_template_by_slug(template_slug)
+    if not template:
+        return {"error": f"Template '{template_slug}' not found. Use list_templates to see available options."}
+
+    # Gather relevant context from knowledge base
+    context_docs = ""
+    if description:
+        try:
+            results = search_pages_bm25(org_id, description, db, limit=5)
+            for r in results:
+                page = db.get(Page, r["id"])
+                if page:
+                    text = _html_to_text(page.published_html or page.html_content or "")
+                    if text:
+                        context_docs += f"\n--- {page.title} ---\n{text[:1500]}\n"
+        except Exception:
+            pass  # proceed without context
+
+    # Build the template content with title substituted
+    template_content = template["content"].replace("{title}", title)
+
+    # Use LLM to fill the template
+    org = db.get(Organization, org_id)
+    org_name = org.name if org else "the organization"
+
+    fill_prompt = (
+        f"You are a technical documentation writer for {org_name}. "
+        f"Fill in the following documentation template with real, detailed content based on the description provided. "
+        f"Keep the markdown structure and headings from the template. Replace placeholder text with actual content. "
+        f"Start directly with the content — no preamble.\n\n"
+        f"Template structure:\n{template_content}\n\n"
+        f"Description of what to write: {description}\n"
+    )
+    if context_docs:
+        fill_prompt += f"\nExisting documentation for style reference:\n{context_docs}"
+
+    # Single-turn LLM call using per-org config
+    llm_config = _resolve_llm_config(org_id, db)
+    generated_content = await _llm_single_turn(fill_prompt, llm_config)
+
+    # Create the draft using existing tool
+    return await _tool_create_draft(
+        {"title": title, "content": generated_content, "section_id": section_id},
+        user, org_id, db,
+    )
+
+
+async def _llm_single_turn(prompt: str, llm_config: LLMConfig | None = None) -> str:
+    """Single-turn LLM call using the given or default LLM config."""
+    if llm_config is None:
+        # Legacy fallback — use env vars directly (for calls without org context)
+        from app.config import settings as _settings
+        provider = (_settings.agent_provider or "gemini").lower()
+        api_key = ""
+        model = ""
+        base_url = ""
+        if provider == "gemini":
+            api_key, model = _settings.gemini_api_key or "", _settings.gemini_model or "gemini-2.0-flash"
+        elif provider == "groq":
+            api_key, model = _settings.groq_api_key or "", _settings.groq_model or "meta-llama/llama-4-scout-17b-16e-instruct"
+        elif provider == "anthropic":
+            api_key, model = _settings.anthropic_api_key or "", _settings.anthropic_model or "claude-sonnet-4-5-20250514"
+        elif provider == "openai_compat":
+            api_key, model = _settings.openai_compat_api_key or "", _settings.openai_compat_model or ""
+            base_url = _settings.openai_compat_base_url or ""
+        llm_config = LLMConfig(provider=provider, api_key=api_key, model=model, base_url=base_url)
+
+    if not llm_config.api_key:
+        return "(No LLM provider configured — set up AI settings in workspace settings)"
+
+    provider = llm_config.provider.lower()
+
+    if provider == "anthropic":
+        import anthropic
+        client = anthropic.AsyncAnthropic(api_key=llm_config.api_key)
+        msg = await client.messages.create(
+            model=llm_config.model or "claude-sonnet-4-5-20250514",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text if msg.content else ""
+
+    if provider in ("groq", "openai_compat"):
+        import httpx
+        base_url = llm_config.base_url or ("https://api.groq.com/openai" if provider == "groq" else "")
+        if not base_url:
+            return "(No base URL configured for OpenAI-compatible provider)"
+        async with httpx.AsyncClient() as http:
+            resp = await http.post(
+                f"{base_url.rstrip('/')}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {llm_config.api_key}"},
+                json={
+                    "model": llm_config.model or "meta-llama/llama-4-scout-17b-16e-instruct",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 4096,
+                },
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+
+    # Default: Gemini
+    from google import genai
+    client = genai.Client(api_key=llm_config.api_key)
+    resp = client.models.generate_content(
+        model=llm_config.model or "gemini-2.0-flash",
+        contents=prompt,
+    )
+    return resp.text or ""
+
+
 def _markdown_to_docs_requests(markdown: str) -> list[dict]:
     """Convert markdown text to Google Docs API batchUpdate requests."""
     import re
@@ -463,15 +760,43 @@ async def _tool_create_draft(
     content = (input_data.get("content") or "").strip()
     section_id = input_data.get("section_id")
 
-    if not title or not content or not section_id:
-        return {"error": "title, content, and section_id are all required"}
+    if not title or not content:
+        return {"error": "title and content are required"}
+
+    # Resolve section
+    if not section_id:
+        # Only auto-pick if there's exactly one leaf section
+        all_sections = db.query(Section).filter(
+            Section.organization_id == org_id,
+        ).order_by(Section.display_order).all()
+        if not all_sections:
+            return {"error": "No sections exist. Create a section first using create_section."}
+        # Find leaf sections (no children)
+        parent_ids = {s.parent_id for s in all_sections if s.parent_id}
+        leaves = [s for s in all_sections if s.id not in parent_ids]
+        if len(leaves) == 1:
+            section_id = leaves[0].id
+        elif len(all_sections) == 1:
+            section_id = all_sections[0].id
+        else:
+            section_names = [f"  - id={s.id}: {s.name}" for s in leaves[:10]]
+            return {
+                "error": "section_id is required when multiple sections exist. "
+                "Call list_sections first to find the right section. "
+                "Available sections:\n" + "\n".join(section_names),
+            }
+
+    try:
+        section_id_int = int(section_id)
+    except (ValueError, TypeError):
+        return {"error": f"Invalid section_id '{section_id}'. Must be a numeric ID. Use list_sections to find section IDs."}
 
     section = db.query(Section).filter(
-        Section.id == int(section_id),
+        Section.id == section_id_int,
         Section.organization_id == org_id,
     ).first()
     if not section:
-        return {"error": f"Section {section_id} not found"}
+        return {"error": f"Section {section_id} not found. Use list_sections to see available sections."}
 
     try:
         from app.api.drive import get_drive_credentials, _create_drive_doc
@@ -487,6 +812,18 @@ async def _tool_create_draft(
 
         doc_id = _create_drive_doc(drive_service, title, parent_drive_id)
 
+        # Grant the requesting user writer access to the new doc
+        if user.email:
+            try:
+                drive_service.permissions().create(
+                    fileId=doc_id,
+                    body={"type": "user", "role": "writer", "emailAddress": user.email},
+                    sendNotificationEmail=False,
+                    supportsAllDrives=True,
+                ).execute()
+            except Exception as perm_exc:
+                logger.warning("Could not share doc with %s: %s", user.email, perm_exc)
+
         docs_service = build("docs", "v1", credentials=creds, cache_discovery=False)
         requests = _markdown_to_docs_requests(content)
         if requests:
@@ -501,7 +838,7 @@ async def _tool_create_draft(
     slug = _unique_slug(title, org_id, db)
     page = Page(
         organization_id=org_id,
-        section_id=int(section_id),
+        section_id=section_id_int,
         google_doc_id=doc_id,
         title=title,
         slug=slug,
@@ -534,6 +871,8 @@ async def _tool_create_draft(
         "title": page.title,
         "slug": page.slug,
         "google_doc_id": doc_id,
+        "section_id": section.id,
+        "section_name": section.name,
     }
 
 
@@ -552,6 +891,27 @@ async def _tool_search_confluence(
     input_data: dict, user: User, org_id: int, db: Session,
 ) -> dict:
     return {"error": "Confluence integration is not configured yet. This feature is coming soon."}
+
+
+async def _tool_web_search(
+    input_data: dict, user: User, org_id: int, db: Session,
+) -> dict:
+    query = (input_data.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    max_results = min(int(input_data.get("max_results") or 5), 10)
+    try:
+        from ddgs import DDGS
+        with DDGS() as ddgs:
+            raw = list(ddgs.text(query, max_results=max_results))
+        results = [
+            {"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")}
+            for r in raw
+        ]
+        return {"query": query, "results": results, "count": len(results)}
+    except Exception as exc:
+        logger.warning("Web search failed: %s", exc)
+        return {"error": f"Web search failed: {exc}"}
 
 
 async def _tool_list_members(
@@ -587,9 +947,21 @@ async def _tool_create_section(
         if not parent:
             return {"error": f"Parent section {parent_id} not found"}
 
+    from slugify import slugify as _slugify
+
+    slug = _slugify(name, max_length=200)
+    # Ensure slug uniqueness within the org
+    existing = db.query(Section).filter(
+        Section.organization_id == org_id,
+        Section.slug == slug,
+    ).first()
+    if existing:
+        slug = f"{slug}-{db.query(func.count(Section.id)).filter(Section.organization_id == org_id).scalar()}"
+
     section = Section(
         organization_id=org_id,
         name=name,
+        slug=slug,
         parent_id=int(parent_id) if parent_id else None,
         section_type="section",
         display_order=0,
@@ -841,6 +1213,9 @@ TOOL_HANDLERS = {
     "list_pages": _tool_list_pages,
     "read_page": _tool_read_page,
     "search_docs": _tool_search_docs,
+    "search_knowledge_base": _tool_search_knowledge_base,
+    "list_templates": _tool_list_templates,
+    "create_from_template": _tool_create_from_template,
     "list_members": _tool_list_members,
     "create_draft": _tool_create_draft,
     "create_section": _tool_create_section,
@@ -852,6 +1227,7 @@ TOOL_HANDLERS = {
     "delete_page": _tool_delete_page,
     "fetch_jira_ticket": _tool_fetch_jira_ticket,
     "search_confluence": _tool_search_confluence,
+    "web_search": _tool_web_search,
 }
 
 TOOL_FRIENDLY_NAMES = {
@@ -859,6 +1235,9 @@ TOOL_FRIENDLY_NAMES = {
     "list_pages": "Listing pages",
     "read_page": "Reading page",
     "search_docs": "Searching documentation",
+    "search_knowledge_base": "Searching knowledge base",
+    "list_templates": "Listing templates",
+    "create_from_template": "Creating from template",
     "list_members": "Listing team members",
     "create_draft": "Creating draft",
     "create_section": "Creating section",
@@ -870,6 +1249,7 @@ TOOL_FRIENDLY_NAMES = {
     "delete_page": "Deleting page",
     "fetch_jira_ticket": "Fetching Jira ticket",
     "search_confluence": "Searching Confluence",
+    "web_search": "Searching the web",
 }
 
 
@@ -903,18 +1283,31 @@ def _build_system_prompt(org_id: int, db: Session) -> str:
         f"Workspace stats: {section_count} sections, {page_count} pages "
         f"({published_count} published, {draft_count} drafts).\n\n"
         f"Your capabilities:\n"
-        f"- EXPLORE: Browse sections and pages, read page content, search across all docs, list team members\n"
-        f"- CREATE: Write new draft pages (backed by Google Docs), create new sections to organize content\n"
+        f"- EXPLORE: Browse sections and pages, read page content, search across all docs, search knowledge base for semantic matches, list team members\n"
+        f"- CREATE: Write new draft pages (backed by Google Docs), create new sections, generate from templates\n"
         f"- MANAGE: Move pages between sections, rename pages, reorder pages, duplicate pages as templates\n"
         f"- PUBLISH: Publish drafts to the public docs site, unpublish pages, sync content from Google Drive\n"
         f"- DELETE: Remove outdated pages (with user confirmation)\n"
-        f"- INTEGRATE: Fetch Jira tickets for context when writing docs\n\n"
+        f"- INTEGRATE: Fetch Jira tickets for context when writing docs\n"
+        f"- WEB SEARCH: Search the internet for up-to-date information, release notes, external references, and anything not in the internal docs\n\n"
+        f"CRITICAL RULES:\n"
+        f"- BEFORE creating any page or draft, you MUST call list_sections first to see all available sections and their IDs.\n"
+        f"- ALWAYS pass the correct numeric section_id when calling create_draft or create_from_template. NEVER omit it.\n"
+        f"- Section IDs are numbers (e.g. 5, 12), NOT names or slugs. Get them from list_sections.\n"
+        f"- Place pages in the most specific/relevant leaf section. If the user says 'in Getting Started', find the section named 'Getting Started' and use its ID.\n"
+        f"- If the user specifies where to place content, use that exact section. If unclear, ask which section they want.\n"
+        f"- After creating a draft, tell the user the title AND which section it was placed in.\n\n"
         f"Guidelines:\n"
+        f"- ALWAYS use your tools to answer questions. Never say you don't have access — you DO have tools to read pages, search content, list sections, etc.\n"
+        f"- When asked to summarize or describe docs, use list_sections and list_pages to discover content, then use read_page on each page to read the actual text. Summarize from the real content.\n"
+        f"- Use search_knowledge_base to find relevant pages by topic. Use read_page to read full page content by ID.\n"
+        f"- Before writing new content, use search_knowledge_base to find relevant existing pages for style and content reference.\n"
+        f"- When generating documentation, cite and link to related existing pages where relevant.\n"
+        f"- When the user wants to create structured documentation, suggest relevant templates using list_templates.\n"
         f"- Be proactive. When asked to write docs, first explore existing docs to match style and structure.\n"
-        f"- When creating content, place it in the right section. If no section fits, create one.\n"
         f"- Write clear, concise technical documentation with proper headings (# ## ###).\n"
+        f"- When asked about external topics, current releases, news, or anything not in the internal docs, use web_search to find up-to-date information.\n"
         f"- When the user mentions a Jira ticket (e.g. PROJ-123), fetch it first for context.\n"
-        f"- After creating a draft, tell the user the title and offer to publish it.\n"
         f"- Before deleting anything, always confirm with the user first.\n"
         f"- When asked to reorganize or audit docs, systematically browse all sections and pages.\n"
         f"- You can chain multiple actions: e.g. create a section, then create pages in it, then publish them.\n"
@@ -953,6 +1346,8 @@ async def _run_gemini_loop(
     user: User,
     org_id: int,
     db: Session,
+    *,
+    llm_config: LLMConfig | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Run agent loop using Google Gemini."""
     try:
@@ -961,7 +1356,8 @@ async def _run_gemini_loop(
     except ImportError as exc:
         raise HTTPException(status_code=503, detail="google-genai not installed") from exc
 
-    client = genai.Client(api_key=settings.gemini_api_key)
+    cfg = llm_config or _resolve_llm_config(org_id, db)
+    client = genai.Client(api_key=cfg.api_key)
     system_prompt = _build_system_prompt(org_id, db)
     tools = _tools_for_gemini()
 
@@ -977,7 +1373,7 @@ async def _run_gemini_loop(
     for _ in range(max_iterations):
         # Call Gemini (non-streaming for tool use reliability, stream text chunks)
         response = client.models.generate_content(
-            model=settings.gemini_model,
+            model=cfg.model or "gemini-2.0-flash",
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
@@ -1024,6 +1420,17 @@ async def _run_gemini_loop(
         for fc in function_calls:
             tool_name = fc.name
             tool_input = dict(fc.args) if fc.args else {}
+
+            # Coerce string IDs to integers (Gemini sometimes sends "16" instead of 16)
+            for key in ("section_id", "page_id", "parent_id", "display_order", "limit", "member_id", "max_results"):
+                val = tool_input.get(key)
+                if val is None:
+                    tool_input.pop(key, None)
+                elif isinstance(val, str):
+                    try:
+                        tool_input[key] = int(val)
+                    except (ValueError, TypeError):
+                        tool_input.pop(key, None)
 
             yield {
                 "type": "tool_start",
@@ -1175,6 +1582,20 @@ async def _run_openai_compat_loop(
                 except json.JSONDecodeError:
                     tool_input = {}
 
+                # Coerce string IDs to integers (some models send "16" instead of 16)
+                # and strip null values for optional params
+                for key in ("section_id", "page_id", "parent_id", "display_order", "limit", "member_id", "max_results"):
+                    val = tool_input.get(key)
+                    if val is None:
+                        tool_input.pop(key, None)
+                    elif isinstance(val, str):
+                        try:
+                            tool_input[key] = int(val)
+                        except (ValueError, TypeError):
+                            tool_input.pop(key, None)
+                # Also fix the arguments in the tool call so Groq doesn't reject them on the next turn
+                tc["function"]["arguments"] = json.dumps(tool_input)
+
                 yield {
                     "type": "tool_start",
                     "tool_name": tool_name,
@@ -1218,13 +1639,16 @@ async def _run_groq_loop(
     user: User,
     org_id: int,
     db: Session,
+    *,
+    llm_config: LLMConfig | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Run agent loop using Groq (free tier, OpenAI-compatible)."""
+    cfg = llm_config or _resolve_llm_config(org_id, db)
     async for event in _run_openai_compat_loop(
         message, history, user, org_id, db,
         base_url="https://api.groq.com/openai",
-        model=settings.groq_model,
-        api_key=settings.groq_api_key,
+        model=cfg.model or "meta-llama/llama-4-scout-17b-16e-instruct",
+        api_key=cfg.api_key,
         provider_name="Groq",
     ):
         yield event
@@ -1240,6 +1664,8 @@ async def _run_anthropic_loop(
     user: User,
     org_id: int,
     db: Session,
+    *,
+    llm_config: LLMConfig | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Run agent loop using Anthropic Claude."""
     try:
@@ -1247,7 +1673,8 @@ async def _run_anthropic_loop(
     except ImportError as exc:
         raise HTTPException(status_code=503, detail="anthropic not installed") from exc
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    cfg = llm_config or _resolve_llm_config(org_id, db)
+    client = anthropic.AsyncAnthropic(api_key=cfg.api_key)
     system = _build_system_prompt(org_id, db)
     tools = _tools_for_anthropic()
 
@@ -1262,7 +1689,7 @@ async def _run_anthropic_loop(
         collected_text = ""
 
         async with client.messages.stream(
-            model=settings.anthropic_model,
+            model=cfg.model or "claude-sonnet-4-5-20250514",
             max_tokens=4096,
             system=system,
             tools=tools,
@@ -1288,7 +1715,18 @@ async def _run_anthropic_loop(
                 continue
 
             tool_name = block.name
-            tool_input = block.input
+            tool_input = dict(block.input) if block.input else {}
+
+            # Coerce string IDs to integers
+            for key in ("section_id", "page_id", "parent_id", "display_order", "limit", "member_id", "max_results"):
+                val = tool_input.get(key)
+                if val is None:
+                    tool_input.pop(key, None)
+                elif isinstance(val, str):
+                    try:
+                        tool_input[key] = int(val)
+                    except (ValueError, TypeError):
+                        tool_input.pop(key, None)
 
             yield {
                 "type": "tool_start",
@@ -1344,47 +1782,57 @@ async def agent_chat(
     if EventSourceResponse is None:
         raise HTTPException(status_code=503, detail="AI agent streaming dependency not installed")
 
-    provider = settings.agent_provider.lower()
+    org_id = _resolve_org_id(user, db, x_org_id)
 
-    # Validate provider configuration
+    # Resolve LLM config (per-org BYOK first, then env-var fallback)
+    llm_cfg = _resolve_llm_config(org_id, db)
+
+    if not llm_cfg.api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="AI agent not configured — ask your workspace admin to set up AI settings",
+        )
+
+    provider = llm_cfg.provider.lower()
     valid_providers = ("gemini", "groq", "anthropic", "openai_compat")
     if provider not in valid_providers:
         raise HTTPException(status_code=503, detail=f"Unknown agent provider: {provider}. Valid: {', '.join(valid_providers)}")
-    if provider == "gemini" and not settings.gemini_api_key:
-        raise HTTPException(status_code=503, detail="AI agent not configured — set GEMINI_API_KEY")
-    if provider == "groq" and not settings.groq_api_key:
-        raise HTTPException(status_code=503, detail="AI agent not configured — set GROQ_API_KEY (free at console.groq.com)")
-    if provider == "anthropic" and not settings.anthropic_api_key:
-        raise HTTPException(status_code=503, detail="AI agent not configured — set ANTHROPIC_API_KEY")
-
-    org_id = _resolve_org_id(user, db, x_org_id)
 
     # Rate limit check
     _check_rate_limit(org_id)
 
-    # Select the right agent loop
+    # Select the right agent loop, passing resolved config
     if provider == "openai_compat":
         async def run_loop(msg, hist, usr, oid, d):
             async for ev in _run_openai_compat_loop(
                 msg, hist, usr, oid, d,
-                base_url=settings.openai_compat_base_url,
-                model=settings.openai_compat_model,
-                api_key=settings.openai_compat_api_key,
+                base_url=llm_cfg.base_url or settings.openai_compat_base_url,
+                model=llm_cfg.model or settings.openai_compat_model,
+                api_key=llm_cfg.api_key,
                 provider_name="OpenAI-compat",
             ):
                 yield ev
     else:
-        run_loop = {
+        _loop_fn = {
             "gemini": _run_gemini_loop,
             "groq": _run_groq_loop,
             "anthropic": _run_anthropic_loop,
         }[provider]
 
+        async def run_loop(msg, hist, usr, oid, d):
+            async for ev in _loop_fn(msg, hist, usr, oid, d, llm_config=llm_cfg):
+                yield ev
+
     async def event_generator():
+        assistant_text = ""
+        all_events: list[dict] = []
         try:
             async for event in run_loop(
                 body.message, body.history, user, org_id, db,
             ):
+                all_events.append(event)
+                if event.get("type") == "text_delta":
+                    assistant_text += event.get("text", "")
                 yield {"event": "message", "data": json.dumps(event)}
         except Exception as exc:
             logger.error("Agent chat error: %s", exc, exc_info=True)
@@ -1392,5 +1840,85 @@ async def agent_chat(
                 "event": "message",
                 "data": json.dumps({"type": "error", "message": str(exc)}),
             }
+
+        # Auto-save conversation
+        try:
+            from app.models import AgentConversation
+            conv_id = body.conversation_id
+
+            # Build updated history for LLM context
+            updated_history = list(body.history) + [
+                {"role": "user", "content": body.message},
+            ]
+            if assistant_text:
+                updated_history.append({"role": "assistant", "content": assistant_text})
+            # Keep last 40 for LLM context
+            updated_history = updated_history[-40:]
+
+            # Build UI items from events
+            ui_items: list[dict] = [{"role": "user", "content": body.message}]
+            for ev in all_events:
+                etype = ev.get("type")
+                if etype == "text_delta":
+                    # Accumulate into last assistant message
+                    if ui_items and ui_items[-1].get("role") == "assistant":
+                        ui_items[-1]["content"] += ev.get("text", "")
+                    else:
+                        ui_items.append({"role": "assistant", "content": ev.get("text", "")})
+                elif etype == "tool_start":
+                    ui_items.append({
+                        "type": "tool",
+                        "toolName": ev.get("tool_name", ""),
+                        "friendlyName": ev.get("tool_name", ""),
+                    })
+                elif etype == "tool_result":
+                    # Update last matching tool item
+                    for item in reversed(ui_items):
+                        if item.get("type") == "tool" and item.get("toolName") == ev.get("tool_name"):
+                            item["success"] = ev.get("success")
+                            break
+                elif etype == "draft_created":
+                    ui_items.append({
+                        "type": "draft",
+                        "pageId": ev.get("page_id"),
+                        "title": ev.get("title", ""),
+                        "googleDocId": ev.get("google_doc_id", ""),
+                    })
+
+            if conv_id:
+                conv = db.query(AgentConversation).filter(
+                    AgentConversation.id == conv_id,
+                    AgentConversation.user_id == user.id,
+                ).first()
+                if conv:
+                    # Append new items to existing messages
+                    existing = json.loads(conv.messages or "[]")
+                    existing.extend(ui_items)
+                    conv.messages = json.dumps(existing)
+                    conv.history = json.dumps(updated_history)
+                    db.commit()
+            else:
+                # Create new conversation
+                title = body.message[:60].strip()
+                if len(body.message) > 60:
+                    title += "..."
+                conv = AgentConversation(
+                    organization_id=org_id,
+                    user_id=user.id,
+                    title=title,
+                    messages=json.dumps(ui_items),
+                    history=json.dumps(updated_history),
+                )
+                db.add(conv)
+                db.commit()
+                db.refresh(conv)
+                conv_id = conv.id
+
+            yield {
+                "event": "message",
+                "data": json.dumps({"type": "conversation_saved", "conversation_id": conv_id}),
+            }
+        except Exception as exc:
+            logger.warning("Failed to save conversation: %s", exc)
 
     return EventSourceResponse(event_generator())

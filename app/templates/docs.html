@@ -4,7 +4,70 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{{ page_title }} — {{ org_name }}</title>
-  <meta name="description" content="{{ page_title }} documentation" />
+  <meta name="description" content="{{ meta_description or (page_title ~ ' documentation') }}" />
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="article" />
+  <meta property="og:title" content="{{ page_title }} — {{ org_name }}" />
+  <meta property="og:description" content="{{ meta_description or (page_title ~ ' documentation') }}" />
+  {% if canonical_url %}<meta property="og:url" content="{{ canonical_url }}" />{% endif %}
+  <meta property="og:site_name" content="{{ org_name }}" />
+  {% if og_image %}<meta property="og:image" content="{{ og_image }}" />{% endif %}
+  {% if page_published_at %}<meta property="article:published_time" content="{{ page_published_at }}" />{% endif %}
+  {% if page_modified_at %}<meta property="article:modified_time" content="{{ page_modified_at }}" />{% endif %}
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="{{ page_title }} — {{ org_name }}" />
+  <meta name="twitter:description" content="{{ meta_description or (page_title ~ ' documentation') }}" />
+  {% if og_image %}<meta name="twitter:image" content="{{ og_image }}" />{% endif %}
+
+  <!-- Canonical + Sitemap -->
+  {% if canonical_url %}<link rel="canonical" href="{{ canonical_url }}" />{% endif %}
+  <link rel="sitemap" type="application/xml" href="/docs/{{ org_slug }}/sitemap.xml" />
+
+  <!-- JSON-LD: Article -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    "headline": {{ page_title | tojson }},
+    "description": {{ (meta_description or (page_title ~ ' documentation')) | tojson }},
+    {% if canonical_url %}"url": {{ canonical_url | tojson }},{% endif %}
+    {% if og_image %}"image": {{ og_image | tojson }},{% endif %}
+    {% if page_published_at %}"datePublished": "{{ page_published_at }}",{% endif %}
+    {% if page_modified_at %}"dateModified": "{{ page_modified_at }}",{% endif %}
+    "publisher": {
+      "@type": "Organization",
+      "name": {{ org_name | tojson }}
+      {% if org_logo %},"logo": {"@type": "ImageObject", "url": {{ org_logo | tojson }}}{% endif %}
+    },
+    "mainEntityOfPage": {
+      "@type": "WebPage"
+      {% if canonical_url %},"@id": {{ canonical_url | tojson }}{% endif %}
+    }
+  }
+  </script>
+
+  <!-- JSON-LD: BreadcrumbList -->
+  {% if breadcrumbs %}
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      {% for crumb in breadcrumbs %}
+      {
+        "@type": "ListItem",
+        "position": {{ loop.index }},
+        "name": {{ crumb.name | tojson }}
+        {% if crumb.url %},"item": {{ crumb.url | tojson }}{% endif %}
+      }{% if not loop.last %},{% endif %}
+      {% endfor %}
+    ]
+  }
+  </script>
+  {% endif %}
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -124,6 +187,14 @@
     .search-box:hover { border-color: #D0CEC8; background: var(--bg); }
 
     .search-box svg { width: 13px; height: 13px; flex-shrink: 0; opacity: 0.6; }
+
+    .search-label {
+      display: inline;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
 
     .search-kbd {
       margin-left: auto;
@@ -577,32 +648,46 @@
     }
 
     .engagement {
-      margin-top: 28px;
+      margin-top: 32px;
       border-top: 1px solid var(--border);
-      padding-top: 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      max-width: 540px;
+      padding-top: 18px;
+      max-width: 720px;
     }
 
-    .engagement-title {
-      font-size: 0.88rem;
-      font-weight: 700;
-      letter-spacing: 0.02em;
-      color: var(--text-2);
+    .engagement-card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      background: #fff;
+      display: grid;
+      gap: 12px;
     }
 
-    .feedback-row {
+    .feedback-row,
+    .comment-title-row {
       display: flex;
       align-items: center;
+      justify-content: space-between;
       gap: 10px;
       flex-wrap: wrap;
     }
 
+    .engagement-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 0;
+    }
+
+    .engagement-hint {
+      font-size: 0.78rem;
+      color: var(--text-3);
+    }
+
     .feedback-actions {
       display: flex;
-      gap: 6px;
+      gap: 8px;
+      flex-wrap: wrap;
     }
 
     .feedback-btn {
@@ -611,8 +696,8 @@
       color: var(--text-2);
       font-size: 0.8rem;
       font-weight: 600;
-      border-radius: 7px;
-      padding: 5px 10px;
+      border-radius: 9px;
+      padding: 7px 12px;
       cursor: pointer;
       transition: border-color 0.15s, color 0.15s, background 0.15s;
     }
@@ -623,25 +708,27 @@
     }
 
     .feedback-btn.active {
-      background: color-mix(in srgb, var(--accent) 11%, transparent);
-      border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
       color: var(--accent);
     }
 
-    .feedback-message {
+    .feedback-message,
+    .comment-message {
       width: 100%;
       border: 1px solid var(--border);
-      border-radius: 7px;
+      border-radius: 9px;
       font-family: inherit;
-      font-size: 0.82rem;
+      font-size: 0.84rem;
       color: var(--text);
-      padding: 7px 9px;
+      padding: 9px 11px;
       background: #fff;
       resize: vertical;
-      min-height: 64px;
+      min-height: 66px;
     }
 
-    .feedback-message:focus {
+    .feedback-message:focus,
+    .comment-message:focus {
       outline: none;
       border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
       box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
@@ -651,51 +738,114 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
-      margin-top: 6px;
+      gap: 10px;
+      flex-wrap: wrap;
     }
 
-    .engagement-submit {
+    .engagement-submit,
+    .comment-submit {
       border: 1px solid var(--border);
       background: #fff;
       color: var(--text-2);
-      font-size: 0.76rem;
+      font-size: 0.77rem;
       font-weight: 700;
-      border-radius: 7px;
-      padding: 5px 9px;
+      border-radius: 9px;
+      padding: 7px 12px;
       cursor: pointer;
     }
 
-    .engagement-submit:disabled {
+    .engagement-submit:hover,
+    .comment-submit:hover {
+      border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+      color: var(--accent);
+    }
+
+    .engagement-submit:disabled,
+    .comment-submit:disabled {
       opacity: 0.5;
       cursor: not-allowed;
     }
 
-    .engagement-hint {
+    .engagement-note {
+      font-size: 0.76rem;
+      color: var(--text-3);
+    }
+
+    .engagement-note.is-error { color: #b42318; }
+
+    .engagement-note.is-success { color: #0f766e; }
+
+    .feedback-helper {
+      font-size: 0.75rem;
+      color: var(--text-3);
+      margin: 0;
+    }
+
+    .comment-block {
+      display: grid;
+      gap: 10px;
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+    }
+
+    .comment-title {
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin: 0;
+    }
+
+    .comment-hint {
       font-size: 0.74rem;
       color: var(--text-3);
     }
 
-    .feedback-details {
-      border-top: 1px dashed var(--border);
-      padding-top: 8px;
-    }
-
-    .feedback-details summary {
-      list-style: none;
-      cursor: pointer;
-      user-select: none;
-      font-size: 0.77rem;
-      color: var(--text-3);
-      font-weight: 600;
-    }
-
-    .feedback-details summary::-webkit-details-marker { display: none; }
-
-    .feedback-details-body {
-      margin-top: 7px;
+    .comment-list {
       display: grid;
-      gap: 6px;
+      gap: 8px;
+      margin-top: 2px;
+      max-height: 280px;
+      overflow: auto;
+    }
+
+    .comment-empty {
+      font-size: 0.8rem;
+      color: var(--text-3);
+      margin: 0;
+      padding: 4px 0;
+    }
+
+    .comment-item {
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 9px 11px;
+      background: #fff;
+    }
+
+    .comment-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 0.73rem;
+      color: var(--text-3);
+      margin-bottom: 5px;
+    }
+
+    .comment-body {
+      font-size: 0.84rem;
+      color: var(--text-2);
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 780px) {
+      .engagement-actions { align-items: flex-start; }
+      .engagement-submit,
+      .comment-submit { width: 100%; }
     }
 
     /* ── Landing ──────────────────────────────────────────────────── */
@@ -899,29 +1049,151 @@
     .page-content [style*="color: #000"] { color: inherit !important; }
     .page-content [style*="color:#000"] { color: inherit !important; }
 
-    /* ── Mobile ───────────────────────────────────────────────────── */
-    @media (max-width: 780px) {
-      .layout { grid-template-columns: 1fr; }
-
-      .sidebar {
-        position: static;
-        height: auto;
-        border-right: none;
-        border-bottom: 1px solid var(--border);
-        padding: 16px 0;
-        max-height: 260px;
-      }
-
-      .topbar-brand { width: auto; }
-      .doc-layout { grid-template-columns: 1fr; padding: 28px 20px 64px; }
-      .toc { display: none; }
-      .content-wrap { padding: 28px 20px 64px; }
-      .landing-title { font-size: 1.9rem; }
+    /* ── Mobile hamburger ────────────────────────────────────────── */
+    .mobile-menu-btn {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border: 1px solid var(--border);
+      background: #fff;
+      appearance: none;
+      -webkit-appearance: none;
+      cursor: pointer;
+      border-radius: 8px;
+      color: var(--text-2);
+      flex-shrink: 0;
+      transition: background 0.15s, border-color 0.15s;
     }
+    .mobile-menu-btn:hover {
+      background: var(--bg-hover);
+      border-color: #D0CEC8;
+    }
+    .mobile-menu-btn svg { width: 20px; height: 20px; }
 
+    .mobile-sidebar-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      z-index: 300;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+    .mobile-sidebar-overlay.open { opacity: 1; }
+
+    /* ── Tablet: hide ToC ─────────────────────────────────────────── */
     @media (max-width: 1180px) {
       .doc-layout { grid-template-columns: minmax(0, 1fr); }
       .toc { display: none; }
+    }
+
+    /* ── Mobile: slide-out sidebar, compact layout ─────────────── */
+    @media (max-width: 780px) {
+      .mobile-menu-btn { display: flex; }
+      .mobile-sidebar-overlay {
+        display: block;
+        pointer-events: none;
+      }
+      body.mobile-nav-open .mobile-sidebar-overlay {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .layout { grid-template-columns: 1fr; }
+      .sidebar {
+        display: block;
+        position: fixed;
+        left: 0;
+        top: var(--content-offset, var(--topbar-h));
+        width: 86vw;
+        max-width: 320px;
+        height: calc(100dvh - var(--content-offset, var(--topbar-h)));
+        max-height: calc(100vh - var(--content-offset, var(--topbar-h)));
+        z-index: 310;
+        padding: 12px 0 28px;
+        border-right: 1px solid var(--border);
+        border-left: none;
+        transform: translateX(-100%);
+        transition: transform 0.24s ease;
+        box-shadow: 0 16px 36px rgba(0, 0, 0, 0.16);
+      }
+      body.mobile-nav-open .sidebar { transform: translateX(0); }
+      body.mobile-nav-open { overflow: hidden; }
+
+      .topbar {
+        padding: 0 10px;
+        gap: 8px;
+      }
+      .topbar-brand {
+        width: auto;
+        min-width: 0;
+        flex: 1;
+        padding-right: 0;
+        padding-left: 0;
+        gap: 8px;
+        font-size: 0.9rem;
+        order: 0;
+      }
+      .topbar-brand span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .brand-avatar,
+      .brand-avatar img {
+        width: 30px;
+        height: 30px;
+        border-radius: 8px;
+      }
+      .topbar-right {
+        flex: 0 0 auto;
+      }
+      .search-box {
+        width: 38px;
+        min-width: 38px;
+        max-width: 38px;
+        height: 36px;
+        padding: 0;
+        justify-content: center;
+      }
+      .search-label,
+      .search-kbd { display: none; }
+
+      .tabsbar { top: var(--topbar-h); }
+      .tabsbar-product { width: auto; min-width: 0; padding: 0 10px 0 14px; border-right: 1px solid var(--border); }
+      .tabsbar-product-link { font-size: 0.75rem; }
+      .tabsbar-inner { padding: 0 10px; gap: 2px; }
+      .docs-tab { padding: 0 8px; font-size: 0.78rem; height: 28px; }
+      .version-select { height: 28px; font-size: 0.74rem; min-width: 90px; padding: 0 8px; }
+
+      .doc-layout { grid-template-columns: 1fr; padding: 24px 16px 64px; gap: 0; }
+      .toc { display: none; }
+      .content-wrap { padding: 24px 16px 64px; }
+
+      .breadcrumb { margin-bottom: 20px; font-size: 0.72rem; }
+      .doc-meta { font-size: 0.72rem; }
+
+      h1 { font-size: 1.65rem !important; }
+
+      .page-content table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .page-content pre { margin-left: -16px; margin-right: -16px; border-radius: 0; padding: 14px 16px; }
+      .page-content img { border-radius: 6px; margin: 1.2em 0; }
+      .page-content blockquote { padding: 0.7em 1em; margin: 1em 0; }
+
+      .prev-next { flex-direction: column; gap: 8px; }
+      .prev-next a { max-width: 100%; }
+
+      .landing-title { font-size: 1.9rem; }
+    }
+
+    /* ── Very small phones ─────────────────────────────────────── */
+    @media (max-width: 420px) {
+      .topbar-brand span { max-width: 140px; }
+      .doc-layout, .content-wrap { padding-left: 12px; padding-right: 12px; }
+      .page-content pre { margin-left: -12px; margin-right: -12px; padding: 12px; }
     }
 
     {% if custom_css %}
@@ -938,6 +1210,11 @@
 
   <!-- Topbar -->
   <header class="topbar">
+    <button class="mobile-menu-btn" onclick="openMobileSidebar()" aria-label="Open navigation">
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" d="M4 6h16M4 12h16M4 18h16"/>
+      </svg>
+    </button>
     <a href="{{ docs_root }}/{{ org_slug }}{{ audience_suffix }}" class="topbar-brand">
       {% if org_logo %}
         <div class="brand-avatar"><img src="{{ org_logo }}" alt="{{ org_name }}" /></div>
@@ -952,7 +1229,7 @@
           <circle cx="11" cy="11" r="8"/>
           <path stroke-linecap="round" d="M21 21l-4.35-4.35"/>
         </svg>
-        Search docs…
+        <span class="search-label">Search docs…</span>
         <span class="search-kbd">⌘K</span>
       </div>
     </div>
@@ -1017,6 +1294,9 @@
       <div id="searchResults" class="search-results"></div>
     </div>
   </div>
+
+  <!-- Mobile sidebar overlay -->
+  <div class="mobile-sidebar-overlay" id="mobileSidebarOverlay" onclick="closeMobileSidebar()"></div>
 
   <div class="layout">
 
@@ -1113,7 +1393,7 @@
               <span>{{ current_page.title }}</span>
             </nav>
             {% if page_last_updated %}
-              <div class="doc-meta">Last updated: {{ page_last_updated }}</div>
+              <div class="doc-meta">Last updated: <time datetime="{{ page_modified_at }}">{{ page_last_updated }}</time></div>
             {% endif %}
 
             <article class="page-content">
@@ -1121,30 +1401,52 @@
             </article>
 
             <section class="engagement" id="engagementRoot">
-              <div>
+              <div class="engagement-card">
                 <div class="feedback-row">
-                  <div class="engagement-title">Was this page helpful?</div>
+                  <h3 class="engagement-title">Was this page helpful?</h3>
                   <span class="engagement-hint" id="feedbackSummary">
                     {{ feedback_summary.up }} helpful · {{ feedback_summary.down }} not helpful
                   </span>
                 </div>
                 <div class="feedback-actions">
-                  <button class="feedback-btn" id="feedbackUpBtn" type="button">👍 Yes</button>
-                  <button class="feedback-btn" id="feedbackDownBtn" type="button">👎 No</button>
+                  <button class="feedback-btn" id="feedbackUpBtn" type="button">Yes</button>
+                  <button class="feedback-btn" id="feedbackDownBtn" type="button">No</button>
                 </div>
-                <details class="feedback-details">
-                  <summary>Add details (optional)</summary>
-                  <div class="feedback-details-body">
-                    <textarea
-                      class="feedback-message"
-                      id="feedbackMessage"
-                      placeholder="What can we improve?"
-                      maxlength="2000"
-                    ></textarea>
-                  </div>
-                </details>
+                <textarea
+                  class="feedback-message"
+                  id="feedbackMessage"
+                  placeholder="Optional feedback"
+                  maxlength="2000"
+                ></textarea>
                 <div class="engagement-actions">
-                  <button class="engagement-submit" id="feedbackSubmitBtn" type="button">Submit feedback</button>
+                  <span class="engagement-note" id="feedbackNotice" aria-live="polite"></span>
+                  <button class="engagement-submit" id="feedbackSubmitBtn" type="button">Send feedback</button>
+                </div>
+
+                <div class="comment-block">
+                  <div class="comment-title-row">
+                    <h4 class="comment-title">Comments</h4>
+                    <span class="comment-hint" id="commentCount">0</span>
+                  </div>
+                  <textarea
+                    class="comment-message"
+                    id="commentMessage"
+                    placeholder="{% if can_comment %}Share context, ask a question, or request a change{% elif viewer_signed_in %}Comments are not available for this page{% else %}Sign in to comment{% endif %}"
+                    maxlength="5000"
+                    {% if not can_comment %}disabled{% endif %}
+                  ></textarea>
+                  <div class="engagement-actions">
+                    <span class="engagement-note" id="commentNotice" aria-live="polite"></span>
+                    <button class="comment-submit" id="commentSubmitBtn" type="button" {% if not can_comment %}disabled{% endif %}>Post comment</button>
+                  </div>
+                  {% if not viewer_signed_in %}
+                    <p class="feedback-helper">Sign in with workspace access to post comments.</p>
+                  {% elif not can_comment %}
+                    <p class="feedback-helper">Comments are unavailable for this audience.</p>
+                  {% endif %}
+                  <div class="comment-list" id="commentList">
+                    <p class="comment-empty">No comments yet.</p>
+                  </div>
                 </div>
               </div>
             </section>
@@ -1198,11 +1500,44 @@
       document.getElementById(id).classList.toggle('collapsed');
     }
 
+    // ── Mobile sidebar ─────────────────────────────────────────
+    (function initMobileSidebar() {
+      var sidebar = document.querySelector('.sidebar');
+      if (!sidebar) return;
+      sidebar.addEventListener('click', function (e) {
+        var link = e.target.closest('.sidebar-page');
+        if (link && window.matchMedia('(max-width: 780px)').matches) {
+          closeMobileSidebar();
+        }
+      });
+      window.addEventListener('resize', function () {
+        if (window.innerWidth > 780) {
+          closeMobileSidebar();
+        }
+      });
+    })();
+
+    function openMobileSidebar() {
+      var overlay = document.getElementById('mobileSidebarOverlay');
+      document.body.classList.add('mobile-nav-open');
+      requestAnimationFrame(function() {
+        overlay.classList.add('open');
+      });
+    }
+
+    function closeMobileSidebar() {
+      var overlay = document.getElementById('mobileSidebarOverlay');
+      overlay.classList.remove('open');
+      document.body.classList.remove('mobile-nav-open');
+    }
+
     // ── Search ────────────────────────────────────────────────────
     const ORG_SLUG = {{ org_slug | tojson }};
     const DOCS_ROOT = {{ docs_root | tojson }};
     const AUDIENCE = {{ audience | tojson }};
     const CURRENT_PAGE = {{ current_page | tojson }};
+    const INITIAL_CAN_COMMENT = {{ can_comment | tojson }};
+    const VIEWER_SIGNED_IN = {{ viewer_signed_in | tojson }};
     const overlay  = document.getElementById('searchOverlay');
     const input    = document.getElementById('searchInput');
     const results  = document.getElementById('searchResults');
@@ -1212,7 +1547,10 @@
 
     document.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); openSearch(); }
-      if (e.key === 'Escape') closeSearch();
+      if (e.key === 'Escape') {
+        closeSearch();
+        closeMobileSidebar();
+      }
     });
 
     overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSearch(); });
@@ -1289,6 +1627,63 @@
       return `${DOCS_ROOT}/${ORG_SLUG}/p/${CURRENT_PAGE.id}/${CURRENT_PAGE.slug}${suffix}${audienceQuery()}`;
     }
 
+    function setNotice(id, message, type) {
+      const target = document.getElementById(id);
+      if (!target) return;
+      target.textContent = message || '';
+      target.classList.remove('is-error', 'is-success');
+      if (type === 'error') target.classList.add('is-error');
+      if (type === 'success') target.classList.add('is-success');
+    }
+
+    function formatCommentTimestamp(iso) {
+      if (!iso) return '';
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) return '';
+      return date.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+    }
+
+    function renderComments(comments) {
+      const list = document.getElementById('commentList');
+      const count = document.getElementById('commentCount');
+      if (!list || !count) return;
+
+      const items = Array.isArray(comments) ? comments.slice().reverse() : [];
+      count.textContent = `${items.length} comment${items.length === 1 ? '' : 's'}`;
+
+      if (!items.length) {
+        list.innerHTML = '<p class="comment-empty">No comments yet.</p>';
+        return;
+      }
+
+      list.innerHTML = items.map((item) => {
+        const author = item && item.display_name ? item.display_name : 'User';
+        const body = item && item.body ? item.body : '';
+        const when = formatCommentTimestamp(item && item.created_at ? item.created_at : '');
+        return `
+          <article class="comment-item">
+            <div class="comment-meta">
+              <span>${esc(author)}</span>
+              <time>${esc(when)}</time>
+            </div>
+            <div class="comment-body">${esc(body)}</div>
+          </article>
+        `;
+      }).join('');
+    }
+
+    function setCommentComposerState(enabled) {
+      const commentMessage = document.getElementById('commentMessage');
+      const commentSubmitBtn = document.getElementById('commentSubmitBtn');
+      if (commentMessage) commentMessage.disabled = !enabled;
+      if (commentSubmitBtn) commentSubmitBtn.disabled = !enabled;
+    }
+
     async function loadEngagement() {
       const feedbackSummary = document.getElementById('feedbackSummary');
       if (!CURRENT_PAGE) return;
@@ -1303,8 +1698,19 @@
           const down = Number(data.feedback.down || 0);
           feedbackSummary.textContent = `${up} helpful · ${down} not helpful`;
         }
+
+        renderComments(data.comments || []);
+
+        const canComment =
+          data &&
+          data.permissions &&
+          typeof data.permissions.can_comment === 'boolean'
+            ? data.permissions.can_comment
+            : INITIAL_CAN_COMMENT;
+        setCommentComposerState(Boolean(canComment));
       } catch {
         if (feedbackSummary) feedbackSummary.textContent = 'Feedback unavailable';
+        renderComments([]);
       }
     }
 
@@ -1328,11 +1734,12 @@
 
       const vote = up.dataset.selected ? 'up' : (down.dataset.selected ? 'down' : '');
       if (!vote) {
-        if (feedbackSummary) feedbackSummary.textContent = 'Select Yes or No before submitting.';
+        setNotice('feedbackNotice', 'Select Yes or No first.', 'error');
         return;
       }
 
       submitBtn.disabled = true;
+      setNotice('feedbackNotice', '');
       try {
         const res = await fetch(pageEndpoint('/feedback'), {
           method: 'POST',
@@ -1351,10 +1758,53 @@
           const downCount = Number(data.feedback.down || 0);
           feedbackSummary.textContent = `${upCount} helpful · ${downCount} not helpful`;
         }
+        setNotice('feedbackNotice', 'Feedback submitted.', 'success');
       } catch (error) {
-        if (feedbackSummary) {
-          feedbackSummary.textContent = error && error.message ? error.message : 'Failed to submit feedback';
-        }
+        setNotice(
+          'feedbackNotice',
+          error && error.message ? error.message : 'Failed to submit feedback',
+          'error',
+        );
+      } finally {
+        submitBtn.disabled = false;
+      }
+    }
+
+    async function submitComment() {
+      const messageEl = document.getElementById('commentMessage');
+      const submitBtn = document.getElementById('commentSubmitBtn');
+      if (!messageEl || !submitBtn) return;
+
+      if (!VIEWER_SIGNED_IN || messageEl.disabled) {
+        setNotice('commentNotice', 'Sign in with access to comment.', 'error');
+        return;
+      }
+
+      const body = String(messageEl.value || '').trim();
+      if (!body) {
+        setNotice('commentNotice', 'Comment cannot be empty.', 'error');
+        return;
+      }
+
+      submitBtn.disabled = true;
+      setNotice('commentNotice', '');
+      try {
+        const res = await fetch(pageEndpoint('/comments'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Failed to post comment');
+        messageEl.value = '';
+        setNotice('commentNotice', 'Comment posted.', 'success');
+        await loadEngagement();
+      } catch (error) {
+        setNotice(
+          'commentNotice',
+          error && error.message ? error.message : 'Failed to post comment',
+          'error',
+        );
       } finally {
         submitBtn.disabled = false;
       }
@@ -1366,10 +1816,13 @@
       const up = document.getElementById('feedbackUpBtn');
       const down = document.getElementById('feedbackDownBtn');
       const feedbackSubmit = document.getElementById('feedbackSubmitBtn');
+      const commentSubmit = document.getElementById('commentSubmitBtn');
 
       if (up) up.addEventListener('click', () => setSelectedVote('up'));
       if (down) down.addEventListener('click', () => setSelectedVote('down'));
       if (feedbackSubmit) feedbackSubmit.addEventListener('click', submitFeedback);
+      if (commentSubmit) commentSubmit.addEventListener('click', submitComment);
+      setCommentComposerState(Boolean(INITIAL_CAN_COMMENT));
       loadEngagement();
     }
 

@@ -4,7 +4,36 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{{ page_title }} - Documentation</title>
-  <meta name="description" content="{{ org_name }} documentation home" />
+  <meta name="description" content="{{ meta_description or (org_name ~ ' documentation') }}" />
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="{{ org_name }} Documentation" />
+  <meta property="og:description" content="{{ meta_description or (org_name ~ ' documentation') }}" />
+  {% if canonical_url %}<meta property="og:url" content="{{ canonical_url }}" />{% endif %}
+  <meta property="og:site_name" content="{{ org_name }}" />
+  {% if og_image %}<meta property="og:image" content="{{ og_image }}" />{% endif %}
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="{{ org_name }} Documentation" />
+  <meta name="twitter:description" content="{{ meta_description or (org_name ~ ' documentation') }}" />
+  {% if og_image %}<meta name="twitter:image" content="{{ og_image }}" />{% endif %}
+
+  <!-- Canonical + Sitemap -->
+  {% if canonical_url %}<link rel="canonical" href="{{ canonical_url }}" />{% endif %}
+  <link rel="sitemap" type="application/xml" href="/docs/{{ org_slug }}/sitemap.xml" />
+
+  <!-- JSON-LD: WebSite -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    "name": {{ org_name | tojson }},
+    {% if canonical_url %}"url": {{ canonical_url | tojson }},{% endif %}
+    "description": {{ (meta_description or (org_name ~ ' documentation')) | tojson }}
+  }
+  </script>
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -475,10 +504,28 @@
 
     @media (max-width: 700px) {
       .container { padding-left: 14px; padding-right: 14px; }
-      .topbar-inner { flex-wrap: wrap; }
-      .search-wrap { width: 100%; }
-      .groups-grid { grid-template-columns: 1fr; }
-      .hero { padding-top: 34px; }
+      .topbar-inner { flex-wrap: wrap; gap: 10px; }
+      .brand { font-size: 0.92rem; gap: 8px; }
+      .brand-avatar { width: 32px; height: 32px; border-radius: 9px; font-size: 0.72rem; }
+      .brand-avatar img { border-radius: 9px; }
+      .search-wrap { width: 100%; order: 3; }
+      .search-wrap input { padding: 9px 60px 9px 32px; font-size: 0.88rem; border-radius: 10px; }
+      .search-kbd { display: none; }
+      .groups-grid { grid-template-columns: 1fr; gap: 10px; }
+      .hero { padding-top: 30px; padding-bottom: 20px; }
+      .hero h1 { font-size: clamp(1.6rem, 6vw, 2.4rem); }
+      .hero p { font-size: 0.92rem; }
+      .hero-actions { gap: 8px; }
+      .btn { padding: 9px 13px; font-size: 0.88rem; border-radius: 9px; }
+      .products-inner { gap: 6px; padding-top: 10px; padding-bottom: 10px; }
+      .products-label { font-size: 0.72rem; }
+      .product-pill { padding: 5px 10px; font-size: 0.82rem; }
+      .versions-select-wrap { min-width: 160px; }
+    }
+
+    @media (max-width: 420px) {
+      .container { padding-left: 10px; padding-right: 10px; }
+      .brand span { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
     }
 
     h1, h2, h3, h4, h5, h6, .brand, .hero-heading, .section-heading {

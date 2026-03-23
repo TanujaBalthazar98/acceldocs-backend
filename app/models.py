@@ -81,6 +81,11 @@ class Organization(Base):
     header_html: Mapped[str | None] = mapped_column(Text)
     footer_html: Mapped[str | None] = mapped_column(Text)
     landing_blocks: Mapped[str | None] = mapped_column(Text)  # JSON block config
+    # AI agent settings (BYOK — per-org LLM configuration)
+    ai_provider: Mapped[str | None] = mapped_column(String(50))  # gemini | anthropic | groq | openai_compat
+    ai_api_key_encrypted: Mapped[str | None] = mapped_column(Text)  # Fernet-encrypted API key
+    ai_model: Mapped[str | None] = mapped_column(String(100))  # optional model override
+    ai_base_url: Mapped[str | None] = mapped_column(String(500))  # for openai_compat provider
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -638,4 +643,28 @@ class JiraCredential(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "organization_id", name="uq_jira_credential_user_org"),
+    )
+
+
+class AgentConversation(Base):
+    """Persisted agent chat conversations."""
+    __tablename__ = "agent_conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(255), default="New conversation")
+    messages: Mapped[str] = mapped_column(Text, default="[]")
+    history: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_agent_conv_user_org", "user_id", "organization_id"),
     )
