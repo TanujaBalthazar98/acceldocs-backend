@@ -103,3 +103,34 @@ def test_normalize_synced_html_rehydrates_single_published_marker():
     assert "<li>" in normalized_html
     assert "First item" in normalized_html
     assert "Second item" in normalized_html
+
+
+def test_normalize_imported_markdown_rehydrates_title_when_heading_missing():
+    raw = """type: page
+title: Version 26.1.0
+slug: version-26-1-0
+
+Body content.
+"""
+    normalized = normalize_imported_markdown(raw)
+    assert normalized.startswith("# Version 26.1.0")
+    assert "Body content." in normalized
+
+
+def test_normalize_imported_markdown_converts_json_callout_block():
+    raw = """# Title
+
+[block:callout]
+{
+  "type": "info",
+  "title": "What's New",
+  "body": "This section consists of new features."
+}
+[/block]
+"""
+    normalized = normalize_imported_markdown(raw)
+    assert '!!! info "What\'s New"' in normalized
+    assert "This section consists of new features." in normalized
+
+    html = markdown.markdown(normalized, extensions=["admonition"])
+    assert "admonition" in html

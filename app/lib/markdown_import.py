@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 _YAML_FRONT_RE = re.compile(r"^\s*---\s*\n[\s\S]*?\n---\s*\n?")
@@ -193,12 +194,78 @@ def normalize_import_callouts(text: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def normalize_import_json_callouts(text: str) -> str:
+    """Convert ReadMe/DeveloperHub JSON callout blocks to admonitions.
+
+    Example:
+      [block:callout]
+      { "type": "info", "title": "What's New", "body": "..." }
+      [/block]
+    """
+    if not text:
+        return text
+
+    block_re = re.compile(r"\[block:callout\]\s*([\s\S]*?)\s*\[/block\]", re.I)
+
+    def _to_admonition(match: re.Match) -> str:
+        raw = match.group(1).strip()
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return match.group(0)
+
+        kind_raw = str(payload.get("type", "info")).strip().lower()
+        kind = _CALLOUT_KIND_MAP.get(kind_raw, "info")
+        title = str(payload.get("title", "")).strip()
+        body = str(payload.get("body", "")).strip()
+
+        header = f'!!! {kind} "{title}"' if title else f"!!! {kind}"
+        if not body:
+            return f"{header}\n"
+        indented = "\n".join(f"    {ln}" for ln in body.splitlines())
+        return f"{header}\n{indented}\n"
+
+    return block_re.sub(_to_admonition, text)
+
+
+_FM_TITLE_RE = re.compile(r"^\s*(?:title|index_title)\s*:\s*(.+?)\s*$", re.I)
+
+
+def _extract_frontmatter_title(text: str) -> str | None:
+    if not text:
+        return None
+    for ln in text.splitlines()[:50]:
+        m = _FM_TITLE_RE.match(ln)
+        if m:
+            title = m.group(1).strip().strip('"').strip("'")
+            if title:
+                return title
+    return None
+
+
+def _has_top_heading(text: str) -> bool:
+    if not text:
+        return False
+    for ln in text.splitlines()[:20]:
+        s = ln.strip()
+        if not s:
+            continue
+        return s.startswith("#")
+    return False
+
+
 def normalize_imported_markdown(text: str) -> str:
     """Apply all normalization steps for imported markdown content."""
-    cleaned = strip_import_frontmatter(text or "")
+    original = text or ""
+    extracted_title = _extract_frontmatter_title(original)
+    cleaned = strip_import_frontmatter(original)
     # Normalize unicode bullets emitted by some HTML->Markdown conversions.
     cleaned = "\n".join(_UNICODE_BULLET_RE.sub(r"\1- ", ln) for ln in cleaned.splitlines())
+    cleaned = normalize_import_json_callouts(cleaned)
     cleaned = normalize_import_callouts(cleaned)
+    cleaned = cleaned.strip()
+    if extracted_title and not _has_top_heading(cleaned):
+        cleaned = f"# {extracted_title}\n\n{cleaned}" if cleaned else f"# {extracted_title}"
     return cleaned.strip() + ("\n" if cleaned.strip() else "")
 
 
