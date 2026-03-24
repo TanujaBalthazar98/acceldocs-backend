@@ -12,6 +12,7 @@ This service implements all 8 Drive operations with proper token management:
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 
 
@@ -47,6 +48,28 @@ logger = logging.getLogger(__name__)
 # Google API endpoints
 GOOGLE_TOKEN_INFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 GOOGLE_TOKEN_REFRESH_URL = "https://oauth2.googleapis.com/token"
+
+_SYNC_LEAK_MARKERS = (
+    "type:",
+    "listed:",
+    "slug:",
+    "description:",
+    "index_title:",
+    "keywords:",
+    "tags:",
+    "published",
+    "---published",
+)
+
+
+def _should_rehydrate_synced_html(content_html: str) -> bool:
+    """Detect when synced HTML likely originated from raw markdown metadata leaks."""
+    if not content_html:
+        return False
+    text = re.sub(r"<[^>]+>", "\n", content_html).lower()
+    marker_hits = sum(1 for marker in _SYNC_LEAK_MARKERS if marker in text)
+    # Require multiple hits to avoid touching normal docs content.
+    return marker_hits >= 3
 
 
 class GoogleDriveService:
@@ -408,6 +431,42 @@ class GoogleDriveService:
         content = result["content"]
         title = result.get("title", "Untitled")
         modified_time = result.get("modifiedTime")
+        normalized_content = content
+
+        # Backward-compatibility cleanup for older imports that wrote
+        # markdown/frontmatter as plain Google Doc body content.
+        if _should_rehydrate_synced_html(content):
+            try:
+                import markdown as _md
+                from app.conversion.html_to_md import convert_html_to_markdown
+
+                md_content = convert_html_to_markdown(
+                    content,
+                    strip_front=True,
+                    download_images=False,
+                )
+                cleaned_md = normalize_imported_markdown(md_content)
+                if cleaned_md:
+                    normalized_content = _md.markdown(
+                        cleaned_md,
+                        extensions=[
+                            "tables",
+                            "fenced_code",
+                            "codehilite",
+                            "toc",
+                            "nl2br",
+                            "sane_lists",
+                            "admonition",
+                            "attr_list",
+                        ],
+                    )
+                    logger.info("Normalized legacy markdown artifacts for Google Doc %s", doc_id)
+            except Exception as exc:
+                logger.warning(
+                    "Could not normalize synced content for Google Doc %s: %s",
+                    doc_id,
+                    exc,
+                )
 
         try:
             # Find or create document in database
@@ -423,7 +482,7 @@ class GoogleDriveService:
 
             if doc:
                 # Update existing document
-                doc.content_html = content
+                doc.content_html = normalized_content
                 doc.google_modified_at = modified_time
                 doc.title = title
                 logger.info(f"Updated document {doc.id} from Google Doc {doc_id}")
@@ -431,7 +490,7 @@ class GoogleDriveService:
                 # Create new document
                 doc = Document(
                     title=title,
-                    content_html=content,
+                    content_html=normalized_content,
                     content_id=doc_id,
                     google_modified_at=modified_time,
                     owner_id=self.user.id
