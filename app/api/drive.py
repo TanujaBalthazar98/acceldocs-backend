@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from app.auth.routes import get_current_user
 from app.config import settings
 from app.database import get_db
-from app.lib.markdown_import import normalize_imported_markdown
+from app.lib.markdown_import import normalize_imported_markdown, normalize_synced_html
 from app.lib.slugify import to_slug as slugify
 from app.models import GoogleToken, OrgRole, Organization, Page, Section, User
 from app.services.encryption import get_encryption_service
@@ -953,9 +953,11 @@ async def sync_all_pages(
             errors += 1
             continue
 
-        if page.is_published and html != page.published_html:
+        normalized_html = normalize_synced_html(html)
+
+        if page.is_published and normalized_html != page.published_html:
             page.status = "draft"
-        page.html_content = html
+        page.html_content = normalized_html
         page.drive_modified_at = drive_mod
         page.last_synced_at = datetime.now(timezone.utc).isoformat()
         synced += 1

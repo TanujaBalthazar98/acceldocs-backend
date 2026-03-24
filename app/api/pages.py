@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.api.drive import _create_drive_doc, _trash_drive_item, _move_drive_item, get_drive_credentials as _get_drive_creds_drive
 from app.auth.routes import get_current_user
 from app.database import get_db
+from app.lib.markdown_import import normalize_synced_html
 from app.lib.slugify import to_slug as slugify
 from app.models import (
     Approval,
@@ -874,7 +875,7 @@ async def sync_page(
     creds = await _get_drive_credentials_compat(user, db, org_id, require_write=False)
     html, modified_at, drive_title = await _export_html(page.google_doc_id, creds)
 
-    page.html_content = html
+    page.html_content = normalize_synced_html(html)
     page.drive_modified_at = modified_at
     page.last_synced_at = datetime.now(timezone.utc).isoformat()
     # Update title from Drive if it hasn't been manually overridden

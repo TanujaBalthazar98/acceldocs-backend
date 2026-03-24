@@ -1,6 +1,6 @@
 import markdown
 
-from app.lib.markdown_import import normalize_imported_markdown
+from app.lib.markdown_import import normalize_imported_markdown, normalize_synced_html
 
 
 def test_normalize_imported_markdown_strips_leaked_frontmatter_block():
@@ -61,3 +61,31 @@ published
     normalized = normalize_imported_markdown(raw)
     assert "published" not in normalized
     assert normalized.startswith("# Example")
+
+
+def test_normalize_synced_html_rehydrates_leaked_frontmatter():
+    raw_html = """
+    <p>type: page</p>
+    <p>title: Version 26.1.0</p>
+    <p>listed: true</p>
+    <p>slug: version-26-1-0</p>
+    <p>description:</p>
+    <p>index_title: Version 26.1.0</p>
+    <p>hidden:</p>
+    <p>keywords:</p>
+    <p>tags:</p>
+    <p>---published</p>
+    <h1>Version 26.1.0</h1>
+    <p>Body content.</p>
+    """
+    normalized_html = normalize_synced_html(raw_html)
+    assert "type: page" not in normalized_html
+    assert "slug: version-26-1-0" not in normalized_html
+    assert "Version 26.1.0" in normalized_html
+    assert "Body content." in normalized_html
+
+
+def test_normalize_synced_html_keeps_clean_html_unchanged():
+    raw_html = "<h1>Clean Title</h1><p>No leaked metadata here.</p>"
+    normalized_html = normalize_synced_html(raw_html)
+    assert normalized_html == raw_html
