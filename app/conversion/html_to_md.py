@@ -18,7 +18,6 @@ import markdownify
 import requests
 
 from app.lib.html_normalize import (
-    _remove_google_docs_styles,
     strip_frontmatter,
     strip_html_frontmatter,
 )
@@ -52,6 +51,42 @@ class DocsMarkdownConverter(markdownify.MarkdownConverter):
     def convert_table(self, el, text, convert_as_inline):
         """Let markdownify handle tables naturally."""
         return super().convert_table(el, text, convert_as_inline)
+
+    def convert_div(self, el, text, convert_as_inline=False, **kwargs):
+        """Convert admonition/callout divs into markdown admonitions."""
+        classes = {c.lower() for c in (el.get("class") or [])}
+        is_admonition = "admonition" in classes or "callout" in classes
+        if not is_admonition:
+            return text
+
+        kind = "info"
+        for candidate in ("note", "info", "tip", "warning", "danger", "caution", "success"):
+            if candidate in classes:
+                kind = "warning" if candidate == "caution" else candidate
+                break
+
+        title = ""
+        title_el = el.find(
+            lambda tag: tag.name in {"p", "div", "strong"}
+            and any(
+                cls.lower() in {"admonition-title", "callout-title", "title"}
+                for cls in (tag.get("class") or [])
+            )
+        )
+        if title_el:
+            title = title_el.get_text(" ", strip=True)
+
+        # Keep this simple and robust: extract text content and preserve line breaks.
+        lines = [ln.strip() for ln in el.get_text("\n").splitlines() if ln.strip()]
+        if title and lines and lines[0].lower() == title.lower():
+            lines = lines[1:]
+        body = "\n".join(lines)
+
+        header = f'!!! {kind} "{title}"' if title else f"!!! {kind}"
+        if not body:
+            return f"\n{header}\n\n"
+        indented = "\n".join(f"    {ln}" for ln in body.splitlines())
+        return f"\n{header}\n{indented}\n\n"
 
 
 def _convert_with_pandoc(html: str) -> str | None:
@@ -113,6 +148,52 @@ def _convert_with_markdownify(content: str) -> str:
     return converter.convert(content)
 
 
+_STYLE_ATTR_RE = re.compile(r'\s*style="[^"]*"', re.I)
+_STYLE_TAG_RE = re.compile(r"<style[^>]*>[\s\S]*?</style>", re.I)
+_LINK_TAG_RE = re.compile(r"<link[^>]*>", re.I)
+_META_TAG_RE = re.compile(r"<meta[^>]*>", re.I)
+_TITLE_TAG_RE = re.compile(r"<title[^>]*>[\s\S]*?</title>", re.I)
+_NBSP_RE = re.compile(r"&nbsp;")
+_MULTI_SPACE_RE = re.compile(r"\s{2,}")
+_FM_TITLE_RE = re.compile(r"^(?:title|index_title)\s*:\s*(.+?)\s*$", re.I)
+
+
+def _cleanup_html_for_conversion(content: str) -> str:
+    """Remove noisy Google Docs markup but keep class attributes for callouts."""
+    content = _STYLE_ATTR_RE.sub("", content)
+    content = _STYLE_TAG_RE.sub("", content)
+    content = _LINK_TAG_RE.sub("", content)
+    content = _META_TAG_RE.sub("", content)
+    content = _TITLE_TAG_RE.sub("", content)
+    content = _NBSP_RE.sub(" ", content)
+    content = _MULTI_SPACE_RE.sub(" ", content)
+    return content
+
+
+def _extract_frontmatter_title(md_text: str) -> str | None:
+    """Extract title/index_title from leaked frontmatter lines near top of markdown."""
+    if not md_text:
+        return None
+    for ln in md_text.splitlines()[:40]:
+        m = _FM_TITLE_RE.match(ln.strip())
+        if m:
+            title = m.group(1).strip().strip('"').strip("'")
+            if title:
+                return title
+    return None
+
+
+def _has_top_heading(md_text: str) -> bool:
+    if not md_text:
+        return False
+    for ln in md_text.splitlines()[:20]:
+        s = ln.strip()
+        if not s:
+            continue
+        return s.startswith("#")
+    return False
+
+
 def convert_html_to_markdown(
     html: str,
     strip_front: bool = True,
@@ -144,8 +225,8 @@ def convert_html_to_markdown(
         content = strip_frontmatter(content)
         content = strip_html_frontmatter(content)
 
-    # Clean Google Docs artifacts
-    content = _remove_google_docs_styles(content)
+    # Clean Google Docs artifacts while preserving classes for callout detection.
+    content = _cleanup_html_for_conversion(content)
 
     # Download and rewrite images if requested
     if download_images and images_dir:
@@ -165,6 +246,8 @@ def convert_html_to_markdown(
 
     if not md:
         md = _convert_with_markdownify(content)
+
+    extracted_title = _extract_frontmatter_title(md)
 
     # Clean up excessive whitespace
     md = re.sub(r"\n{3,}", "\n\n", md)
@@ -186,6 +269,10 @@ def convert_html_to_markdown(
         return hashes + (rest[0].upper() + rest[1:] if rest else rest)
 
     md = re.sub(r"^(#{1,2}\s+)\d+[-_\s]+(.)", _strip_num_prefix, md, count=1)
+
+    # If title existed only in frontmatter and no heading survived, rehydrate H1.
+    if extracted_title and not _has_top_heading(md):
+        md = f"# {extracted_title}\n\n{md}".strip()
 
     return md
 

@@ -72,3 +72,34 @@ def test_html_to_markdown_uses_pypandoc_when_available(monkeypatch):
 
     assert "# Title" in md
     assert "Hello world" in md
+
+
+def test_html_to_markdown_rehydrates_title_from_frontmatter():
+    html = """
+    <p>type: page</p>
+    <p>title: Version 26.1.0</p>
+    <p>listed: true</p>
+    <p>slug: version-26-1-0</p>
+    <p>description:</p>
+    <p>index_title: Version 26.1.0</p>
+    <p>hidden:</p>
+    <p>keywords:</p>
+    <p>tags:</p>
+    <p>---published</p>
+    <p>Body content.</p>
+    """
+    md = convert_html_to_markdown(html, engine="markdownify")
+    assert md.startswith("# Version 26.1.0")
+    assert "Body content." in md
+
+
+def test_html_to_markdown_converts_admonition_div_callout():
+    html = """
+    <div class="admonition info">
+      <p class="admonition-title">What's New</p>
+      <p>This section consists of new features.</p>
+    </div>
+    """
+    md = convert_html_to_markdown(html, engine="markdownify")
+    assert '!!! info "What\'s New"' in md
+    assert "This section consists of new features." in md
