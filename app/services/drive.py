@@ -30,7 +30,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaInMemoryUpload
 from sqlalchemy.orm import Session
 
 from app.lib.markdown_import import normalize_imported_markdown
@@ -1113,29 +1113,46 @@ async def import_markdown(body: dict, db: Session, user: User | None) -> dict:
         # Try creating a Google Doc if we have a Drive service
         if drive_service and normalized_content:
             try:
-                # Create a Google Doc
+                import markdown as _md
+
+                # Convert normalized markdown to HTML before Drive import.
+                # Uploading markdown as plain text produces broken rendering after sync.
+                html_body = _md.markdown(
+                    normalized_content,
+                    extensions=[
+                        "tables",
+                        "fenced_code",
+                        "codehilite",
+                        "toc",
+                        "attr_list",
+                        "admonition",
+                        "sane_lists",
+                        "nl2br",
+                    ],
+                )
+                html_content = (
+                    "<!DOCTYPE html><html><head>"
+                    "<meta charset='utf-8'>"
+                    f"<title>{title}</title></head>"
+                    f"<body>{html_body}</body></html>"
+                )
+
                 file_metadata = {"name": title, "mimeType": "application/vnd.google-apps.document"}
-                # If there's a parent folder, put the doc there
                 if project and hasattr(project, "drive_folder_id") and project.drive_folder_id:
                     file_metadata["parents"] = [project.drive_folder_id]
 
+                media = MediaInMemoryUpload(
+                    html_content.encode("utf-8"),
+                    mimetype="text/html",
+                    resumable=False,
+                )
                 created_file = drive_service.files().create(
-                    body=file_metadata, fields="id"
+                    body=file_metadata,
+                    media_body=media,
+                    fields="id",
+                    supportsAllDrives=True,
                 ).execute()
                 google_doc_id = created_file.get("id")
-
-                if google_doc_id:
-                    # Update the doc content via Docs API
-                    try:
-                        from googleapiclient.discovery import build as build_api
-                        docs_service = build_api("docs", "v1", credentials=creds, cache_discovery=False)
-                        # Insert the markdown as plain text (Drive will format it)
-                        docs_service.documents().batchUpdate(
-                            documentId=google_doc_id,
-                            body={"requests": [{"insertText": {"location": {"index": 1}, "text": normalized_content}}]}
-                        ).execute()
-                    except Exception as e:
-                        logger.warning("Could not insert content into Google Doc %s: %s", google_doc_id, e)
 
             except Exception as e:
                 logger.warning("Could not create Google Doc for %s: %s", title, e)

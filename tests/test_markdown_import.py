@@ -50,3 +50,14 @@ def test_normalize_imported_markdown_converts_github_alert():
     normalized = normalize_imported_markdown(raw)
     assert "!!! warning" in normalized
 
+
+def test_normalize_imported_markdown_strips_bare_published_key():
+    raw = """title: Example
+slug: example
+published
+
+# Example
+"""
+    normalized = normalize_imported_markdown(raw)
+    assert "published" not in normalized
+    assert normalized.startswith("# Example")

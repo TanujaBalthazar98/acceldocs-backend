@@ -7,6 +7,7 @@ import re
 _YAML_FRONT_RE = re.compile(r"^\s*---\s*\n[\s\S]*?\n---\s*\n?")
 _TOML_FRONT_RE = re.compile(r"^\s*\+\+\+\s*\n[\s\S]*?\n\+\+\+\s*\n?")
 _META_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*.*$")
+_META_BARE_KEY_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*$")
 
 # Frontmatter keys commonly seen in imported docs platforms (DeveloperHub/Docusaurus)
 _FM_KEYS = {
@@ -83,6 +84,13 @@ def strip_import_frontmatter(text: str) -> str:
 
         match = _META_LINE_RE.match(stripped)
         if not match:
+            bare = _META_BARE_KEY_RE.match(stripped)
+            if bare:
+                bare_key = bare.group(1).lower()
+                if bare_key in _FM_KEYS and meta_count > 0:
+                    meta_count += 1
+                    j += 1
+                    continue
             # Handle collapsed marker like ---published
             if meta_count > 0 and stripped.startswith("---"):
                 meta_count += 1
