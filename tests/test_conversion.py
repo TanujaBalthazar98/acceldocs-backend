@@ -54,3 +54,21 @@ def test_html_to_markdown_uses_pandoc_when_available(monkeypatch):
     md = convert_html_to_markdown(html, engine="pandoc")
     assert "# Title" in md
     assert "Hello world" in md
+
+
+def test_html_to_markdown_uses_pypandoc_when_available(monkeypatch):
+    html = "<h1>Title</h1><p>Hello world</p>"
+
+    def _fake_convert_text(*args, **kwargs):
+        return "# Title\n\nHello world\n"
+
+    class _FakePypandoc:
+        convert_text = staticmethod(_fake_convert_text)
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pypandoc", _FakePypandoc)
+    md = convert_html_to_markdown(html, engine="pandoc")
+
+    assert "# Title" in md
+    assert "Hello world" in md

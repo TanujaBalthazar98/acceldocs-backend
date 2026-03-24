@@ -83,6 +83,26 @@ def _convert_with_pandoc(html: str) -> str | None:
         return None
 
 
+def _convert_with_pypandoc(html: str) -> str | None:
+    """Convert HTML to markdown via pypandoc (bundled binary-friendly)."""
+    try:
+        import pypandoc  # type: ignore
+    except Exception:
+        return None
+
+    try:
+        md = pypandoc.convert_text(
+            html,
+            "gfm+pipe_tables+task_lists+fenced_code_blocks",
+            format="html",
+            extra_args=["--wrap=none"],
+        )
+        return (md or "").strip()
+    except Exception:
+        logger.exception("pypandoc HTML->Markdown conversion failed")
+        return None
+
+
 def _convert_with_markdownify(content: str) -> str:
     """Convert HTML to markdown using markdownify."""
     converter = DocsMarkdownConverter(
@@ -137,7 +157,7 @@ def convert_html_to_markdown(
 
     md = ""
     if requested_engine in {"auto", "pandoc"}:
-        md = _convert_with_pandoc(content) or ""
+        md = _convert_with_pypandoc(content) or _convert_with_pandoc(content) or ""
         if not md and requested_engine == "pandoc":
             logger.warning(
                 "HTML_TO_MD_ENGINE=pandoc requested, but Pandoc unavailable/failed; falling back to markdownify"
