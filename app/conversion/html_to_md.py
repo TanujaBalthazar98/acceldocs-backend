@@ -1,4 +1,4 @@
-"""HTML → Markdown conversion using markdownify.
+"""HTML → Markdown conversion using Pandoc (preferred) or markdownify.
 
 Handles Google Docs exported HTML with custom converters for:
   - Preserving headings, tables, code blocks, images, links
@@ -7,7 +7,10 @@ Handles Google Docs exported HTML with custom converters for:
 """
 
 import logging
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -51,12 +54,52 @@ class DocsMarkdownConverter(markdownify.MarkdownConverter):
         return super().convert_table(el, text, convert_as_inline)
 
 
+def _convert_with_pandoc(html: str) -> str | None:
+    """Convert HTML to markdown via local pandoc binary.
+
+    Returns markdown when successful, otherwise None.
+    """
+    pandoc_bin = os.getenv("PANDOC_PATH", "pandoc").strip() or "pandoc"
+    if shutil.which(pandoc_bin) is None:
+        return None
+
+    try:
+        result = subprocess.run(
+            [
+                pandoc_bin,
+                "--from=html",
+                "--to=gfm+pipe_tables+task_lists+fenced_code_blocks",
+                "--wrap=none",
+            ],
+            input=html,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=20,
+        )
+        return (result.stdout or "").strip()
+    except Exception:
+        logger.exception("Pandoc HTML->Markdown conversion failed")
+        return None
+
+
+def _convert_with_markdownify(content: str) -> str:
+    """Convert HTML to markdown using markdownify."""
+    converter = DocsMarkdownConverter(
+        heading_style="atx",
+        bullets="-",
+        strip=["style", "script", "meta", "link", "title"],
+    )
+    return converter.convert(content)
+
+
 def convert_html_to_markdown(
     html: str,
     strip_front: bool = True,
     download_images: bool = False,
     images_dir: Path | None = None,
     image_base_path: str = "assets",
+    engine: str | None = None,
 ) -> str:
     """Convert HTML (typically from Google Docs export) to Markdown.
 
@@ -66,6 +109,7 @@ def convert_html_to_markdown(
         download_images: If True, download Google Docs images locally.
         images_dir: Directory to save downloaded images.
         image_base_path: Base path for image references in Markdown.
+        engine: Conversion engine: "auto" (default), "pandoc", "markdownify".
 
     Returns:
         Clean Markdown string.
@@ -87,13 +131,20 @@ def convert_html_to_markdown(
     if download_images and images_dir:
         content = _download_and_rewrite_images(content, images_dir, image_base_path)
 
-    # Convert to Markdown
-    converter = DocsMarkdownConverter(
-        heading_style="atx",
-        bullets="-",
-        strip=["style", "script", "meta", "link", "title"],
-    )
-    md = converter.convert(content)
+    requested_engine = (engine or os.getenv("HTML_TO_MD_ENGINE", "auto")).strip().lower()
+    if requested_engine not in {"auto", "pandoc", "markdownify"}:
+        requested_engine = "auto"
+
+    md = ""
+    if requested_engine in {"auto", "pandoc"}:
+        md = _convert_with_pandoc(content) or ""
+        if not md and requested_engine == "pandoc":
+            logger.warning(
+                "HTML_TO_MD_ENGINE=pandoc requested, but Pandoc unavailable/failed; falling back to markdownify"
+            )
+
+    if not md:
+        md = _convert_with_markdownify(content)
 
     # Clean up excessive whitespace
     md = re.sub(r"\n{3,}", "\n\n", md)
