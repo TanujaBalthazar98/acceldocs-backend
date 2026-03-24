@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.api.drive import _create_drive_doc, _trash_drive_item, _move_drive_item, get_drive_credentials as _get_drive_creds_drive
 from app.auth.routes import get_current_user
 from app.database import get_db
-from app.lib.markdown_import import normalize_synced_html
+from app.lib import markdown_import as _markdown_import
 from app.lib.slugify import to_slug as slugify
 from app.models import (
     Approval,
@@ -31,6 +31,9 @@ from app.models import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Backward-compatible binding so deploys do not crash if app/lib version lags.
+normalize_synced_html = getattr(_markdown_import, "normalize_synced_html", lambda html: html)
 
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 

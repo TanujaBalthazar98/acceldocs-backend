@@ -193,3 +193,59 @@ def normalize_imported_markdown(text: str) -> str:
     cleaned = strip_import_frontmatter(text or "")
     cleaned = normalize_import_callouts(cleaned)
     return cleaned.strip() + ("\n" if cleaned.strip() else "")
+
+
+_SYNC_LEAK_MARKERS = (
+    "type:",
+    "listed:",
+    "slug:",
+    "description:",
+    "index_title:",
+    "keywords:",
+    "tags:",
+    "published",
+    "---published",
+)
+
+
+def _should_rehydrate_synced_html(content_html: str) -> bool:
+    if not content_html:
+        return False
+    text = re.sub(r"<[^>]+>", "\n", content_html).lower()
+    marker_hits = sum(1 for marker in _SYNC_LEAK_MARKERS if marker in text)
+    return marker_hits >= 3
+
+
+def normalize_synced_html(content_html: str) -> str:
+    """Best-effort cleanup for legacy synced HTML with leaked markdown metadata."""
+    if not _should_rehydrate_synced_html(content_html):
+        return content_html
+
+    try:
+        import markdown as _md
+        from app.conversion.html_to_md import convert_html_to_markdown
+
+        md_content = convert_html_to_markdown(
+            content_html or "",
+            strip_front=True,
+            download_images=False,
+        )
+        cleaned_md = normalize_imported_markdown(md_content)
+        if not cleaned_md:
+            return content_html
+
+        return _md.markdown(
+            cleaned_md,
+            extensions=[
+                "tables",
+                "fenced_code",
+                "codehilite",
+                "toc",
+                "nl2br",
+                "sane_lists",
+                "admonition",
+                "attr_list",
+            ],
+        )
+    except Exception:
+        return content_html

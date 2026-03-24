@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from app.auth.routes import get_current_user
 from app.config import settings
 from app.database import get_db
-from app.lib.markdown_import import normalize_imported_markdown, normalize_synced_html
+from app.lib import markdown_import as _markdown_import
 from app.lib.slugify import to_slug as slugify
 from app.models import GoogleToken, OrgRole, Organization, Page, Section, User
 from app.services.encryption import get_encryption_service
@@ -33,6 +33,10 @@ from app.services.drive import google_drive_handler
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Backward-compatible binding so deploys do not crash if app/lib version lags.
+normalize_imported_markdown = _markdown_import.normalize_imported_markdown
+normalize_synced_html = getattr(_markdown_import, "normalize_synced_html", lambda html: html)
 
 DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
