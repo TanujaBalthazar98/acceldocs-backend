@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.auth.routes import get_current_user
 from app.config import settings
 from app.database import get_db
+from app.lib.markdown_import import normalize_imported_markdown
 from app.lib.slugify import to_slug as slugify
 from app.models import GoogleToken, OrgRole, Organization, Page, Section, User
 from app.services.encryption import get_encryption_service
@@ -317,9 +318,19 @@ def _markdown_to_html(md_bytes: bytes) -> bytes:
     import markdown as _md
 
     text = md_bytes.decode("utf-8", errors="replace")
+    text = normalize_imported_markdown(text)
     html = _md.markdown(
         text,
-        extensions=["tables", "fenced_code", "codehilite", "toc", "nl2br"],
+        extensions=[
+            "tables",
+            "fenced_code",
+            "codehilite",
+            "toc",
+            "nl2br",
+            "sane_lists",
+            "admonition",
+            "attr_list",
+        ],
     )
     # Wrap in minimal HTML structure so Drive recognizes it as a proper document
     full_html = (

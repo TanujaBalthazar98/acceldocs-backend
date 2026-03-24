@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
+from app.lib.markdown_import import normalize_imported_markdown
 from app.middleware.auth import AuthUser, can_access_document, get_current_user, require_role
 from app.models import Document, DocumentView
 from app.publishing.git_publisher import unpublish_from_production
@@ -465,10 +466,11 @@ async def get_document_preview(
         )
 
     md_content = md_path.read_text(encoding="utf-8")
+    normalized_md = normalize_imported_markdown(md_content)
 
     # Render markdown to HTML with extensions
     html = markdown.markdown(
-        md_content,
+        normalized_md,
         extensions=[
             "fenced_code",
             "codehilite",
@@ -476,6 +478,8 @@ async def get_document_preview(
             "toc",
             "nl2br",
             "sane_lists",
+            "admonition",
+            "attr_list",
         ],
         extension_configs={
             "codehilite": {
@@ -487,6 +491,6 @@ async def get_document_preview(
 
     return {
         "html": html,
-        "markdown": md_content,
+        "markdown": normalized_md,
         "path": str(md_path.relative_to(repo_path)),
     }

@@ -33,6 +33,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from sqlalchemy.orm import Session
 
+from app.lib.markdown_import import normalize_imported_markdown
 from app.models import Document, GoogleToken, OrgRole, Organization, Page, User
 from app.services.drive_acl import (
     sync_member_drive_file_permission,
@@ -795,7 +796,9 @@ async def convert_markdown_to_gdoc(body: dict, db: Session, user: User | None) -
     if not access_token:
         return {"ok": False, "error": "Google access token required"}
 
-    if not markdown_content.strip():
+    normalized_markdown = normalize_imported_markdown(markdown_content)
+
+    if not normalized_markdown.strip():
         return {"ok": False, "error": "No markdown content provided"}
 
     try:
@@ -804,8 +807,16 @@ async def convert_markdown_to_gdoc(body: dict, db: Session, user: User | None) -
 
         # Convert markdown → HTML
         html_body = _md.markdown(
-            markdown_content,
-            extensions=["tables", "fenced_code", "codehilite", "toc", "attr_list"],
+            normalized_markdown,
+            extensions=[
+                "tables",
+                "fenced_code",
+                "codehilite",
+                "toc",
+                "attr_list",
+                "admonition",
+                "sane_lists",
+            ],
         )
         # Wrap in a minimal HTML document so Drive renders it properly
         html_content = (
@@ -1089,6 +1100,7 @@ async def import_markdown(body: dict, db: Session, user: User | None) -> dict:
     for f in files:
         file_path = f.get("path", "untitled")
         content = f.get("content", "")
+        normalized_content = normalize_imported_markdown(content) if content else ""
         target_topic_id = _safe_int(f.get("targetTopicId")) or parent_topic_id
 
         # Derive title from file path
@@ -1099,7 +1111,7 @@ async def import_markdown(body: dict, db: Session, user: User | None) -> dict:
         google_doc_id = None
 
         # Try creating a Google Doc if we have a Drive service
-        if drive_service and content:
+        if drive_service and normalized_content:
             try:
                 # Create a Google Doc
                 file_metadata = {"name": title, "mimeType": "application/vnd.google-apps.document"}
@@ -1120,7 +1132,7 @@ async def import_markdown(body: dict, db: Session, user: User | None) -> dict:
                         # Insert the markdown as plain text (Drive will format it)
                         docs_service.documents().batchUpdate(
                             documentId=google_doc_id,
-                            body={"requests": [{"insertText": {"location": {"index": 1}, "text": content}}]}
+                            body={"requests": [{"insertText": {"location": {"index": 1}, "text": normalized_content}}]}
                         ).execute()
                     except Exception as e:
                         logger.warning("Could not insert content into Google Doc %s: %s", google_doc_id, e)
@@ -1131,13 +1143,16 @@ async def import_markdown(body: dict, db: Session, user: User | None) -> dict:
         try:
             # Convert markdown to HTML for storage
             content_html = None
-            if content:
+            if normalized_content:
                 try:
                     import markdown as _md
-                    content_html = _md.markdown(content, extensions=["tables", "fenced_code"])
+                    content_html = _md.markdown(
+                        normalized_content,
+                        extensions=["tables", "fenced_code", "admonition", "sane_lists"],
+                    )
                 except ImportError:
                     # Wrap raw markdown in pre tags as fallback
-                    content_html = f"<pre>{content}</pre>"
+                    content_html = f"<pre>{normalized_content}</pre>"
 
             document = Document(
                 google_doc_id=google_doc_id,
