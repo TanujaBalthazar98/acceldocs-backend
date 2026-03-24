@@ -944,7 +944,18 @@ async def sync_all_pages(
 
         drive_mod = meta.get("modifiedTime")
         if drive_mod == page.drive_modified_at and page.html_content:
-            skipped += 1
+            # Self-heal cached HTML after parser/normalizer improvements.
+            # Without this, unchanged Drive files stay stuck with legacy
+            # leaked frontmatter/callout formatting forever.
+            rehydrated_cached = normalize_synced_html(page.html_content)
+            if rehydrated_cached != page.html_content:
+                if page.is_published and rehydrated_cached != page.published_html:
+                    page.status = "draft"
+                page.html_content = rehydrated_cached
+                page.last_synced_at = datetime.now(timezone.utc).isoformat()
+                synced += 1
+            else:
+                skipped += 1
             continue
 
         try:
