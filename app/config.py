@@ -52,10 +52,6 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     resend_from_email: str = "AccelDocs <noreply@docspeare.com>"
 
-    # Netlify
-    netlify_site_id: str = ""
-    netlify_auth_token: str = ""
-
     # AI Agent
     # Providers: "gemini" (free tier), "groq" (free tier), "anthropic" (paid),
     #            "openai_compat" (any OpenAI-compatible endpoint — Ollama, vLLM, etc.)
