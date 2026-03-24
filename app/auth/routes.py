@@ -164,10 +164,11 @@ class TokenResponse(BaseModel):
     user: dict
 
 
-def _create_jwt(user_id: int, email: str) -> str:
+def _create_jwt(user_id: int, email: str, role: str = "viewer") -> str:
     payload = {
         "sub": str(user_id),
         "email": email,
+        "role": role,
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
         "iat": datetime.now(timezone.utc),
     }
@@ -823,8 +824,9 @@ async def callback(
     except Exception as exc:
         logger.warning("Drive ACL sync after login failed for %s: %s", user.email, exc)
 
-    # Create JWT session token
-    jwt_token = _create_jwt(user.id, user.email)
+    # Keep JWT role scoped to the persisted user role to avoid cross-workspace
+    # privilege escalation in legacy role-gated endpoints.
+    jwt_token = _create_jwt(user.id, user.email, role=user.role)
 
     accept_header = (request.headers.get("accept") or "").lower()
     wants_json = api or ("application/json" in accept_header) or (request.headers.get("x-requested-with") == "XMLHttpRequest")
@@ -1021,8 +1023,8 @@ async def refresh_token(request: Request, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
-    # Issue fresh JWT
-    new_jwt = _create_jwt(user.id, user.email)
+    # Keep refreshed JWT aligned with persisted user role.
+    new_jwt = _create_jwt(user.id, user.email, role=user.role)
 
     # Try to get a fresh Google access token using stored refresh token
     google_access_token = None

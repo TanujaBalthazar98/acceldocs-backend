@@ -93,15 +93,15 @@ def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
 # Drive helpers
 # ---------------------------------------------------------------------------
 
-async def _get_drive_credentials(user: User, db: Session, org_id: int) -> Credentials:
+async def _get_drive_credentials(user: User, db: Session, org_id: int, *, require_write: bool = True) -> Credentials:
     """Shared credential lookup with workspace fallback logic."""
-    return await _get_drive_creds_drive(user, org_id, db)
+    return await _get_drive_creds_drive(user, org_id, db, require_write=require_write)
 
 
-async def _get_drive_credentials_compat(user: User, db: Session, org_id: int) -> Credentials:
+async def _get_drive_credentials_compat(user: User, db: Session, org_id: int, *, require_write: bool = True) -> Credentials:
     """Compatibility layer for tests that monkeypatch the older 2-arg helper."""
     try:
-        return await _get_drive_credentials(user, db, org_id)
+        return await _get_drive_credentials(user, db, org_id, require_write=require_write)
     except TypeError:
         return await _get_drive_credentials(user, db)  # type: ignore[misc]
 
@@ -352,6 +352,7 @@ def engagement_overview(
         .join(Page, Page.id == PageComment.page_id)
         .filter(
             PageComment.organization_id == org_id,
+            Page.organization_id == org_id,
             PageComment.is_deleted == False,  # noqa: E712
         )
         .order_by(PageComment.created_at.desc())
@@ -433,6 +434,18 @@ def page_engagement_detail(
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
 
+    # Aggregate totals from ALL feedback (not limited)
+    totals = (
+        db.query(
+            func.sum(case((PageFeedback.vote == "up", 1), else_=0)).label("up"),
+            func.sum(case((PageFeedback.vote == "down", 1), else_=0)).label("down"),
+        )
+        .filter(PageFeedback.organization_id == org_id, PageFeedback.page_id == page_id)
+        .one()
+    )
+    up_count = int(totals.up or 0)
+    down_count = int(totals.down or 0)
+
     feedback_rows = (
         db.query(PageFeedback)
         .filter(PageFeedback.organization_id == org_id, PageFeedback.page_id == page_id)
@@ -451,9 +464,6 @@ def page_engagement_detail(
         .limit(safe_limit)
         .all()
     )
-
-    up_count = sum(1 for row in feedback_rows if row.vote == "up")
-    down_count = sum(1 for row in feedback_rows if row.vote == "down")
 
     return {
         "page": {"id": page.id, "title": page.title, "slug": page.slug},
@@ -861,7 +871,7 @@ async def sync_page(
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
 
-    creds = await _get_drive_credentials_compat(user, db, org_id)
+    creds = await _get_drive_credentials_compat(user, db, org_id, require_write=False)
     html, modified_at, drive_title = await _export_html(page.google_doc_id, creds)
 
     page.html_content = html

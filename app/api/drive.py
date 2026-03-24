@@ -56,7 +56,21 @@ _NUM_PREFIX = re.compile(r"^\d+[\.\s]+")
 # Shared Drive credential helper
 # ---------------------------------------------------------------------------
 
-async def get_drive_credentials(user: User, org_id: int, db: Session) -> Credentials:
+DRIVE_WRITE_SCOPE = "https://www.googleapis.com/auth/drive"
+DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+
+
+def _token_has_write_scope(google_token: GoogleToken) -> bool:
+    """Check if a stored token has full Drive write scope (not just readonly)."""
+    scope = (google_token.scope or "").strip()
+    if not scope:
+        return False
+    scopes = scope.split()
+    # Full drive scope grants write; drive.readonly alone does not
+    return DRIVE_WRITE_SCOPE in scopes
+
+
+async def get_drive_credentials(user: User, org_id: int, db: Session, *, require_write: bool = True) -> Credentials:
     """Return fresh Google Credentials for org operations.
 
     Resolution order:
@@ -64,6 +78,9 @@ async def get_drive_credentials(user: User, org_id: int, db: Session) -> Credent
     2. Current member's latest token from any org (multi-workspace login).
     3. Owner/admin token for this org.
     4. Owner/admin latest token from any org.
+
+    When require_write=True (default), tokens with only drive.readonly scope
+    are rejected — the user must re-authenticate to grant full Drive access.
     """
 
     def _latest_token_for_user(user_id: int, preferred_org_id: int | None = None) -> GoogleToken | None:
@@ -100,6 +117,18 @@ async def get_drive_credentials(user: User, org_id: int, db: Session) -> Credent
             detail="No Google Drive credentials found for this workspace. Ask owner/admin to reconnect Drive.",
         )
 
+    # Validate scope — reject readonly tokens when write access is required
+    if require_write and not _token_has_write_scope(google_token):
+        logger.warning(
+            "Token for user %d org %d has insufficient scope: %s",
+            google_token.user_id, org_id, google_token.scope,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Your Google Drive connection has read-only permissions. "
+                   "Please reconnect Drive (Settings > Integrations) to grant full access.",
+        )
+
     enc = get_encryption_service()
     try:
         refresh_token = enc.decrypt(google_token.encrypted_refresh_token)
@@ -134,9 +163,7 @@ async def get_drive_credentials(user: User, org_id: int, db: Session) -> Credent
 def _resolve_org_role(user: User, db: Session, requested_org_id: int | None = None) -> OrgRole:
     query = db.query(OrgRole).filter(OrgRole.user_id == user.id)
     if requested_org_id is not None:
-        explicit = query.filter(OrgRole.organization_id == requested_org_id).first()
-        if explicit:
-            return explicit
+        query = query.filter(OrgRole.organization_id == requested_org_id)
     role = query.first()
     if not role:
         raise HTTPException(status_code=403, detail="User has no organization")
@@ -280,6 +307,28 @@ def _drive_import_mime_for_filename(filename: str) -> str:
     return mime
 
 
+def _markdown_to_html(md_bytes: bytes) -> bytes:
+    """Convert markdown content to HTML for better Google Drive import fidelity.
+
+    Google Drive's native markdown-to-Doc conversion is poor (treats markdown
+    syntax as literal text). Converting to HTML first preserves headings, lists,
+    bold, links, code blocks, tables, etc.
+    """
+    import markdown as _md
+
+    text = md_bytes.decode("utf-8", errors="replace")
+    html = _md.markdown(
+        text,
+        extensions=["tables", "fenced_code", "codehilite", "toc", "nl2br"],
+    )
+    # Wrap in minimal HTML structure so Drive recognizes it as a proper document
+    full_html = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+        f"<body>{html}</body></html>"
+    )
+    return full_html.encode("utf-8")
+
+
 async def _upload_local_as_google_doc(
     *,
     service,
@@ -297,6 +346,12 @@ async def _upload_local_as_google_doc(
             status_code=400,
             detail=f"File '{filename}' exceeds {MAX_LOCAL_FILE_BYTES // (1024 * 1024)}MB limit",
         )
+
+    # Convert markdown to HTML before uploading — Google Drive handles HTML
+    # conversion to Docs much better than raw markdown
+    if mime == "text/markdown":
+        content = _markdown_to_html(content)
+        mime = "text/html"
 
     title = _clean_name(PurePosixPath(filename).stem) or "Untitled"
     media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime, resumable=False)
@@ -376,8 +431,12 @@ def _scan_folder(
     db: Session,
     depth: int = 0,
 ) -> dict[str, int]:
-    """Recursively scan a Drive folder, creating Sections and Pages."""
-    counts: dict[str, int] = {"sections": 0, "pages": 0, "updated": 0}
+    """Recursively scan a Drive folder, creating Sections and Pages.
+
+    This function is intentionally non-destructive for existing rows so moves
+    between folders during a single scan do not lose DB identity/history.
+    """
+    counts: dict[str, int] = {"sections": 0, "pages": 0, "updated": 0, "removed": 0}
     if depth > MAX_FOLDER_DEPTH:
         return counts
 
@@ -420,6 +479,7 @@ def _scan_folder(
             counts["sections"] += sub["sections"]
             counts["pages"] += sub["pages"]
             counts["updated"] += sub["updated"]
+            counts["removed"] += sub["removed"]
 
         elif mime == GOOGLE_DOC_MIME:
             title = _clean_name(name)
@@ -469,19 +529,31 @@ def drive_status(
     org_role = _resolve_org_role(user, db, x_org_id)
 
     org = db.get(Organization, org_role.organization_id)
-    # "connected" is workspace-level availability, not just the current user's token row.
-    token = (
+    # Workspace-level connectivity (any member token exists for this org)
+    workspace_token = (
         db.query(GoogleToken)
         .join(OrgRole, OrgRole.user_id == GoogleToken.user_id)
         .filter(OrgRole.organization_id == org_role.organization_id)
         .order_by(GoogleToken.updated_at.desc(), GoogleToken.id.desc())
         .first()
     )
+    # Current member capability for this workspace
+    member_token = (
+        db.query(GoogleToken)
+        .filter(
+            GoogleToken.user_id == user.id,
+            GoogleToken.organization_id == org_role.organization_id,
+        )
+        .order_by(GoogleToken.updated_at.desc(), GoogleToken.id.desc())
+        .first()
+    )
+    has_write = _token_has_write_scope(member_token) if member_token else False
     return {
-        "connected": token is not None,
+        "connected": workspace_token is not None,
+        "has_write_access": has_write,
         "drive_folder_id": org.drive_folder_id if org else None,
         "last_refreshed_at": (
-            token.last_refreshed_at.isoformat() if token and token.last_refreshed_at else None
+            member_token.last_refreshed_at.isoformat() if member_token and member_token.last_refreshed_at else None
         ),
     }
 
@@ -789,6 +861,15 @@ async def import_local(
     }
 
 
+def _is_file_not_found(exc: Exception) -> bool:
+    """Check if a Google API error indicates the file was deleted/trashed."""
+    from googleapiclient.errors import HttpError
+    if isinstance(exc, HttpError):
+        return exc.resp.status in (404, 410)
+    msg = str(exc).lower()
+    return "not found" in msg or "404" in msg or "file not found" in msg
+
+
 @router.post("/sync")
 async def sync_all_pages(
     x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
@@ -797,32 +878,56 @@ async def sync_all_pages(
 ) -> dict:
     """Fetch latest HTML from Google Drive for all pages in the org.
 
-    Skips pages whose drive_modified_at matches the stored value (already up to date).
+    - Skips pages whose drive_modified_at matches the stored value (already up to date).
+    - Removes pages whose Drive docs are explicitly marked trashed.
+    - Removes sections whose Drive folders are explicitly marked trashed and empty.
     """
     org_role = _resolve_org_role(user, db, x_org_id)
     if not org_role or org_role.role not in ("owner", "admin", "editor"):
         raise HTTPException(status_code=403, detail="Editor role required")
 
     org_id = org_role.organization_id
-    creds = await get_drive_credentials(user, org_id, db)
+    creds = await get_drive_credentials(user, org_id, db, require_write=False)
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     pages = db.query(Page).filter(Page.organization_id == org_id).all()
     synced, skipped, errors = 0, 0, 0
+    removed_pages: list[int] = []
 
     for page in pages:
+        if not page.google_doc_id:
+            skipped += 1
+            continue
+
         try:
             meta = service.files().get(
                 fileId=page.google_doc_id,
-                fields="modifiedTime",
+                fields="modifiedTime,trashed",
                 supportsAllDrives=True,
             ).execute()
-            drive_mod = meta.get("modifiedTime")
         except Exception as e:
+            if _is_file_not_found(e):
+                logger.warning(
+                    "Page %d (%s) not visible in Drive metadata lookup; keeping row to avoid destructive false positives",
+                    page.id, page.google_doc_id,
+                )
+                errors += 1
+                continue
             logger.warning("Metadata fetch failed page %d (%s): %s", page.id, page.google_doc_id, e)
             errors += 1
             continue
 
+        # File exists but is trashed — treat as deleted
+        if meta.get("trashed"):
+            logger.info(
+                "Page %d (%s) is trashed in Drive — removing from DB",
+                page.id, page.google_doc_id,
+            )
+            removed_pages.append(page.id)
+            db.delete(page)
+            continue
+
+        drive_mod = meta.get("modifiedTime")
         if drive_mod == page.drive_modified_at and page.html_content:
             skipped += 1
             continue
@@ -844,6 +949,53 @@ async def sync_all_pages(
         page.last_synced_at = datetime.now(timezone.utc).isoformat()
         synced += 1
 
+    # Clean up orphaned sections whose Drive folders no longer exist
+    removed_sections: list[int] = []
+    sections = db.query(Section).filter(
+        Section.organization_id == org_id,
+        Section.drive_folder_id.isnot(None),
+    ).all()
+
+    for section in sections:
+        try:
+            folder_meta = service.files().get(
+                fileId=section.drive_folder_id,
+                fields="trashed",
+                supportsAllDrives=True,
+            ).execute()
+            if not folder_meta.get("trashed"):
+                continue
+        except Exception as e:
+            # Treat not-found as non-destructive here: could be permission/visibility
+            # differences for the acting member token.
+            continue
+
+        # Folder is gone or trashed — check if section still has any pages
+        remaining_pages = db.query(Page).filter(
+            Page.section_id == section.id,
+        ).count()
+        remaining_children = db.query(Section).filter(
+            Section.parent_id == section.id,
+        ).count()
+
+        if remaining_pages == 0 and remaining_children == 0:
+            logger.info(
+                "Section %d (%s) Drive folder gone and empty — removing",
+                section.id, section.drive_folder_id,
+            )
+            removed_sections.append(section.id)
+            db.delete(section)
+
     db.commit()
-    logger.info("Sync complete org=%d: %d synced, %d skipped, %d errors", org_id, synced, skipped, errors)
-    return {"ok": True, "synced": synced, "skipped": skipped, "errors": errors}
+    logger.info(
+        "Sync complete org=%d: %d synced, %d skipped, %d errors, %d pages removed, %d sections removed",
+        org_id, synced, skipped, errors, len(removed_pages), len(removed_sections),
+    )
+    return {
+        "ok": True,
+        "synced": synced,
+        "skipped": skipped,
+        "errors": errors,
+        "removed_pages": len(removed_pages),
+        "removed_sections": len(removed_sections),
+    }

@@ -541,13 +541,13 @@ async def update_section(
     return _section_dict(section)
 
 
-@router.delete("/{section_id}", status_code=204)
+@router.delete("/{section_id}")
 async def delete_section(
     section_id: int,
     x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> None:
+) -> dict:
     org_id = _require_admin(user, db, x_org_id)
     section = db.query(Section).filter(
         Section.id == section_id,
@@ -556,21 +556,90 @@ async def delete_section(
     if not section:
         raise HTTPException(status_code=404, detail="Section not found")
 
-    drive_folder_id = section.drive_folder_id
+    # Collect ALL section IDs in the subtree (self + descendants)
+    all_section_ids: list[int] = []
+    drive_folder_ids: list[str] = []
+    drive_doc_ids: list[str] = []
 
-    # Orphan pages rather than cascade-delete them
-    from app.models import Page as _Page
-    db.query(_Page).filter(_Page.section_id == section_id).update({"section_id": None})
+    def _collect_tree(sid: int) -> None:
+        all_section_ids.append(sid)
+        sec = db.get(Section, sid)
+        if sec and sec.drive_folder_id:
+            drive_folder_ids.append(sec.drive_folder_id)
+        # Collect pages' Drive doc IDs
+        pages = db.query(Page).filter(Page.section_id == sid).all()
+        for p in pages:
+            if p.google_doc_id:
+                drive_doc_ids.append(p.google_doc_id)
+        # Recurse into child sections
+        children = db.query(Section).filter(
+            Section.parent_id == sid,
+            Section.organization_id == org_id,
+        ).all()
+        for child in children:
+            _collect_tree(child.id)
+
+    _collect_tree(section_id)
+
+    # Delete all pages under the entire subtree
+    pages_deleted = 0
+    if all_section_ids:
+        pages_deleted = (
+            db.query(Page)
+            .filter(Page.section_id.in_(all_section_ids))
+            .delete(synchronize_session="fetch")
+        )
+
+    # Delete all sections in subtree (children first, then self via CASCADE)
     db.delete(section)
     db.commit()
 
-    # Trash Drive folder
-    if drive_folder_id:
+    # Trash Drive items — folder first (which also trashes contents), then
+    # individual docs that might live outside the folder structure
+    drive_trashed = 0
+    drive_errors: list[str] = []
+    items_to_trash = drive_folder_ids + drive_doc_ids
+
+    if items_to_trash:
         try:
             creds = await get_drive_credentials(user, org_id, db)
             from googleapiclient.discovery import build as _build
             svc = _build("drive", "v3", credentials=creds, cache_discovery=False)
-            _trash_drive_item(svc, drive_folder_id)
-            logger.info("Trashed Drive folder %s for section %d", drive_folder_id, section_id)
+
+            trashed_ids: set[str] = set()
+            # Trash folders first — this also trashes their contents in Drive
+            for folder_id in drive_folder_ids:
+                if folder_id in trashed_ids:
+                    continue
+                try:
+                    _trash_drive_item(svc, folder_id)
+                    trashed_ids.add(folder_id)
+                    drive_trashed += 1
+                    logger.info("Trashed Drive folder %s", folder_id)
+                except Exception as exc:
+                    drive_errors.append(f"folder {folder_id}: {exc}")
+                    logger.warning("Could not trash Drive folder %s: %s", folder_id, exc)
+
+            # Trash individual docs that may not be inside the trashed folders
+            for doc_id in drive_doc_ids:
+                if doc_id in trashed_ids:
+                    continue
+                try:
+                    _trash_drive_item(svc, doc_id)
+                    trashed_ids.add(doc_id)
+                    drive_trashed += 1
+                except Exception as exc:
+                    # Don't log individual doc errors as warnings — the folder trash
+                    # likely already handled these
+                    pass
         except Exception as exc:
-            logger.warning("Could not trash Drive folder %s: %s", drive_folder_id, exc)
+            drive_errors.append(f"credentials: {exc}")
+            logger.warning("Could not get Drive credentials for cleanup: %s", exc)
+
+    return {
+        "ok": True,
+        "pages_deleted": pages_deleted,
+        "sections_deleted": len(all_section_ids),
+        "drive_trashed": drive_trashed,
+        "drive_errors": drive_errors if drive_errors else None,
+    }

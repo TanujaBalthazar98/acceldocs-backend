@@ -144,6 +144,7 @@ def require_role(min_role: str):
         "editor": 1,
         "reviewer": 2,
         "admin": 3,
+        "owner": 4,
     }
 
     min_level = role_hierarchy.get(min_role, 0)
