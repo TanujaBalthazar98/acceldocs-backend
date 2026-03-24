@@ -89,3 +89,17 @@ def test_normalize_synced_html_keeps_clean_html_unchanged():
     raw_html = "<h1>Clean Title</h1><p>No leaked metadata here.</p>"
     normalized_html = normalize_synced_html(raw_html)
     assert normalized_html == raw_html
+
+
+def test_normalize_synced_html_rehydrates_single_published_marker():
+    raw_html = """
+    <p>published</p>
+    <p>• First item</p>
+    <p>• Second item</p>
+    """
+    normalized_html = normalize_synced_html(raw_html)
+    assert "published" not in normalized_html.lower()
+    # List items should be interpreted as list elements, not raw bullet glyph text.
+    assert "<li>" in normalized_html
+    assert "First item" in normalized_html
+    assert "Second item" in normalized_html

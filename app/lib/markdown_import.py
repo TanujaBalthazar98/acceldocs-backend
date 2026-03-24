@@ -44,6 +44,8 @@ _CALLOUT_KIND_MAP = {
     "success": "success",
 }
 
+_UNICODE_BULLET_RE = re.compile(r"^(\s*)[•●▪◦]\s+")
+
 
 def strip_import_frontmatter(text: str) -> str:
     """Strip frontmatter/meta blocks from imported markdown body content."""
@@ -116,6 +118,9 @@ def strip_import_frontmatter(text: str) -> str:
 
     # Remove any remaining ---published-like top markers
     while lines and re.match(r"^\s*---\s*[A-Za-z0-9_-]*\s*$", lines[0]):
+        lines.pop(0)
+    # Remove lone frontmatter status markers leaked as first body line
+    while lines and lines[0].strip().lower() in {"published", "draft"}:
         lines.pop(0)
     while lines and not lines[0].strip():
         lines.pop(0)
@@ -191,6 +196,8 @@ def normalize_import_callouts(text: str) -> str:
 def normalize_imported_markdown(text: str) -> str:
     """Apply all normalization steps for imported markdown content."""
     cleaned = strip_import_frontmatter(text or "")
+    # Normalize unicode bullets emitted by some HTML->Markdown conversions.
+    cleaned = "\n".join(_UNICODE_BULLET_RE.sub(r"\1- ", ln) for ln in cleaned.splitlines())
     cleaned = normalize_import_callouts(cleaned)
     return cleaned.strip() + ("\n" if cleaned.strip() else "")
 
@@ -211,8 +218,29 @@ _SYNC_LEAK_MARKERS = (
 def _should_rehydrate_synced_html(content_html: str) -> bool:
     if not content_html:
         return False
-    text = re.sub(r"<[^>]+>", "\n", content_html).lower()
-    marker_hits = sum(1 for marker in _SYNC_LEAK_MARKERS if marker in text)
+    text = re.sub(r"<[^>]+>", "\n", content_html)
+    lines = [ln.strip().lower() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return False
+
+    # Focus on top-of-document metadata leaks.
+    head = lines[:40]
+
+    # Common broken case: lone "published" marker at the top.
+    if any(ln in {"published", "---published"} for ln in head[:8]):
+        return True
+
+    # Detect multiple key:value metadata lines near the top.
+    kv_hits = 0
+    for ln in head:
+        if re.match(r"^[a-z_][a-z0-9_-]*\s*:\s*", ln):
+            key = ln.split(":", 1)[0].strip()
+            if key in _FM_KEYS:
+                kv_hits += 1
+    if kv_hits >= 2:
+        return True
+
+    marker_hits = sum(1 for marker in _SYNC_LEAK_MARKERS if marker in "\n".join(head))
     return marker_hits >= 3
 
 
