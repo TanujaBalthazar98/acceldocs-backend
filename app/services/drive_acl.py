@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 GOOGLE_TOKEN_REFRESH_URL = "https://oauth2.googleapis.com/token"
 
 RBAC_TO_DRIVE_ROLE = {
-    "owner": "writer",
+    "owner": "owner",
     "admin": "writer",
     "editor": "writer",
     "reviewer": "commenter",
@@ -226,6 +226,7 @@ async def sync_member_drive_permission(
             continue
 
         try:
+            is_ownership_transfer = target_role == "owner"
             permission_id, current_role = _find_user_permission(service, org.drive_folder_id, email)
             if permission_id:
                 if current_role == target_role:
@@ -235,34 +236,41 @@ async def sync_member_drive_permission(
                         "drive_role": current_role,
                         "actor_user_id": actor_token.user_id,
                     }
-                service.permissions().update(
-                    fileId=org.drive_folder_id,
-                    permissionId=permission_id,
-                    body={"role": target_role},
-                    fields="id,role",
-                    supportsAllDrives=True,
-                ).execute()
+                update_kwargs = {
+                    "fileId": org.drive_folder_id,
+                    "permissionId": permission_id,
+                    "body": {"role": target_role},
+                    "fields": "id,role",
+                    "supportsAllDrives": True,
+                }
+                if is_ownership_transfer:
+                    update_kwargs["transferOwnership"] = True
+                service.permissions().update(**update_kwargs).execute()
                 return {
                     "ok": True,
-                    "status": "updated",
+                    "status": "ownership_transferred" if is_ownership_transfer else "updated",
                     "drive_role": target_role,
                     "actor_user_id": actor_token.user_id,
                 }
 
-            service.permissions().create(
-                fileId=org.drive_folder_id,
-                body={
+            create_kwargs = {
+                "fileId": org.drive_folder_id,
+                "body": {
                     "type": "user",
                     "role": target_role,
                     "emailAddress": email,
                 },
-                sendNotificationEmail=False,
-                fields="id,role",
-                supportsAllDrives=True,
-            ).execute()
+                "fields": "id,role",
+                "supportsAllDrives": True,
+            }
+            if is_ownership_transfer:
+                create_kwargs["transferOwnership"] = True
+            else:
+                create_kwargs["sendNotificationEmail"] = False
+            service.permissions().create(**create_kwargs).execute()
             return {
                 "ok": True,
-                "status": "created",
+                "status": "ownership_transferred" if is_ownership_transfer else "created",
                 "drive_role": target_role,
                 "actor_user_id": actor_token.user_id,
             }
