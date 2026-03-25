@@ -87,3 +87,93 @@ def send_invitation_email(
     except Exception as exc:
         logger.error("Failed to send invitation email to %s: %s", to_email, exc)
         return False
+
+
+def send_ownership_transfer_email(
+    to_email: str,
+    previous_owner_name: str,
+    org_name: str,
+    drive_folder_url: str | None = None,
+    dashboard_url: str | None = None,
+) -> bool:
+    """Notify the new owner about the ownership transfer."""
+    resend = _get_resend()
+    if not resend:
+        logger.info("Email skipped (no Resend API key): ownership transfer for %s", to_email)
+        return False
+
+    subject = f"You are now the owner of {org_name} on AccelDocs"
+
+    drive_section = ""
+    if drive_folder_url:
+        drive_section = f"""
+        <div style="background: #f0fdfa; border: 1px solid #99f6e4; border-radius: 8px; padding: 16px; margin: 20px 0;">
+          <p style="font-size: 14px; color: #0f766e; margin: 0 0 12px; font-weight: 600;">
+            Google Drive Folder
+          </p>
+          <p style="font-size: 13px; color: #4b5563; margin: 0 0 12px;">
+            As the new owner, you now have full control over the workspace's Google Drive folder.
+          </p>
+          <a href="{drive_folder_url}"
+             style="display: inline-block; padding: 8px 20px; background: #ffffff;
+                    border: 1px solid #d1d5db; color: #1a1a1a; font-size: 13px;
+                    font-weight: 500; text-decoration: none; border-radius: 6px;">
+            Open Drive Folder
+          </a>
+        </div>
+        """
+
+    dashboard_section = ""
+    if dashboard_url:
+        dashboard_section = f"""
+        <div style="text-align: center; margin: 24px 0;">
+          <a href="{dashboard_url}"
+             style="display: inline-block; padding: 12px 32px; background: #2dd4bf;
+                    color: #ffffff; font-size: 15px; font-weight: 600;
+                    text-decoration: none; border-radius: 8px;">
+            Go to Dashboard
+          </a>
+        </div>
+        """
+
+    html = f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 560px; margin: 0 auto; padding: 40px 20px;">
+      <div style="text-align: center; margin-bottom: 32px;">
+        <h1 style="font-size: 24px; font-weight: 700; color: #1a1a1a; margin: 0;">AccelDocs</h1>
+      </div>
+
+      <div style="background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
+        <h2 style="font-size: 20px; font-weight: 600; color: #1a1a1a; margin: 0 0 16px;">
+          Ownership Transferred
+        </h2>
+        <p style="font-size: 15px; color: #4b5563; line-height: 1.6; margin: 0 0 8px;">
+          <strong>{previous_owner_name}</strong> has transferred ownership of
+          <strong>{org_name}</strong> to you.
+        </p>
+        <p style="font-size: 14px; color: #6b7280; line-height: 1.6; margin: 0 0 16px;">
+          You now have full control over the workspace, including member management,
+          settings, and billing.
+        </p>
+
+        {drive_section}
+        {dashboard_section}
+      </div>
+
+      <p style="font-size: 12px; color: #9ca3af; text-align: center; margin-top: 24px;">
+        You received this email because workspace ownership was transferred to you on AccelDocs.
+      </p>
+    </div>
+    """
+
+    try:
+        resend.Emails.send({
+            "from": settings.resend_from_email,
+            "to": [to_email],
+            "subject": subject,
+            "html": html,
+        })
+        logger.info("Ownership transfer email sent to %s", to_email)
+        return True
+    except Exception as exc:
+        logger.error("Failed to send ownership transfer email to %s: %s", to_email, exc)
+        return False

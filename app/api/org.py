@@ -23,7 +23,7 @@ from app.services.drive_acl import (
     sync_member_drive_file_permission,
     sync_member_drive_permission,
 )
-from app.services.email import send_invitation_email
+from app.services.email import send_invitation_email, send_ownership_transfer_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -598,11 +598,29 @@ def update_member_role(
             )
     except Exception as exc:
         logger.warning("Failed to sync Drive permission for member role update %s: %s", target.user_id, exc)
+
+    # Notify the new owner via email
+    email_sent = False
+    if previous_owner_role and target_user and target_user.email:
+        drive_folder_url = (
+            f"https://drive.google.com/drive/folders/{org.drive_folder_id}"
+            if org.drive_folder_id else None
+        )
+        dashboard_url = f"{settings.frontend_url}/dashboard"
+        email_sent = send_ownership_transfer_email(
+            to_email=target_user.email,
+            previous_owner_name=user.name or user.email,
+            org_name=org.name or "Workspace",
+            drive_folder_url=drive_folder_url,
+            dashboard_url=dashboard_url,
+        )
+
     return {
         "ok": True,
         "member_id": member_id,
         "role": new_role,
         "previous_owner_demoted": previous_owner_role is not None,
+        "email_sent": email_sent if previous_owner_role else None,
         "drive_sync": drive_sync,
         "docs_sync": docs_sync,
     }
