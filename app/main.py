@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.database import Base, engine
+from app.database import Base, SessionLocal, engine
 from app.services.encryption import init_encryption_service
 from app.middleware.security import (
     SecurityHeadersMiddleware,
@@ -64,6 +64,7 @@ async def lifespan(app: FastAPI):
         Base.metadata.create_all(bind=engine)
         _add_missing_columns()
 
+    _backfill_org_owner_ids()
     logger.info("AccelDocs backend ready on %s:%s", settings.host, settings.port)
     yield
 
@@ -110,6 +111,30 @@ def _add_missing_columns() -> None:
     except Exception as e:
         # Column might already be nullable, or table might not exist yet.
         logger.debug("approvals.document_id nullable migration (non-fatal): %s", e)
+
+
+def _backfill_org_owner_ids() -> None:
+    """Fix orgs where owner_id doesn't match the actual OrgRole owner."""
+    from app.models import OrgRole, Organization
+    try:
+        db = SessionLocal()
+        orgs = db.query(Organization).all()
+        for org in orgs:
+            owner_role = (
+                db.query(OrgRole)
+                .filter(OrgRole.organization_id == org.id, OrgRole.role == "owner")
+                .first()
+            )
+            if owner_role and org.owner_id != owner_role.user_id:
+                logger.info(
+                    "Fixing org %s owner_id: %s -> %s",
+                    org.id, org.owner_id, owner_role.user_id,
+                )
+                org.owner_id = owner_role.user_id
+        db.commit()
+        db.close()
+    except Exception as e:
+        logger.debug("_backfill_org_owner_ids (non-fatal): %s", e)
 
 
 app = FastAPI(
