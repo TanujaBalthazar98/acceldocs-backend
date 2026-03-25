@@ -537,6 +537,16 @@ def update_member_role(
     old_role = target.role
     target.role = new_role
 
+    # When transferring ownership, demote the current owner to admin
+    # and update org.owner_id to the new owner.
+    previous_owner_role = None
+    if new_role == "owner" and target.user_id != user.id:
+        # Demote the caller (current owner) to admin
+        caller_role.role = "admin"
+        previous_owner_role = caller_role
+        # Update the org-level owner reference
+        org.owner_id = target.user_id
+
     # Audit trail
     import json as _json
     db.add(AuditLog(
@@ -550,6 +560,7 @@ def update_member_role(
             "old_role": old_role,
             "new_role": new_role,
             "organization_id": org.id,
+            "ownership_transferred": new_role == "owner" and target.user_id != user.id,
         }),
     ))
     db.commit()
@@ -557,6 +568,7 @@ def update_member_role(
     drive_sync = None
     docs_sync = None
     try:
+        # Sync Drive permissions for the new owner
         drive_sync = _run_async(
             sync_member_drive_permission(
                 db=db,
@@ -573,12 +585,24 @@ def update_member_role(
             org_role=new_role,
             preferred_user_ids=[org.owner_id, user.id, target.user_id],
         )
+        # If ownership was transferred, also sync Drive for the demoted previous owner
+        if previous_owner_role:
+            _run_async(
+                sync_member_drive_permission(
+                    db=db,
+                    org=org,
+                    member_email=user.email,
+                    org_role="admin",
+                    preferred_user_ids=[org.owner_id, user.id],
+                )
+            )
     except Exception as exc:
         logger.warning("Failed to sync Drive permission for member role update %s: %s", target.user_id, exc)
     return {
         "ok": True,
         "member_id": member_id,
         "role": new_role,
+        "previous_owner_demoted": previous_owner_role is not None,
         "drive_sync": drive_sync,
         "docs_sync": docs_sync,
     }
