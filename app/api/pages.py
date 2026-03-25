@@ -34,6 +34,7 @@ router = APIRouter()
 
 # Backward-compatible binding so deploys do not crash if app/lib version lags.
 normalize_synced_html = getattr(_markdown_import, "normalize_synced_html", lambda html: html)
+clean_google_docs_html = getattr(_markdown_import, "clean_google_docs_html", lambda html: html)
 
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 
@@ -878,7 +879,7 @@ async def sync_page(
     creds = await _get_drive_credentials_compat(user, db, org_id, require_write=False)
     html, modified_at, drive_title = await _export_html(page.google_doc_id, creds)
 
-    page.html_content = normalize_synced_html(html)
+    page.html_content = normalize_synced_html(clean_google_docs_html(html))
     page.drive_modified_at = modified_at
     page.last_synced_at = datetime.now(timezone.utc).isoformat()
     # Update title from Drive if it hasn't been manually overridden

@@ -311,6 +311,86 @@ def _should_rehydrate_synced_html(content_html: str) -> bool:
     return marker_hits >= 3
 
 
+def clean_google_docs_html(content_html: str) -> str:
+    """Strip Google Docs bloat (inline styles, wrapper tags, custom CSS) from
+    exported HTML while preserving semantic structure.
+
+    This produces clean HTML that renders with the site's own stylesheet instead
+    of Google's forced Arial/inline-style soup.
+    """
+    if not content_html:
+        return content_html
+
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        # Fallback: regex-based cleanup if bs4 is not available
+        return _regex_clean_google_html(content_html)
+
+    soup = BeautifulSoup(content_html, "html.parser")
+
+    # Remove <style> and <meta> tags entirely
+    for tag in soup.find_all(["style", "meta", "link", "title"]):
+        tag.decompose()
+
+    # Strip all style attributes and Google-specific classes
+    for tag in soup.find_all(True):
+        if tag.get("style"):
+            del tag["style"]
+        # Remove class except for semantically meaningful ones (admonition, callout, etc.)
+        classes = tag.get("class", [])
+        if classes:
+            keep = [c for c in classes if c.startswith(("admonition", "callout", "highlight", "codehilite"))]
+            if keep:
+                tag["class"] = keep
+            else:
+                del tag["class"]
+
+    # Unwrap <html>, <head>, <body> wrappers — keep just body content
+    body = soup.find("body")
+    if body:
+        soup = body
+
+    # Remove empty spans that Google Docs inserts everywhere
+    for span in soup.find_all("span"):
+        # Span with no attributes is just a wrapper — unwrap it
+        if not span.attrs:
+            span.unwrap()
+
+    # Clean up empty paragraphs (Google inserts <p><span></span></p> as spacers)
+    for p in soup.find_all("p"):
+        if not p.get_text(strip=True):
+            p.decompose()
+
+    result = str(soup)
+    # Collapse excessive whitespace from decomposed elements
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
+
+
+_STYLE_TAG_CLEAN_RE = re.compile(r"<style[^>]*>[\s\S]*?</style>", re.I)
+_META_TAG_CLEAN_RE = re.compile(r"<meta[^>]*>", re.I)
+_LINK_TAG_CLEAN_RE = re.compile(r"<link[^>]*>", re.I)
+_TITLE_TAG_CLEAN_RE = re.compile(r"<title[^>]*>[\s\S]*?</title>", re.I)
+_STYLE_ATTR_CLEAN_RE = re.compile(r'\s+style="[^"]*"', re.I)
+_CLASS_ATTR_CLEAN_RE = re.compile(r'\s+class="(?!admonition|callout|highlight|codehilite)[^"]*"', re.I)
+_HTML_WRAPPER_RE = re.compile(r"</?(?:html|head|body)[^>]*>", re.I)
+
+
+def _regex_clean_google_html(content_html: str) -> str:
+    """Regex-only fallback for cleaning Google Docs HTML when bs4 is unavailable."""
+    html = content_html
+    html = _STYLE_TAG_CLEAN_RE.sub("", html)
+    html = _META_TAG_CLEAN_RE.sub("", html)
+    html = _LINK_TAG_CLEAN_RE.sub("", html)
+    html = _TITLE_TAG_CLEAN_RE.sub("", html)
+    html = _STYLE_ATTR_CLEAN_RE.sub("", html)
+    html = _CLASS_ATTR_CLEAN_RE.sub("", html)
+    html = _HTML_WRAPPER_RE.sub("", html)
+    html = re.sub(r"\n{3,}", "\n\n", html)
+    return html.strip()
+
+
 def normalize_synced_html(content_html: str) -> str:
     """Best-effort cleanup for legacy synced HTML with leaked markdown metadata."""
     if not _should_rehydrate_synced_html(content_html):

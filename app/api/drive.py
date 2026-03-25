@@ -37,6 +37,7 @@ router = APIRouter()
 # Backward-compatible binding so deploys do not crash if app/lib version lags.
 normalize_imported_markdown = _markdown_import.normalize_imported_markdown
 normalize_synced_html = getattr(_markdown_import, "normalize_synced_html", lambda html: html)
+clean_google_docs_html = getattr(_markdown_import, "clean_google_docs_html", lambda html: html)
 
 DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
@@ -350,7 +351,14 @@ async def _upload_local_as_google_doc(
     upload: UploadFile,
     parent_drive_folder_id: str,
     destination_name: str | None = None,
-) -> None:
+) -> tuple[str, str | None]:
+    """Upload a local file to Google Drive as a Google Doc.
+
+    Returns:
+        (doc_id, generated_html) — generated_html is the HTML we produced from
+        markdown files so the caller can store it directly, bypassing the lossy
+        Google Docs round-trip.  None for non-markdown uploads.
+    """
     filename = (destination_name or upload.filename or "Untitled").strip() or "Untitled"
     mime = _drive_import_mime_for_filename(filename)
     content = await upload.read()
@@ -363,14 +371,17 @@ async def _upload_local_as_google_doc(
         )
 
     # Convert markdown to HTML before uploading — Google Drive handles HTML
-    # conversion to Docs much better than raw markdown
+    # conversion to Docs much better than raw markdown.
+    # Keep the generated HTML so we can store it directly on the Page record.
+    generated_html: str | None = None
     if mime == "text/markdown":
         content = _markdown_to_html(content)
+        generated_html = content.decode("utf-8")
         mime = "text/html"
 
     title = _clean_name(PurePosixPath(filename).stem) or "Untitled"
     media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime, resumable=False)
-    service.files().create(
+    result = service.files().create(
         body={
             "name": title,
             "mimeType": GOOGLE_DOC_MIME,
@@ -380,6 +391,7 @@ async def _upload_local_as_google_doc(
         fields="id,name,mimeType",
         supportsAllDrives=True,
     ).execute()
+    return result["id"], generated_html
 
 def _trash_drive_item(service, file_id: str) -> None:
     """Move a Drive file/folder to trash."""
@@ -807,6 +819,10 @@ async def import_local(
 
     folder_cache: dict[str, str] = {"": target_drive_folder_id}
     uploaded = 0
+    # Map Drive doc ID → HTML we generated locally (markdown files only).
+    # Used to backfill html_content on Page records after scan, bypassing
+    # the lossy Google Docs HTML round-trip.
+    import_html_map: dict[str, str] = {}
 
     for idx, upload in enumerate(files):
         raw_relative = (
@@ -832,12 +848,14 @@ async def import_local(
             parent_drive = created_folder
 
         try:
-            await _upload_local_as_google_doc(
+            doc_id, generated_html = await _upload_local_as_google_doc(
                 service=service,
                 upload=upload,
                 parent_drive_folder_id=parent_drive,
                 destination_name=file_name,
             )
+            if generated_html:
+                import_html_map[doc_id] = generated_html
             uploaded += 1
         except HTTPException:
             raise
@@ -856,6 +874,20 @@ async def import_local(
         user_id=user.id,
         db=db,
     )
+
+    # Backfill html_content on Pages created from markdown imports.
+    # This preserves the original markdown structure instead of relying on
+    # Google Docs' lossy HTML re-export during sync.
+    if import_html_map:
+        for doc_id, html in import_html_map.items():
+            page = db.query(Page).filter(
+                Page.organization_id == org_id,
+                Page.google_doc_id == doc_id,
+            ).first()
+            if page and not page.html_content:
+                page.html_content = html
+                page.last_synced_at = datetime.now(timezone.utc).isoformat()
+        db.commit()
 
     logger.info(
         "Local import complete org=%d target=%d mode=%s: %d files uploaded",
@@ -947,7 +979,8 @@ async def sync_all_pages(
             # Self-heal cached HTML after parser/normalizer improvements.
             # Without this, unchanged Drive files stay stuck with legacy
             # leaked frontmatter/callout formatting forever.
-            rehydrated_cached = normalize_synced_html(page.html_content)
+            cleaned_cached = clean_google_docs_html(page.html_content)
+            rehydrated_cached = normalize_synced_html(cleaned_cached)
             if rehydrated_cached != page.html_content:
                 if page.is_published and rehydrated_cached != page.published_html:
                     page.status = "draft"
@@ -968,7 +1001,10 @@ async def sync_all_pages(
             errors += 1
             continue
 
-        normalized_html = normalize_synced_html(html)
+        # Strip Google Docs inline styles / wrapper tags, then apply
+        # frontmatter/callout normalization.
+        cleaned_html = clean_google_docs_html(html)
+        normalized_html = normalize_synced_html(cleaned_html)
 
         if page.is_published and normalized_html != page.published_html:
             page.status = "draft"
