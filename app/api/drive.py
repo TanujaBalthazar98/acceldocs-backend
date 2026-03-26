@@ -483,6 +483,8 @@ def _scan_folder(
             ).first()
 
             if existing_section:
+                existing_section.parent_id = parent_section_id
+                existing_section.name = _clean_name(name)
                 existing_section.display_order = i
                 existing_section.is_published = True
                 section = existing_section
@@ -520,8 +522,7 @@ def _scan_folder(
                     existing_page.drive_modified_at = modified
                     counts["updated"] += 1
                 existing_page.display_order = page_order
-                if parent_section_id is not None:
-                    existing_page.section_id = parent_section_id
+                existing_page.section_id = parent_section_id
             else:
                 slug = _unique_page_slug(title, org_id, db)
                 page = Page(
@@ -695,37 +696,13 @@ async def scan_folder(
 
     scan_parent_section_id = body.parent_section_id
     if target_section is not None:
-        if body.folder_id == target_section.drive_folder_id:
-            scan_parent_section_id = target_section.id
-        else:
-            folder_name = _clean_name(folder_meta.get("name", "Imported section"))
-            imported_root_section = db.query(Section).filter(
-                Section.organization_id == org_id,
-                Section.drive_folder_id == body.folder_id,
-            ).first()
-            if imported_root_section:
-                imported_root_section.parent_id = target_section.id
-                imported_root_section.name = folder_name
-                imported_root_section.display_order = 0
-                imported_root_section.is_published = True
-            else:
-                imported_root_section = Section(
-                    organization_id=org_id,
-                    parent_id=target_section.id,
-                    name=folder_name,
-                    slug=_unique_section_slug(folder_name, org_id, target_section.id, db),
-                    section_type="section",
-                    drive_folder_id=body.folder_id,
-                    display_order=0,
-                    is_published=True,
-                )
-                db.add(imported_root_section)
-                db.flush()
-            db.commit()
-            scan_parent_section_id = imported_root_section.id
+        # Targeted import maps imported folder contents directly under the target
+        # destination to prevent synthetic wrapper sections (for example random
+        # "Docs" nodes) and keep hierarchy predictable.
+        scan_parent_section_id = target_section.id
 
     # Root onboarding scans treat the selected folder as an invisible workspace container.
-    # Targeted scans first map the selected folder as a child section under the target.
+    # Targeted scans map the selected folder contents directly under the target.
     counts = _scan_folder(
         service=service,
         folder_id=body.folder_id,
