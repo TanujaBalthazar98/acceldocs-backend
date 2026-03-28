@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, File, Form, Header, UploadFile
+from google.auth.exceptions import TransportError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -1040,9 +1041,18 @@ async def scan_folder(
             fields="id,name,mimeType,parents",
             supportsAllDrives=True,
         ).execute()
-    except Exception as e:
-        logger.error("Could not access Drive folder: %s", e)
-        raise HTTPException(status_code=400, detail="Could not access the specified folder. Please check the folder ID and your permissions.")
+    except HttpError as e:
+        status = e.resp.status
+        if status == 404:
+            raise HTTPException(status_code=404, detail="drive_file_not_found")
+        elif status == 403:
+            raise HTTPException(status_code=403, detail="drive_permission_denied")
+        elif status == 429:
+            raise HTTPException(status_code=429, detail="drive_quota_exceeded")
+        else:
+            raise HTTPException(status_code=502, detail=f"drive_api_error:{status}")
+    except TransportError:
+        raise HTTPException(status_code=503, detail="drive_network_error")
 
     if folder_meta.get("mimeType") != DRIVE_FOLDER_MIME:
         raise HTTPException(status_code=400, detail="Provided ID is not a Drive folder")
