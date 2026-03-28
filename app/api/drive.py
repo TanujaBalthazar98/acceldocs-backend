@@ -6,6 +6,7 @@ POST /api/drive/sync   — re-sync all pages for the current org from Drive
 GET  /api/drive/status — check Drive connection for current user
 """
 
+import asyncio
 import logging
 import json
 import io
@@ -18,6 +19,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, File, Form, Header, UploadFile
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -44,6 +46,10 @@ GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 GOOGLE_TOKEN_REFRESH_URL = "https://oauth2.googleapis.com/token"
 MAX_FOLDER_DEPTH = 5
 MAX_LOCAL_FILE_BYTES = 20 * 1024 * 1024
+LOCAL_IMPORT_UPLOAD_MAX_ATTEMPTS = 3
+LOCAL_IMPORT_UPLOAD_BACKOFF_SECONDS = 1.0
+SETTINGS_MANIFEST_BASENAME = "settings.json"
+VALID_IMPORT_SECTION_TYPES = {"section", "tab", "version", "product"}
 ALLOWED_LOCAL_EXTENSIONS: dict[str, str] = {
     ".md": "text/markdown",
     ".txt": "text/plain",
@@ -198,7 +204,13 @@ def _clean_name(raw: str) -> str:
     return _NUM_PREFIX.sub("", raw).strip() or raw
 
 
-def _unique_section_slug(name: str, org_id: int, parent_id: int | None, db: Session) -> str:
+def _unique_section_slug(
+    name: str,
+    org_id: int,
+    parent_id: int | None,
+    db: Session,
+    exclude_id: int | None = None,
+) -> str:
     base = slugify(_clean_name(name))
     slug, n = base, 1
     while True:
@@ -207,6 +219,8 @@ def _unique_section_slug(name: str, org_id: int, parent_id: int | None, db: Sess
             Section.parent_id == parent_id,
             Section.slug == slug,
         )
+        if exclude_id is not None:
+            q = q.filter(Section.id != exclude_id)
         if not q.first():
             return slug
         slug, n = f"{base}-{n}", n + 1
@@ -288,6 +302,73 @@ def _ensure_section_drive_folder(
     return folder_id
 
 
+def _upsert_target_import_root_section(
+    *,
+    org_id: int,
+    target_section: Section,
+    folder_id: str,
+    folder_name: str,
+    db: Session,
+) -> Section:
+    """Ensure targeted imports preserve the selected Drive folder as a section node.
+
+    For imports into a destination section, we keep the selected folder as a real
+    child in the section tree so hierarchy is preserved without requiring a
+    settings.json manifest.
+    """
+    clean_name = _clean_name(folder_name) or "Imported"
+    target_name = (target_section.name or "").strip().lower()
+
+    # Importing the same folder already bound to target section -> no wrapper.
+    if target_section.drive_folder_id and target_section.drive_folder_id == folder_id:
+        return target_section
+    # If names are identical, avoid a duplicate "FAQ > FAQ" wrapper.
+    if target_name and target_name == clean_name.strip().lower():
+        return target_section
+
+    existing = db.query(Section).filter(
+        Section.organization_id == org_id,
+        Section.drive_folder_id == folder_id,
+    ).first()
+
+    if existing:
+        parent_changed = existing.parent_id != target_section.id
+        name_changed = existing.name != clean_name
+        if parent_changed:
+            existing.parent_id = target_section.id
+        if name_changed:
+            existing.name = clean_name
+        if parent_changed or name_changed:
+            existing.slug = _unique_section_slug(
+                clean_name,
+                org_id,
+                target_section.id,
+                db,
+                exclude_id=existing.id,
+            )
+        existing.display_order = 0
+        existing.is_published = True
+        if target_section.visibility:
+            existing.visibility = target_section.visibility
+        db.flush()
+        return existing
+
+    created = Section(
+        organization_id=org_id,
+        parent_id=target_section.id,
+        name=clean_name,
+        slug=_unique_section_slug(clean_name, org_id, target_section.id, db),
+        section_type="section",
+        visibility=target_section.visibility or "public",
+        drive_folder_id=folder_id,
+        display_order=0,
+        is_published=True,
+    )
+    db.add(created)
+    db.flush()
+    return created
+
+
 def _normalize_relative_path(path: str) -> str:
     candidate = (path or "").replace("\\", "/").strip().strip("/")
     if not candidate:
@@ -299,6 +380,236 @@ def _normalize_relative_path(path: str) -> str:
     if normalized.startswith("../") or "/../" in normalized:
         raise HTTPException(status_code=400, detail=f"Invalid folder path '{path}'")
     return normalized
+
+
+def _is_settings_manifest_path(path: str) -> bool:
+    return PurePosixPath(path).name.lower() == SETTINGS_MANIFEST_BASENAME
+
+
+def _detect_folder_root_prefix(paths: list[str]) -> str | None:
+    """Return shared first folder segment when importing a single folder tree."""
+    prefix: str | None = None
+    for path in paths:
+        parts = path.split("/")
+        if len(parts) < 2:
+            return None
+        first = parts[0].strip()
+        if not first:
+            return None
+        if prefix is None:
+            prefix = first
+        elif prefix != first:
+            return None
+    return prefix
+
+
+def _parse_settings_manifest(content: bytes) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Parse optional settings.json and return folder-path rules.
+
+    Supported shapes:
+    - {"nodes" | "structure" | "folders": [{name|path, type, children: [...] }]}
+    - {"section_types": {"A/B": "tab"}}
+    - {"tabs": ["Release Notes", ...]}
+    """
+    warnings: list[str] = []
+    rules: dict[str, dict[str, Any]] = {}
+
+    try:
+        payload = json.loads(content.decode("utf-8", errors="replace"))
+    except Exception as exc:  # noqa: BLE001
+        return {}, [f"Could not parse settings.json: {exc}"]
+
+    if not isinstance(payload, dict):
+        return {}, ["settings.json must contain a JSON object"]
+
+    def register_rule(
+        raw_path: Any,
+        raw_type: Any,
+        *,
+        order: int,
+        explicit_parent: str | None,
+    ) -> str | None:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            warnings.append("Ignored settings rule with missing path/name")
+            return None
+
+        candidate = raw_path.strip().replace("\\", "/").strip("/")
+        if explicit_parent and "/" not in candidate:
+            candidate = f"{explicit_parent}/{candidate}"
+
+        try:
+            normalized = _normalize_relative_path(candidate)
+        except HTTPException:
+            warnings.append(f"Ignored invalid settings path '{raw_path}'")
+            return None
+
+        section_type = str(raw_type or "section").strip().lower()
+        if section_type not in VALID_IMPORT_SECTION_TYPES:
+            warnings.append(
+                f"Ignored unsupported type '{section_type}' for '{normalized}'. "
+                "Allowed: section, tab, version, product"
+            )
+            section_type = "section"
+
+        parent_path = explicit_parent
+        if parent_path is None and "/" in normalized:
+            parent_path = normalized.rsplit("/", 1)[0]
+
+        rules[normalized] = {
+            "section_type": section_type,
+            "order": order,
+            "parent_path": parent_path,
+        }
+        return normalized
+
+    def walk_nodes(nodes: Any, parent_path: str | None = None) -> None:
+        if nodes is None:
+            return
+        if not isinstance(nodes, list):
+            warnings.append("settings nodes/structure/folders must be a list")
+            return
+
+        for idx, node in enumerate(nodes):
+            if not isinstance(node, dict):
+                warnings.append("Ignored non-object node in settings hierarchy")
+                continue
+            normalized_path = register_rule(
+                node.get("path", node.get("name")),
+                node.get("type", node.get("section_type")),
+                order=idx,
+                explicit_parent=parent_path,
+            )
+            child_nodes = node.get("children", node.get("sections", node.get("items")))
+            if child_nodes is not None:
+                walk_nodes(child_nodes, normalized_path or parent_path)
+
+    found_hierarchy = False
+    for key in ("nodes", "structure", "folders"):
+        if key in payload:
+            found_hierarchy = True
+            walk_nodes(payload.get(key))
+
+    section_types = payload.get("section_types")
+    if isinstance(section_types, dict):
+        for idx, (path, section_type) in enumerate(section_types.items()):
+            register_rule(path, section_type, order=idx, explicit_parent=None)
+    elif section_types is not None:
+        warnings.append("settings.section_types must be an object")
+
+    tabs = payload.get("tabs")
+    if isinstance(tabs, list):
+        for idx, path in enumerate(tabs):
+            register_rule(path, "tab", order=idx, explicit_parent=None)
+    elif tabs is not None:
+        warnings.append("settings.tabs must be an array")
+
+    if not found_hierarchy and not isinstance(section_types, dict) and not isinstance(tabs, list):
+        warnings.append("No hierarchy rules found in settings.json; using folder structure fallback")
+
+    return rules, warnings
+
+
+def _resolve_manifest_path(
+    path: str,
+    folder_cache: dict[str, str],
+    root_prefix: str | None,
+) -> str | None:
+    candidates: list[str] = []
+    normalized = path.strip().strip("/")
+    if normalized:
+        candidates.append(normalized)
+    if root_prefix:
+        prefixed = f"{root_prefix}/{normalized}" if normalized else root_prefix
+        if prefixed not in candidates:
+            candidates.append(prefixed)
+        prefix_marker = f"{root_prefix}/"
+        if normalized.startswith(prefix_marker):
+            stripped = normalized[len(prefix_marker):]
+            if stripped and stripped not in candidates:
+                candidates.append(stripped)
+
+    for candidate in candidates:
+        if candidate in folder_cache:
+            return candidate
+    return None
+
+
+def _apply_settings_manifest(
+    *,
+    db: Session,
+    org_id: int,
+    target_section: Section,
+    folder_cache: dict[str, str],
+    root_prefix: str | None,
+    manifest_rules: dict[str, dict[str, Any]],
+) -> tuple[int, list[str]]:
+    """Apply section_type/order overrides from settings.json to imported sections."""
+    warnings: list[str] = []
+    applied = 0
+    path_sections: dict[str, Section] = {}
+    sibling_groups: dict[str | None, list[tuple[int, str]]] = {}
+
+    for path, rule in manifest_rules.items():
+        resolved_path = _resolve_manifest_path(path, folder_cache, root_prefix)
+        if not resolved_path:
+            warnings.append(f"settings path '{path}' not found in imported folders")
+            continue
+
+        drive_folder_id = folder_cache.get(resolved_path)
+        if not drive_folder_id:
+            warnings.append(f"settings path '{path}' could not resolve a Drive folder")
+            continue
+
+        section = db.query(Section).filter(
+            Section.organization_id == org_id,
+            Section.drive_folder_id == drive_folder_id,
+        ).first()
+        if not section:
+            warnings.append(f"settings path '{path}' did not map to a section")
+            continue
+
+        desired_type = str(rule.get("section_type") or "section")
+        if desired_type == "product" and section.parent_id is not None:
+            warnings.append(f"Ignored product type for nested path '{path}'")
+        elif section.section_type != desired_type:
+            section.section_type = desired_type
+            applied += 1
+
+        parent_path = rule.get("parent_path")
+        order = int(rule.get("order") or 0)
+        sibling_groups.setdefault(parent_path, []).append((order, path))
+        path_sections[path] = section
+
+    for parent_path, ordered_paths in sibling_groups.items():
+        ordered_paths.sort(key=lambda item: item[0])
+        parent_section: Section | None = None
+        if parent_path:
+            parent_section = path_sections.get(parent_path)
+            if not parent_section:
+                resolved_parent = _resolve_manifest_path(parent_path, folder_cache, root_prefix)
+                if resolved_parent:
+                    parent_drive_id = folder_cache.get(resolved_parent)
+                    if parent_drive_id:
+                        parent_section = db.query(Section).filter(
+                            Section.organization_id == org_id,
+                            Section.drive_folder_id == parent_drive_id,
+                        ).first()
+        for idx, (_, child_path) in enumerate(ordered_paths):
+            section = path_sections.get(child_path)
+            if not section:
+                continue
+
+            expected_parent_id = parent_section.id if parent_section else section.parent_id
+            if expected_parent_id is None and section.parent_id is None:
+                expected_parent_id = target_section.id
+            if expected_parent_id is not None and section.parent_id != expected_parent_id:
+                section.parent_id = expected_parent_id
+                applied += 1
+            if section.display_order != idx:
+                section.display_order = idx
+                applied += 1
+
+    return applied, warnings
 
 
 def _drive_import_mime_for_filename(filename: str) -> str:
@@ -345,6 +656,33 @@ def _markdown_to_html(md_bytes: bytes) -> bytes:
     return full_html.encode("utf-8")
 
 
+def _is_transient_drive_upload_error(exc: Exception) -> bool:
+    """Best-effort check for transient Drive API upload failures."""
+    if isinstance(exc, HttpError):
+        status = int(getattr(exc.resp, "status", 0) or 0)
+        if status in (429, 500, 502, 503, 504):
+            return True
+        # Drive can return 403 for quota/rate throttling.
+        if status == 403:
+            raw = (getattr(exc, "content", b"") or b"").decode("utf-8", errors="ignore").lower()
+            if "ratelimitexceeded" in raw or "userratelimitexceeded" in raw:
+                return True
+        return False
+
+    lowered = str(exc).lower()
+    transient_markers = (
+        "internal error",
+        "internalerror",
+        "backenderror",
+        "rate limit",
+        "timeout",
+        "temporar",
+        "connection reset",
+        "service unavailable",
+    )
+    return any(marker in lowered for marker in transient_markers)
+
+
 async def _upload_local_as_google_doc(
     *,
     service,
@@ -380,18 +718,35 @@ async def _upload_local_as_google_doc(
         mime = "text/html"
 
     title = _clean_name(PurePosixPath(filename).stem) or "Untitled"
-    media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime, resumable=False)
-    result = service.files().create(
-        body={
-            "name": title,
-            "mimeType": GOOGLE_DOC_MIME,
-            "parents": [parent_drive_folder_id],
-        },
-        media_body=media,
-        fields="id,name,mimeType",
-        supportsAllDrives=True,
-    ).execute()
-    return result["id"], generated_html
+    for attempt in range(1, LOCAL_IMPORT_UPLOAD_MAX_ATTEMPTS + 1):
+        try:
+            media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime, resumable=False)
+            result = service.files().create(
+                body={
+                    "name": title,
+                    "mimeType": GOOGLE_DOC_MIME,
+                    "parents": [parent_drive_folder_id],
+                },
+                media_body=media,
+                fields="id,name,mimeType",
+                supportsAllDrives=True,
+            ).execute()
+            return result["id"], generated_html
+        except Exception as exc:
+            is_retryable = _is_transient_drive_upload_error(exc)
+            if attempt < LOCAL_IMPORT_UPLOAD_MAX_ATTEMPTS and is_retryable:
+                backoff = LOCAL_IMPORT_UPLOAD_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    "Transient Drive upload failure for '%s' (attempt %d/%d): %s; retrying in %.1fs",
+                    filename,
+                    attempt,
+                    LOCAL_IMPORT_UPLOAD_MAX_ATTEMPTS,
+                    exc,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                continue
+            raise
 
 def _trash_drive_item(service, file_id: str) -> None:
     """Move a Drive file/folder to trash."""
@@ -457,6 +812,7 @@ def _scan_folder(
     user_id: int,
     db: Session,
     depth: int = 0,
+    inherited_visibility: str | None = None,
 ) -> dict[str, int]:
     """Recursively scan a Drive folder, creating Sections and Pages.
 
@@ -482,11 +838,15 @@ def _scan_folder(
                 Section.drive_folder_id == item_id,
             ).first()
 
+            section_visibility = inherited_visibility or "public"
+
             if existing_section:
                 existing_section.parent_id = parent_section_id
                 existing_section.name = _clean_name(name)
                 existing_section.display_order = i
                 existing_section.is_published = True
+                if inherited_visibility:
+                    existing_section.visibility = section_visibility
                 section = existing_section
             else:
                 slug = _unique_section_slug(name, org_id, parent_section_id, db)
@@ -496,6 +856,7 @@ def _scan_folder(
                     name=_clean_name(name),
                     slug=slug,
                     section_type="section",
+                    visibility=section_visibility,
                     drive_folder_id=item_id,
                     display_order=i,
                     is_published=True,
@@ -504,7 +865,16 @@ def _scan_folder(
                 db.flush()
                 counts["sections"] += 1
 
-            sub = _scan_folder(service, item_id, section.id, org_id, user_id, db, depth + 1)
+            sub = _scan_folder(
+                service,
+                item_id,
+                section.id,
+                org_id,
+                user_id,
+                db,
+                depth + 1,
+                inherited_visibility=section.visibility or section_visibility,
+            )
             counts["sections"] += sub["sections"]
             counts["pages"] += sub["pages"]
             counts["updated"] += sub["updated"]
@@ -695,14 +1065,27 @@ async def scan_folder(
             )
 
     scan_parent_section_id = body.parent_section_id
+    inherited_visibility = (
+        getattr(org, "default_visibility", None)
+        or getattr(org, "visibility", None)
+        if org
+        else None
+    )
     if target_section is not None:
-        # Targeted import maps imported folder contents directly under the target
-        # destination to prevent synthetic wrapper sections (for example random
-        # "Docs" nodes) and keep hierarchy predictable.
-        scan_parent_section_id = target_section.id
+        # Preserve selected folder hierarchy by materializing the imported root as
+        # a concrete child section when appropriate.
+        import_root = _upsert_target_import_root_section(
+            org_id=org_id,
+            target_section=target_section,
+            folder_id=body.folder_id,
+            folder_name=folder_meta.get("name") or "Imported",
+            db=db,
+        )
+        scan_parent_section_id = import_root.id
+        inherited_visibility = import_root.visibility or target_section.visibility
 
     # Root onboarding scans treat the selected folder as an invisible workspace container.
-    # Targeted scans map the selected folder contents directly under the target.
+    # Targeted scans preserve folder hierarchy under the target section.
     counts = _scan_folder(
         service=service,
         folder_id=body.folder_id,
@@ -710,6 +1093,7 @@ async def scan_folder(
         org_id=org_id,
         user_id=user.id,
         db=db,
+        inherited_visibility=inherited_visibility,
     )
 
     logger.info(
@@ -796,11 +1180,19 @@ async def import_local(
 
     folder_cache: dict[str, str] = {"": target_drive_folder_id}
     uploaded = 0
+    skipped_unsupported_paths: list[str] = []
+    failed_upload_paths: list[str] = []
+    failed_upload_errors: list[str] = []
+    settings_manifest_file: str | None = None
+    settings_manifest_rules: dict[str, dict[str, Any]] = {}
+    settings_manifest_warnings: list[str] = []
+    folder_paths_for_root_detection: list[str] = []
     # Map Drive doc ID → HTML we generated locally (markdown files only).
     # Used to backfill html_content on Page records after scan, bypassing
     # the lossy Google Docs HTML round-trip.
     import_html_map: dict[str, str] = {}
 
+    normalized_inputs: list[tuple[UploadFile, str, bool]] = []
     for idx, upload in enumerate(files):
         raw_relative = (
             relative_paths[idx]
@@ -808,9 +1200,39 @@ async def import_local(
             else (upload.filename or "")
         )
         normalized_relative = _normalize_relative_path(raw_relative)
+        is_settings_manifest = mode == "folder" and _is_settings_manifest_path(normalized_relative)
+        normalized_inputs.append((upload, normalized_relative, is_settings_manifest))
+
+        if not is_settings_manifest:
+            folder_paths_for_root_detection.append(normalized_relative)
+            continue
+
+        if settings_manifest_file is not None:
+            settings_manifest_warnings.append(
+                f"Ignored additional {SETTINGS_MANIFEST_BASENAME}: {normalized_relative}"
+            )
+            continue
+
+        settings_manifest_file = normalized_relative
+        manifest_content = await upload.read()
+        rules, warnings = _parse_settings_manifest(manifest_content)
+        settings_manifest_rules = rules
+        settings_manifest_warnings.extend(warnings)
+
+    for upload, normalized_relative, is_settings_manifest in normalized_inputs:
+        if is_settings_manifest:
+            continue
+
         relative_parts = normalized_relative.split("/")
         file_name = relative_parts[-1]
         folder_parts = relative_parts[:-1] if mode == "folder" else []
+
+        ext = PurePosixPath(file_name).suffix.lower()
+        if ext not in ALLOWED_LOCAL_EXTENSIONS:
+            # Local imports often include helper files (e.g. settings.json).
+            # Skip unsupported files instead of failing the full import.
+            skipped_unsupported_paths.append(normalized_relative)
+            continue
 
         parent_path = ""
         parent_drive = target_drive_folder_id
@@ -838,10 +1260,31 @@ async def import_local(
             raise
         except Exception as exc:
             logger.exception("Failed to upload file '%s' to Drive", file_name)
+            failed_upload_paths.append(normalized_relative)
+            failed_upload_errors.append(f"{file_name}: {str(exc)[:240]}")
+            continue
+
+    if uploaded == 0:
+        if failed_upload_paths:
+            sample = failed_upload_errors[0] if failed_upload_errors else "Unknown error"
             raise HTTPException(
-                status_code=500,
-                detail=f"Failed to upload '{file_name}' to Google Drive: {exc}",
+                status_code=502,
+                detail=(
+                    f"Failed to upload {len(failed_upload_paths)} file(s) to Google Drive. "
+                    f"Sample error: {sample}"
+                ),
             )
+        if skipped_unsupported_paths:
+            allowed = ", ".join(sorted(ALLOWED_LOCAL_EXTENSIONS.keys()))
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No supported files found in selected input. "
+                    f"Skipped {len(skipped_unsupported_paths)} unsupported file(s). "
+                    f"Allowed: {allowed}"
+                ),
+            )
+        raise HTTPException(status_code=400, detail="No files uploaded")
 
     counts = _scan_folder(
         service=service,
@@ -864,7 +1307,22 @@ async def import_local(
             if page and not page.html_content:
                 page.html_content = html
                 page.last_synced_at = datetime.now(timezone.utc).isoformat()
-        db.commit()
+
+    manifest_applied_count = 0
+    if mode == "folder" and settings_manifest_rules:
+        root_prefix = _detect_folder_root_prefix(folder_paths_for_root_detection)
+        applied, warnings = _apply_settings_manifest(
+            db=db,
+            org_id=org_id,
+            target_section=target_section,
+            folder_cache=folder_cache,
+            root_prefix=root_prefix,
+            manifest_rules=settings_manifest_rules,
+        )
+        manifest_applied_count = applied
+        settings_manifest_warnings.extend(warnings)
+
+    db.commit()
 
     logger.info(
         "Local import complete org=%d target=%d mode=%s: %d files uploaded",
@@ -879,6 +1337,15 @@ async def import_local(
         "target_type": effective_target_type,
         "mode": mode,
         "uploaded_files": uploaded,
+        "skipped_files": len(skipped_unsupported_paths),
+        "skipped_file_paths": skipped_unsupported_paths[:50],
+        "failed_files": len(failed_upload_paths),
+        "failed_file_paths": failed_upload_paths[:50],
+        "failed_file_errors": failed_upload_errors[:10],
+        "settings_manifest_file": settings_manifest_file,
+        "settings_manifest_rules": len(settings_manifest_rules),
+        "settings_manifest_applied": manifest_applied_count,
+        "settings_manifest_warnings": settings_manifest_warnings[:20],
         "sections_created": counts["sections"],
         "pages_created": counts["pages"],
         "pages_updated": counts["updated"],
