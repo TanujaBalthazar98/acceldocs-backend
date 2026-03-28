@@ -514,6 +514,7 @@ class Page(Base):
         UniqueConstraint("organization_id", "google_doc_id", name="uq_page_google_doc_per_org"),
         UniqueConstraint("organization_id", "slug", name="uq_page_slug_per_org"),
         Index("ix_pages_org_visibility_override", "organization_id", "visibility_override"),
+        Index("ix_pages_org_section", "organization_id", "section_id"),
     )
 
 
