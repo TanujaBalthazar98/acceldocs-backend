@@ -28,7 +28,7 @@ from app.auth.routes import get_current_user
 from app.config import settings
 from app.database import get_db
 from app.lib import markdown_import as _markdown_import
-from app.lib.slugify import to_slug as slugify
+from app.lib.slugify import to_slug as slugify, unique_slug as _make_unique
 from app.models import GoogleToken, OrgRole, Organization, Page, Section, User
 from app.services.encryption import get_encryption_service
 from app.services.drive import google_drive_handler
@@ -212,30 +212,30 @@ def _unique_section_slug(
     exclude_id: int | None = None,
 ) -> str:
     base = slugify(_clean_name(name))
-    slug, n = base, 1
-    while True:
+
+    def exists(s: str) -> bool:
         q = db.query(Section).filter(
             Section.organization_id == org_id,
             Section.parent_id == parent_id,
-            Section.slug == slug,
+            Section.slug == s,
         )
         if exclude_id is not None:
             q = q.filter(Section.id != exclude_id)
-        if not q.first():
-            return slug
-        slug, n = f"{base}-{n}", n + 1
+        return q.first() is not None
+
+    return _make_unique(base, exists)
 
 
 def _unique_page_slug(title: str, org_id: int, db: Session, exclude_id: int | None = None) -> str:
     base = slugify(_clean_name(title))
-    slug, n = base, 1
-    while True:
-        q = db.query(Page).filter(Page.organization_id == org_id, Page.slug == slug)
+
+    def exists(s: str) -> bool:
+        q = db.query(Page).filter(Page.organization_id == org_id, Page.slug == s)
         if exclude_id:
             q = q.filter(Page.id != exclude_id)
-        if not q.first():
-            return slug
-        slug, n = f"{base}-{n}", n + 1
+        return q.first() is not None
+
+    return _make_unique(base, exists)
 
 
 def _infer_target_type(section: Section) -> Literal["product", "version", "tab", "section"]:

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.drive import _create_drive_folder, _trash_drive_item, _move_drive_item, get_drive_credentials
 from app.auth.routes import get_current_user
 from app.database import get_db
-from app.lib.slugify import to_slug as slugify
+from app.lib.slugify import to_slug as slugify, unique_slug as _make_unique
 from app.models import Organization, OrgRole, Page, Section, User
 
 logger = logging.getLogger(__name__)
@@ -95,35 +95,26 @@ def _require_admin(user: User, db: Session, requested_org_id: int | None = None)
 
 def _unique_slug(name: str, org_id: int, parent_id: int | None, db: Session, exclude_id: int | None = None) -> str:
     base = slugify(name)
-    slug = base
-    n = 1
-    while True:
+
+    def exists(s: str) -> bool:
         q = db.query(Section).filter(
             Section.organization_id == org_id,
             Section.parent_id == parent_id,
-            Section.slug == slug,
+            Section.slug == s,
         )
         if exclude_id:
             q = q.filter(Section.id != exclude_id)
-        if not q.first():
-            return slug
-        slug = f"{base}-{n}"
-        n += 1
+        return q.first() is not None
+
+    return _make_unique(base, exists)
 
 
 def _unique_page_slug(seed: str, org_id: int, db: Session) -> str:
     base = slugify(seed) or "page"
-    slug = base
-    n = 1
-    while True:
-        existing = db.query(Page).filter(
-            Page.organization_id == org_id,
-            Page.slug == slug,
-        ).first()
-        if not existing:
-            return slug
-        slug = f"{base}-{n}"
-        n += 1
+    return _make_unique(
+        base,
+        lambda s: db.query(Page).filter(Page.organization_id == org_id, Page.slug == s).first() is not None,
+    )
 
 
 def _copy_drive_doc(service, source_file_id: str, copy_title: str, parent_id: str | None) -> tuple[str, str | None]:
@@ -548,7 +539,7 @@ async def delete_section(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    org_id = _require_admin(user, db, x_org_id)
+    org_id = _require_editor(user, db, x_org_id)
     section = db.query(Section).filter(
         Section.id == section_id,
         Section.organization_id == org_id,

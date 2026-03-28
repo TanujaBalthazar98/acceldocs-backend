@@ -16,7 +16,7 @@ from app.api.drive import _create_drive_doc, _trash_drive_item, _move_drive_item
 from app.auth.routes import get_current_user
 from app.database import get_db
 from app.lib import markdown_import as _markdown_import
-from app.lib.slugify import to_slug as slugify
+from app.lib.slugify import to_slug as slugify, unique_slug as _make_unique
 from app.models import (
     Approval,
     Organization,
@@ -200,14 +200,14 @@ def _require_reviewer(user: User, db: Session, requested_org_id: int | None = No
 def _unique_slug(base_value: str, org_id: int, db: Session, exclude_id: int | None = None, *, strip_numeric_prefix: bool = True) -> str:
     seed = _NUM_PREFIX.sub("", base_value).strip() if strip_numeric_prefix else base_value.strip()
     base = slugify(seed or base_value) or "page"
-    slug, n = base, 1
-    while True:
-        q = db.query(Page).filter(Page.organization_id == org_id, Page.slug == slug)
+
+    def exists(s: str) -> bool:
+        q = db.query(Page).filter(Page.organization_id == org_id, Page.slug == s)
         if exclude_id:
             q = q.filter(Page.id != exclude_id)
-        if not q.first():
-            return slug
-        slug, n = f"{base}-{n}", n + 1
+        return q.first() is not None
+
+    return _make_unique(base, exists)
 
 
 def _upsert_page_redirect(
