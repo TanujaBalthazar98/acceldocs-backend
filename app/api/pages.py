@@ -15,8 +15,6 @@ from sqlalchemy.orm import Session
 from app.api.drive import _create_drive_doc, _trash_drive_item, _move_drive_item, get_drive_credentials as _get_drive_creds_drive
 from app.auth.routes import get_current_user
 from app.database import get_db
-from app.lib import markdown_import as _markdown_import
-from app.lib.slugify import to_slug as slugify, unique_slug as _make_unique
 from app.models import (
     Approval,
     Organization,
@@ -28,13 +26,16 @@ from app.models import (
     Section,
     User,
 )
+from app.services.pages import (
+    apply_publish,
+    apply_sync_result,
+    create_duplicate_record,
+    create_page_record,
+    unique_slug as _unique_slug_svc,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# Backward-compatible binding so deploys do not crash if app/lib version lags.
-normalize_synced_html = getattr(_markdown_import, "normalize_synced_html", lambda html: html)
-clean_google_docs_html = getattr(_markdown_import, "clean_google_docs_html", lambda html: html)
 
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 
@@ -198,16 +199,7 @@ def _require_reviewer(user: User, db: Session, requested_org_id: int | None = No
 
 
 def _unique_slug(base_value: str, org_id: int, db: Session, exclude_id: int | None = None, *, strip_numeric_prefix: bool = True) -> str:
-    seed = _NUM_PREFIX.sub("", base_value).strip() if strip_numeric_prefix else base_value.strip()
-    base = slugify(seed or base_value) or "page"
-
-    def exists(s: str) -> bool:
-        q = db.query(Page).filter(Page.organization_id == org_id, Page.slug == s)
-        if exclude_id:
-            q = q.filter(Page.id != exclude_id)
-        return q.first() is not None
-
-    return _make_unique(base, exists)
+    return _unique_slug_svc(base_value, org_id, db, exclude_id, strip_numeric_prefix=strip_numeric_prefix)
 
 
 def _upsert_page_redirect(
@@ -573,22 +565,18 @@ async def create_page(
 
     title = body.title or drive_title or google_doc_id
     title = _NUM_PREFIX.sub("", title).strip() or title
-    slug = _unique_slug(title, org_id, db)
 
-    page = Page(
-        organization_id=org_id,
+    page = create_page_record(
+        db,
+        org_id=org_id,
         section_id=body.section_id,
         google_doc_id=google_doc_id,
         title=title,
-        slug=slug,
-        slug_locked=False,
         html_content=html,
+        modified_at=modified_at,
         display_order=body.display_order,
-        drive_modified_at=modified_at,
-        last_synced_at=datetime.now(timezone.utc).isoformat(),
         owner_id=user.id,
     )
-    db.add(page)
     db.commit()
     db.refresh(page)
     logger.info("Created page %d '%s' for org %d", page.id, page.title, org_id)
@@ -762,41 +750,17 @@ async def duplicate_page(
         logger.warning("Drive copy created (%s) but export failed: %s", copied_doc_id, exc)
         html, modified_at, drive_title = source.html_content or "", copied_modified_at, copy_title
 
-    new_title = _NUM_PREFIX.sub("", (drive_title or copy_title)).strip() or copy_title
-    new_slug = _unique_slug(new_title, org_id, db)
-
-    insert_order = (source.display_order or 0) + 1
-    following_pages = (
-        db.query(Page)
-        .filter(
-            Page.organization_id == org_id,
-            Page.section_id == source.section_id,
-            Page.display_order >= insert_order,
-            Page.id != source.id,
-        )
-        .order_by(Page.display_order.desc(), Page.id.desc())
-        .all()
-    )
-    for page in following_pages:
-        page.display_order += 1
-
-    duplicate = Page(
-        organization_id=org_id,
-        section_id=source.section_id,
-        google_doc_id=copied_doc_id,
-        title=new_title,
-        slug=new_slug,
-        slug_locked=False,
-        html_content=html,
-        published_html=None,
-        is_published=False,
-        status="draft",
-        display_order=insert_order,
-        drive_modified_at=modified_at,
-        last_synced_at=datetime.now(timezone.utc).isoformat(),
+    duplicate = create_duplicate_record(
+        db,
+        source=source,
+        org_id=org_id,
+        copied_doc_id=copied_doc_id,
+        html=html,
+        modified_at=modified_at,
+        drive_title=drive_title,
+        copy_title=copy_title,
         owner_id=user.id,
     )
-    db.add(duplicate)
     db.commit()
     db.refresh(duplicate)
     logger.info("Duplicated page %d -> %d (Drive doc %s)", source.id, duplicate.id, copied_doc_id)
@@ -879,21 +843,7 @@ async def sync_page(
     creds = await _get_drive_credentials_compat(user, db, org_id, require_write=False)
     html, modified_at, drive_title = await _export_html(page.google_doc_id, creds)
 
-    page.html_content = normalize_synced_html(clean_google_docs_html(html))
-    page.drive_modified_at = modified_at
-    page.last_synced_at = datetime.now(timezone.utc).isoformat()
-    # Update title from Drive if it hasn't been manually overridden
-    if drive_title:
-        clean = _NUM_PREFIX.sub("", drive_title).strip()
-        if clean:
-            page.title = clean
-            if not page.slug_locked and not page.is_published:
-                page.slug = _unique_slug(clean, org_id, db, exclude_id=page_id)
-
-    # If page was published and content has changed, flag it as having unpublished changes.
-    # The old published_html remains live until the user re-publishes.
-    if page.is_published and html != page.published_html:
-        page.status = "draft"
+    apply_sync_result(db, page, html, modified_at, drive_title, org_id)
 
     db.commit()
     db.refresh(page)
@@ -923,22 +873,7 @@ def publish_page(
     if not page.html_content:
         raise HTTPException(status_code=400, detail="Page has no content. Sync first.")
 
-    page.published_html = page.html_content
-    page.is_published = True
-    page.status = "published"
-
-    # Populate plain text for full-text search indexing
-    try:
-        import bleach
-        page.search_text = bleach.clean(page.html_content or "", tags=[], strip=True).strip()
-    except Exception:
-        page.search_text = None
-
-    # Auto-publish parent section so it appears in the public docs sidebar
-    if page.section_id:
-        section = db.get(Section, page.section_id)
-        if section and not section.is_published:
-            section.is_published = True
+    apply_publish(db, page)
 
     db.commit()
     db.refresh(page)
@@ -1019,30 +954,9 @@ def approve_page(
     if not page.html_content:
         raise HTTPException(status_code=400, detail="Page has no content. Sync first.")
 
-    page.published_html = page.html_content
-    page.is_published = True
-    page.status = "published"
+    apply_publish(db, page)
 
-    try:
-        import bleach
-        page.search_text = bleach.clean(page.html_content or "", tags=[], strip=True).strip()
-    except Exception:
-        page.search_text = None
-
-    if page.section_id:
-        section = db.get(Section, page.section_id)
-        if section and not section.is_published:
-            section.is_published = True
-
-    db.add(
-        Approval(
-            page_id=page.id,
-            entity_type="page",
-            user_id=user.id,
-            action="approve",
-            comment=None,
-        )
-    )
+    db.add(Approval(page_id=page.id, entity_type="page", user_id=user.id, action="approve", comment=None))
     db.commit()
     db.refresh(page)
     logger.info("Approved page %d '%s'", page.id, page.title)
