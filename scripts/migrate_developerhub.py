@@ -23,7 +23,6 @@ The script:
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import logging
 import os
@@ -706,51 +705,21 @@ class AccelDocsClient:
             body["parent_id"] = parent_id
         return self._post_json("/api/sections", body)
 
-    def import_pages(
+    def import_page(
         self,
+        title: str,
+        markdown_content: str,
         section_id: int,
-        pages: list[dict],
+        display_order: int = 0,
     ) -> dict:
-        """
-        POST /api/drive/import/local — upload markdown files for a section.
-        pages: list of {title, markdown} dicts.
-        Returns response JSON.
-        """
-        url = f"{self.backend}/api/drive/import/local"
-        # Build multipart form data — one file per page
-        files_payload: list[tuple] = []
-        relative_paths: list[str] = []
-
-        for page in pages:
-            filename = _slugify(page["title"]) + ".md"
-            content = page.get("markdown") or ""
-            files_payload.append(
-                ("files", (filename, io.BytesIO(content.encode("utf-8")), "text/markdown"))
-            )
-            relative_paths.append(filename)
-
-        # Remove Content-Type so requests sets multipart boundary automatically
-        upload_headers = {
-            "Authorization": self.headers["Authorization"],
-            "X-Org-Id": self.headers["X-Org-Id"],
+        """POST /api/pages/import — create a page directly from Markdown (no Drive required)."""
+        body: dict[str, Any] = {
+            "title": title,
+            "markdown_content": markdown_content,
+            "section_id": section_id,
+            "display_order": display_order,
         }
-        data = {
-            "target_section_id": str(section_id),
-            "mode": "files",
-            "relative_paths_json": json.dumps(relative_paths),
-        }
-        resp = requests.post(
-            url,
-            data=data,
-            files=files_payload,
-            headers=upload_headers,
-            timeout=120,
-        )
-        if not resp.ok:
-            raise RuntimeError(
-                f"POST /api/drive/import/local failed [{resp.status_code}]: {resp.text[:400]}"
-            )
-        return resp.json()
+        return self._post_json("/api/pages/import", body)
 
     def patch_page(self, page_id: int, body: dict) -> dict:
         """PATCH /api/pages/{page_id}"""
@@ -851,25 +820,18 @@ def import_hierarchy(
 
         log.info("Importing page '%s' (%s) into section=%d", title, url, section_id)
         try:
-            result = client.import_pages(
+            result = client.import_page(
+                title=title,
+                markdown_content=markdown,
                 section_id=section_id,
-                pages=[{"title": title, "markdown": markdown}],
+                display_order=order,
             )
-            # The import/local endpoint returns aggregate counts, not individual page IDs.
-            # We record the URL as done; page ID lookup would require an extra GET /api/pages call.
-            uploaded = result.get("uploaded_files", 0)
-            if uploaded > 0:
-                # Store a sentinel so we know this URL was imported
-                old_url_to_page_id[url] = -1  # -1 = imported, ID unknown
-                state["page_id_map"] = old_url_to_page_id
-                save_state(state)
-                log.info("Imported page '%s'", title)
-            else:
-                log.warning(
-                    "Import returned 0 uploaded files for '%s': %s",
-                    title,
-                    result.get("failed_file_errors", []),
-                )
+            # POST /api/pages/import returns the full page dict including the new page ID.
+            page_id = result.get("id", -1)
+            old_url_to_page_id[url] = page_id
+            state["page_id_map"] = old_url_to_page_id
+            save_state(state)
+            log.info("Imported page '%s' → id=%d", title, page_id)
         except Exception as exc:
             log.error("Failed to import page '%s' (%s): %s", title, url, exc)
 

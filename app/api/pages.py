@@ -2,6 +2,7 @@
 
 import logging
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -26,6 +27,7 @@ from app.models import (
     Section,
     User,
 )
+from app.lib.markdown_import import normalize_imported_markdown
 from app.services.pages import (
     apply_publish,
     apply_sync_result,
@@ -64,6 +66,13 @@ class PageUpdate(BaseModel):
     full_width: bool | None = None
     page_custom_css: str | None = None
     featured_image_url: str | None = None
+
+
+class PageImport(BaseModel):
+    title: str
+    markdown_content: str = ""
+    section_id: int | None = None
+    display_order: int = 0
 
 
 def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
@@ -512,6 +521,75 @@ def list_pages(
         q = q.filter(Page.is_published == True)  # noqa: E712
     pages = q.order_by(Page.section_id.nulls_last(), Page.display_order, Page.title).all()
     return {"pages": [_page_dict(p) for p in pages]}
+
+
+@router.post("/import", status_code=201)
+def import_page(
+    body: PageImport,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a page directly from Markdown content — no Google Drive required.
+
+    Intended for bulk migration tooling.  Converts ``markdown_content`` to HTML
+    using the same normalization pipeline used by the Drive import flow, then
+    stores the result directly in ``html_content`` with a synthetic placeholder
+    in ``google_doc_id`` (``imported-<uuid>``) so the unique constraint is satisfied.
+    """
+    org_id = _require_editor(user, db, x_org_id)
+
+    title = (body.title or "Untitled").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    if body.section_id is not None:
+        section = db.query(Section).filter(
+            Section.id == body.section_id,
+            Section.organization_id == org_id,
+        ).first()
+        if not section:
+            raise HTTPException(status_code=404, detail="Section not found")
+
+    # Convert markdown → HTML using the shared normalization pipeline.
+    try:
+        import markdown as _md
+        normalized = normalize_imported_markdown(body.markdown_content or "")
+        html_content = _md.markdown(
+            normalized,
+            extensions=[
+                "tables",
+                "fenced_code",
+                "codehilite",
+                "toc",
+                "nl2br",
+                "sane_lists",
+                "admonition",
+                "attr_list",
+            ],
+        )
+    except Exception as exc:
+        logger.warning("Markdown conversion failed for import page '%s': %s", title, exc)
+        html_content = f"<p>{body.markdown_content or ''}</p>"
+
+    # Synthetic google_doc_id: satisfies NOT NULL + unique constraint without Drive.
+    synthetic_doc_id = f"imported-{uuid.uuid4().hex}"
+
+    page = create_page_record(
+        db,
+        org_id=org_id,
+        section_id=body.section_id,
+        google_doc_id=synthetic_doc_id,
+        title=title,
+        html_content=html_content,
+        modified_at=None,
+        display_order=body.display_order,
+        owner_id=user.id,
+    )
+    db.commit()
+    db.refresh(page)
+    logger.info("Imported page %d '%s' (no Drive) for org %d", page.id, page.title, org_id)
+    return _page_dict(page, include_html=True)
 
 
 @router.post("", status_code=201)
