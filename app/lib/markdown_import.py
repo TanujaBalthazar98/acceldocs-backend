@@ -47,6 +47,121 @@ _CALLOUT_KIND_MAP = {
 
 _UNICODE_BULLET_RE = re.compile(r"^(\s*)[•●▪◦]\s+")
 
+_MINTLIFY_TYPE_MAP = {
+    "Note": "note",
+    "Info": "note",
+    "Warning": "warning",
+    "Danger": "danger",
+    "Error": "danger",
+    "Tip": "tip",
+    "Check": "tip",
+    "Success": "tip",
+}
+
+_GITBOOK_TYPE_MAP = {
+    "info": "note",
+    "warning": "warning",
+    "danger": "danger",
+    "success": "tip",
+}
+
+_EMOJI_TYPE_MAP = {
+    "📘": "note", "ℹ️": "note", "💡": "note", "📌": "note",
+    "⚠️": "warning", "🚧": "warning", "🔔": "warning",
+    "🚨": "danger", "❌": "danger", "🛑": "danger",
+    "✅": "tip", "💚": "tip", "🟢": "tip", "👍": "tip",
+}
+
+
+def _convert_mintlify_jsx(text: str) -> str:
+    """Convert Mintlify JSX callout components to admonition syntax."""
+    result = text
+    for tag, admonition_type in _MINTLIFY_TYPE_MAP.items():
+        def make_replacer(atype: str):
+            def replace_component(m: re.Match) -> str:
+                attrs = m.group(1) or ""
+                body = (m.group(2) or "").strip()
+                title_match = re.search(r'title=["\']([^"\']+)["\']', attrs)
+                title = title_match.group(1) if title_match else atype.capitalize()
+                if not body:
+                    return f'!!! {atype} "{title}"\n\n'
+                indented = "\n".join(f"    {line}" for line in body.splitlines())
+                return f'!!! {atype} "{title}"\n{indented}\n'
+            return replace_component
+
+        pattern = re.compile(rf'<{tag}([^>]*)>(.*?)</{tag}>', re.DOTALL)
+        result = pattern.sub(make_replacer(admonition_type), result)
+
+        self_closing = re.compile(rf'<{tag}([^/]*)/>', re.DOTALL)
+        result = self_closing.sub(f'!!! {admonition_type} "{admonition_type.capitalize()}"\n    \n', result)
+
+    # <Card> → blockquote
+    result = re.sub(
+        r'<Card[^>]*title=["\']([^"\']+)["\'][^>]*>(.*?)</Card>',
+        lambda m: f'> **{m.group(1)}**\n>\n> {m.group(2).strip()}\n',
+        result,
+        flags=re.DOTALL,
+    )
+    result = re.sub(r'<CardGroup[^>]*>(.*?)</CardGroup>', r'\1', result, flags=re.DOTALL)
+
+    # <Steps>/<Step> → numbered list
+    def replace_steps(m: re.Match) -> str:
+        steps_body = m.group(1)
+        step_items = re.findall(r'<Step[^>]*>(.*?)</Step>', steps_body, re.DOTALL)
+        if not step_items:
+            return steps_body
+        lines = [f"{i}. {item.strip()}" for i, item in enumerate(step_items, 1)]
+        return "\n".join(lines) + "\n"
+
+    result = re.sub(r'<Steps[^>]*>(.*?)</Steps>', replace_steps, result, flags=re.DOTALL)
+
+    return result
+
+
+def _convert_gitbook_hints(text: str) -> str:
+    """Convert GitBook {% hint style="X" %}...{% endhint %} to admonition syntax."""
+    def replace_hint(m: re.Match) -> str:
+        style = m.group(1).lower()
+        body = m.group(2).strip()
+        admonition_type = _GITBOOK_TYPE_MAP.get(style, "note")
+        title = admonition_type.capitalize()
+        indented = "\n".join(f"    {line}" for line in body.splitlines())
+        return f'!!! {admonition_type} "{title}"\n{indented}\n'
+
+    pattern = re.compile(
+        r'\{%\s*hint\s+style=["\'](\w+)["\']\s*%\}(.*?)\{%\s*endhint\s*%\}',
+        re.DOTALL | re.IGNORECASE,
+    )
+    return pattern.sub(replace_hint, text)
+
+
+def _convert_notion_callouts(text: str) -> str:
+    """Convert Notion-style emoji blockquotes and ReadMe-style callouts."""
+    lines = text.split("\n")
+    output = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        bq_match = re.match(r'^>\s*([\U00010000-\U0010ffff]|[^\w\s>])\s*(.*)', line)
+        if bq_match:
+            emoji = bq_match.group(1)
+            first_line = bq_match.group(2)
+            atype = _EMOJI_TYPE_MAP.get(emoji)
+            if atype is not None:
+                body_lines = [first_line] if first_line else []
+                i += 1
+                while i < len(lines) and lines[i].startswith(">"):
+                    body_lines.append(lines[i][1:].strip())
+                    i += 1
+                body = "\n".join(body_lines).strip()
+                title = atype.capitalize()
+                indented = "\n".join(f"    {bl}" for bl in body.splitlines()) if body else "    "
+                output.append(f'!!! {atype} "{title}"\n{indented}')
+                continue
+        output.append(line)
+        i += 1
+    return "\n".join(output)
+
 
 def strip_import_frontmatter(text: str) -> str:
     """Strip frontmatter/meta blocks from imported markdown body content."""
@@ -261,6 +376,9 @@ def normalize_imported_markdown(text: str) -> str:
     cleaned = strip_import_frontmatter(original)
     # Normalize unicode bullets emitted by some HTML->Markdown conversions.
     cleaned = "\n".join(_UNICODE_BULLET_RE.sub(r"\1- ", ln) for ln in cleaned.splitlines())
+    cleaned = _convert_mintlify_jsx(cleaned)
+    cleaned = _convert_gitbook_hints(cleaned)
+    cleaned = _convert_notion_callouts(cleaned)
     cleaned = normalize_import_json_callouts(cleaned)
     cleaned = normalize_import_callouts(cleaned)
     cleaned = cleaned.strip()

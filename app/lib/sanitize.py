@@ -15,6 +15,7 @@ ALLOWED_TAGS: list[str] = [
     "blockquote", "pre", "code", "kbd", "samp", "var",
     "hr", "sup", "sub", "mark", "small", "abbr", "time", "address",
     "dl", "dt", "dd", "figure", "figcaption", "details", "summary",
+    "input",
 ]
 
 ALLOWED_ATTRIBUTES: dict[str, list[str]] = {
@@ -24,6 +25,7 @@ ALLOWED_ATTRIBUTES: dict[str, list[str]] = {
     "td": ["colspan", "rowspan"],
     "th": ["colspan", "rowspan"],
     "time": ["datetime"],
+    "input": ["type", "checked", "disabled"],
 }
 
 
