@@ -793,6 +793,39 @@ def _create_drive_doc(service, title: str, parent_id: str | None) -> str:
     return f["id"]
 
 
+def _create_drive_doc_with_content(
+    service, title: str, html_content: str, parent_id: str | None,
+) -> str:
+    """Create a Google Doc with HTML content and return its ID.
+
+    Uploads the HTML as media body with mimeType conversion to Google Docs format.
+    This produces a real, editable Google Doc containing the page content.
+    """
+    metadata: dict = {"name": title, "mimeType": GOOGLE_DOC_MIME}
+    if parent_id:
+        metadata["parents"] = [parent_id]
+
+    # Wrap bare HTML in a minimal document structure if needed
+    if not html_content.strip().lower().startswith("<!doctype") and not html_content.strip().lower().startswith("<html"):
+        html_content = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+            f'<body>{html_content}</body></html>'
+        )
+
+    media = MediaIoBaseUpload(
+        io.BytesIO(html_content.encode("utf-8")),
+        mimetype="text/html",
+        resumable=False,
+    )
+    result = service.files().create(
+        body=metadata,
+        media_body=media,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+    return result["id"]
+
+
 def _list_folder_items(service, folder_id: str) -> list[dict]:
     results = service.files().list(
         q=f"'{folder_id}' in parents and trashed=false",

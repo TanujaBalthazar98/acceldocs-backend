@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from app.api.drive import _create_drive_doc, _trash_drive_item, _move_drive_item, get_drive_credentials as _get_drive_creds_drive
+from app.api.drive import _create_drive_doc, _create_drive_doc_with_content, _trash_drive_item, _move_drive_item, get_drive_credentials as _get_drive_creds_drive
 from app.auth.routes import get_current_user
 from app.database import get_db
 from app.models import (
@@ -71,6 +71,7 @@ class PageUpdate(BaseModel):
 class PageImport(BaseModel):
     title: str
     markdown_content: str = ""
+    html_content: str = ""  # If provided, stored directly — bypasses Markdown conversion
     section_id: int | None = None
     display_order: int = 0
     create_drive_doc: bool = False  # If True, also create a Google Doc in the section's Drive folder
@@ -558,33 +559,38 @@ async def import_page(
         if not section:
             raise HTTPException(status_code=404, detail="Section not found")
 
-    # Convert markdown → HTML using the shared normalization pipeline.
-    try:
-        import markdown as _md
-        normalized = normalize_imported_markdown(body.markdown_content or "")
-        html_content = _md.markdown(
-            normalized,
-            extensions=[
-                "tables",
-                "fenced_code",
-                "codehilite",
-                "toc",
-                "nl2br",
-                "sane_lists",
-                "admonition",
-                "attr_list",
-            ],
-        )
-    except Exception as exc:
-        logger.warning("Markdown conversion failed for import page '%s': %s", title, exc)
-        html_content = f"<p>{body.markdown_content or ''}</p>"
+    # If html_content is provided directly, use it (skip Markdown conversion).
+    # This is the preferred path for migration — avoids lossy HTML→MD→HTML round-trip.
+    if body.html_content:
+        html_content = body.html_content
+    else:
+        # Convert markdown → HTML using the shared normalization pipeline.
+        try:
+            import markdown as _md
+            normalized = normalize_imported_markdown(body.markdown_content or "")
+            html_content = _md.markdown(
+                normalized,
+                extensions=[
+                    "tables",
+                    "fenced_code",
+                    "codehilite",
+                    "toc",
+                    "nl2br",
+                    "sane_lists",
+                    "admonition",
+                    "attr_list",
+                ],
+            )
+        except Exception as exc:
+            logger.warning("Markdown conversion failed for import page '%s': %s", title, exc)
+            html_content = f"<p>{body.markdown_content or ''}</p>"
 
     # Optionally create a real Google Drive doc so the page can be edited later.
     google_doc_id: str
     if body.create_drive_doc:
         try:
             creds = await _get_drive_creds_drive(user, org_id, db)
-            service = build("drive", "v3", credentials=creds)
+            service = build("drive", "v3", credentials=creds, cache_discovery=False)
             # Use the section's Drive folder if available, else fall back to org folder
             parent_folder_id: str | None = None
             if section and section.drive_folder_id:
@@ -593,7 +599,15 @@ async def import_page(
                 from app.models import Organization
                 org = db.query(Organization).filter_by(id=org_id).first()
                 parent_folder_id = org.drive_folder_id if org else None
-            google_doc_id = _create_drive_doc(service, title, parent_folder_id)
+
+            # Upload HTML content into the Google Doc (not blank)
+            if html_content:
+                google_doc_id = _create_drive_doc_with_content(
+                    service, title, html_content, parent_folder_id,
+                )
+            else:
+                google_doc_id = _create_drive_doc(service, title, parent_folder_id)
+
             logger.info(
                 "Created Drive doc '%s' → %s (section folder: %s)",
                 title,
