@@ -1377,14 +1377,24 @@ def _depth_list_to_tree(flat: list[dict]) -> list[dict]:
 
 
 def _fetch_html_playwright(url: str, pw_browser: Any) -> str | None:
-    """Fetch a page using a running Playwright browser instance. Returns rendered HTML."""
+    """Fetch a page using a running Playwright browser instance.
+
+    Waits for the Angular-rendered content container to appear before
+    returning the full page HTML. This ensures the actual documentation
+    content is present, not just the SPA shell.
+    """
     try:
         page = pw_browser.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.goto(url, timeout=45000)
+        # Wait for DeveloperHub Angular content to render
         try:
-            page.wait_for_load_state("networkidle", timeout=10000)
+            page.wait_for_selector(
+                ".content-container, .editor-top-level, .master-content",
+                timeout=15000,
+            )
         except Exception:
-            page.wait_for_timeout(2000)
+            # Fallback: just wait a bit for any slow rendering
+            page.wait_for_timeout(5000)
         html = page.content()
         page.close()
         return html
@@ -1800,13 +1810,17 @@ def _restore_tab_placeholders(markdown: str, placeholders: dict[str, str]) -> st
 # ---------------------------------------------------------------------------
 
 _CONTENT_SELECTORS = [
+    # DeveloperHub Angular-rendered content containers (most specific first)
+    lambda soup: soup.find(class_="content-container"),
+    lambda soup: soup.find(class_="editor-top-level"),
+    lambda soup: soup.find(class_="master-content"),
+    # Generic doc platform selectors
     lambda soup: soup.find("main"),
     lambda soup: soup.find("article"),
     lambda soup: soup.find(class_="content-body"),
     lambda soup: soup.find(attrs={"role": "main"}),
     lambda soup: soup.find(class_="page-content"),
     lambda soup: soup.find(class_="docs-content"),
-    lambda soup: soup.find(class_=re.compile(r"content", re.I)),
 ]
 
 
@@ -1893,6 +1907,162 @@ def _html_to_markdown_fallback(html: str) -> str:
     return "\n".join(lines)
 
 
+def _convert_callouts_to_admonition_html(soup_elem: Tag) -> None:
+    """Convert DeveloperHub callout elements in-place to AccelDocs admonition HTML.
+
+    DeveloperHub uses:
+        <div class="callout warning">
+          <div class="callout-text">Do not restart the pods...</div>
+        </div>
+    Or:
+        <span class="cbadge info">Important</span>
+
+    Converts to:
+        <div class="admonition warning">
+          <p class="admonition-title">Warning</p>
+          <p>Do not restart the pods...</p>
+        </div>
+
+    This matches the CSS in AccelDocs' docs.html template.
+    """
+    for tag_name in ["aside", "div", "section", "blockquote"]:
+        for elem in list(soup_elem.find_all(tag_name)):
+            atype = _detect_callout_type(elem)
+            if not atype:
+                continue
+
+            # Skip nested callout-text divs (handled by their parent callout div)
+            classes = " ".join(elem.get("class", []) or []).lower()
+            if "callout-text" in classes:
+                continue
+
+            # Extract title: DeveloperHub uses <span class="cbadge info"> or
+            # a dedicated title child element
+            title_elem = elem.find(
+                lambda t: t and t.name in ("p", "span", "strong", "h1", "h2", "h3", "h4", "h5")
+                and any(
+                    cls in " ".join(t.get("class", []) or []).lower()
+                    for cls in ("title", "header", "heading", "callout-title", "admonition-title", "cbadge")
+                )
+            )
+            if title_elem:
+                title_text = title_elem.get_text(strip=True)
+                title_elem.decompose()
+            else:
+                title_text = atype.capitalize()
+
+            # Extract body: DeveloperHub wraps body in <div class="callout-text">
+            callout_text_div = elem.find(class_="callout-text")
+            if callout_text_div:
+                body_html = callout_text_div.decode_contents().strip()
+            else:
+                body_html = elem.decode_contents().strip()
+
+            if not body_html:
+                continue
+
+            admonition_html = (
+                f'<div class="admonition {atype}">'
+                f'<p class="admonition-title">{title_text}</p>'
+                f'<p>{body_html}</p>'
+                f'</div>'
+            )
+            new_elem = BeautifulSoup(admonition_html, "html.parser")
+            elem.replace_with(new_elem)
+
+
+def _convert_tabs_to_html(soup_elem: Tag) -> None:
+    """Convert DeveloperHub tab components in-place to simple HTML tab structure.
+
+    Output format (styled by AccelDocs CSS):
+        <div class="tabs-container">
+          <div class="tab-content" data-tab="Tab Name">
+            <h4>Tab Name</h4>
+            ...content...
+          </div>
+        </div>
+    """
+    # Handle <tab-group> web component
+    for tab_group in list(soup_elem.find_all("tab-group")):
+        tabs = tab_group.find_all(["tab", "tab-panel"])
+        if not tabs:
+            continue
+        parts = ['<div class="tabs-container">']
+        for tab in tabs:
+            label = tab.get("label") or tab.get("title") or "Tab"
+            content = tab.decode_contents().strip()
+            parts.append(f'<div class="tab-content" data-tab="{label}"><h4>{label}</h4>{content}</div>')
+        parts.append('</div>')
+        new_elem = BeautifulSoup("\n".join(parts), "html.parser")
+        tab_group.replace_with(new_elem)
+
+    # Handle div.tabs-wrapper / div.tab-group
+    for wrapper in soup_elem.find_all("div", class_=re.compile(r"tabs?[-_]?(wrapper|group|container)", re.I)):
+        panels = (
+            wrapper.find_all(["div", "section"], attrs={"data-tab": True})
+            or wrapper.find_all(["div", "section"], role="tabpanel")
+            or wrapper.find_all(
+                ["div", "section"],
+                class_=re.compile(r"tab[-_]?(panel|content|pane)", re.I),
+            )
+        )
+        if not panels:
+            continue
+        tab_labels = [
+            btn.get_text(strip=True)
+            for btn in wrapper.find_all(
+                ["button", "a", "li"],
+                class_=re.compile(r"tab[-_]?(item|label|button|link)?", re.I),
+            )
+        ]
+        parts = ['<div class="tabs-container">']
+        for idx, panel in enumerate(panels):
+            label = (
+                panel.get("data-tab")
+                or panel.get("aria-label")
+                or (tab_labels[idx] if idx < len(tab_labels) else f"Tab {idx + 1}")
+            )
+            content = panel.decode_contents().strip()
+            parts.append(f'<div class="tab-content" data-tab="{label}"><h4>{label}</h4>{content}</div>')
+        parts.append('</div>')
+        new_elem = BeautifulSoup("\n".join(parts), "html.parser")
+        wrapper.replace_with(new_elem)
+
+
+def _clean_developerhub_html(soup_elem: Tag) -> None:
+    """Remove DeveloperHub-specific scripts, styles, and wrapper elements."""
+    # Remove script and style tags
+    for tag in soup_elem.find_all(["script", "style", "noscript"]):
+        tag.decompose()
+
+    # Remove known DeveloperHub UI chrome divs
+    for div in soup_elem.find_all("div"):
+        try:
+            classes = " ".join(div.get("class", []) or []).lower()
+        except (AttributeError, TypeError):
+            continue
+        if any(x in classes for x in [
+            "sidebar", "nav-", "breadcrumb", "footer", "header-",
+            "feedback", "was-this-helpful", "edit-page", "table-of-contents",
+            "on-this-page", "page-nav", "pagination",
+        ]):
+            div.decompose()
+
+    # Strip data-* attributes and Angular-specific attributes
+    for tag in soup_elem.find_all(True):
+        if not hasattr(tag, "attrs") or not tag.attrs:
+            continue
+        attrs_to_remove = [
+            attr for attr in tag.attrs
+            if (attr.startswith("data-") and attr not in ("data-tab",))
+            or attr.startswith("ng-")
+            or attr.startswith("_ngcontent")
+            or attr.startswith("_nghost")
+        ]
+        for attr in attrs_to_remove:
+            del tag[attr]
+
+
 def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
     """
     Fetch a page, extract main content, handle callouts + tabs, convert to Markdown.
@@ -1922,14 +2092,7 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
         elif " - " in title:
             title = title.split(" - ")[0].strip()
 
-    # 1. Pre-process: callouts → placeholders (BEFORE content extraction so we
-    #    capture callouts that might be outside the main content element)
-    soup, callout_placeholders = _convert_callouts_to_placeholders(soup)
-
-    # 2. Pre-process: tab groups → placeholders
-    soup, tab_placeholders = _convert_tabs_to_placeholders(soup)
-
-    # 3. Extract main content area
+    # 1. Extract main content area first
     content_elem = None
     for selector in _CONTENT_SELECTORS:
         elem = selector(soup)
@@ -1951,15 +2114,30 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
         if h1_text:
             title = h1_text
 
+    # 2. Convert DeveloperHub callouts directly to AccelDocs admonition HTML
+    #    (no MkDocs !!! syntax — stays as clean HTML)
+    _convert_callouts_to_admonition_html(content_elem)
+
+    # 3. Convert DeveloperHub tabs to AccelDocs tab HTML
+    _convert_tabs_to_html(content_elem)
+
+    # 4. Clean up the HTML: strip DeveloperHub-specific wrappers, classes, scripts
+    _clean_developerhub_html(content_elem)
+
     content_html = str(content_elem)
 
-    # 4. HTML → Markdown
-    if _check_pandoc():
-        markdown = _html_to_markdown_pandoc(content_html)
-    else:
-        markdown = _html_to_markdown_fallback(content_html)
+    # 5. Also produce Markdown as fallback (for pages where raw_html fails)
+    # Use placeholders for callouts/tabs since they don't survive pandoc well
+    md_soup = BeautifulSoup(content_html, "html.parser")
+    md_soup, callout_placeholders = _convert_callouts_to_placeholders(md_soup)
+    md_soup, tab_placeholders = _convert_tabs_to_placeholders(md_soup)
+    md_html = str(md_soup)
 
-    # 5. Restore placeholders with their Markdown equivalents
+    if _check_pandoc():
+        markdown = _html_to_markdown_pandoc(md_html)
+    else:
+        markdown = _html_to_markdown_fallback(md_html)
+
     markdown = _restore_callout_placeholders(markdown, callout_placeholders)
     markdown = _restore_tab_placeholders(markdown, tab_placeholders)
 
@@ -2046,10 +2224,11 @@ class AccelDocsClient:
         name: str,
         parent_id: int | None = None,
         display_order: int = 0,
+        section_type: str = "section",
     ) -> dict:
         body: dict[str, Any] = {
             "name": name,
-            "section_type": "section",
+            "section_type": section_type,
             "visibility": "public",
             "display_order": display_order,
         }
@@ -2060,23 +2239,28 @@ class AccelDocsClient:
     def import_page(
         self,
         title: str,
-        markdown_content: str,
         section_id: int,
         display_order: int = 0,
         create_drive_doc: bool = False,
+        markdown_content: str = "",
+        html_content: str = "",
     ) -> dict:
         """
-        POST /api/pages/import — create a page from Markdown.
+        POST /api/pages/import — create a page from HTML or Markdown.
 
-        If create_drive_doc is True, passes the flag to the backend so it also
-        creates a Google Doc in the section's Drive folder.
+        If html_content is provided, it is stored directly (no conversion).
+        Otherwise markdown_content is converted to HTML on the backend.
+        If create_drive_doc is True, also creates a Google Doc in Drive.
         """
         body: dict[str, Any] = {
             "title": title,
-            "markdown_content": markdown_content,
             "section_id": section_id,
             "display_order": display_order,
         }
+        if html_content:
+            body["html_content"] = html_content
+        else:
+            body["markdown_content"] = markdown_content
         if create_drive_doc:
             body["create_drive_doc"] = True
         return self._post_json("/api/pages/import", body)
@@ -2126,18 +2310,21 @@ def import_hierarchy(
         url = node.get("url")
         children = node.get("children", [])
         node_path = f"{path_prefix}/{_slugify(title)}"
+        # Use _section_type from the tree node (tab/version/section)
+        section_type = node.get("_section_type", "section")
 
         has_children = bool(children)
 
         if has_children:
             section_id = section_map.get(node_path)
             if not section_id:
-                log.info("Creating section: %s (parent=%d)", title, parent_section_id)
+                log.info("Creating %s: %s (parent=%d)", section_type, title, parent_section_id)
                 try:
                     result = client.create_section(
                         name=title,
                         parent_id=parent_section_id,
                         display_order=order,
+                        section_type=section_type,
                     )
                     section_id = result["id"]
                     section_map[node_path] = section_id
@@ -2169,17 +2356,29 @@ def import_hierarchy(
             return
 
         title = data["title"]
+        # Prefer raw_html (cleaned, with callouts converted to admonition divs)
+        # over markdown to avoid lossy round-trip
+        raw_html = data.get("raw_html") or ""
         markdown = data.get("markdown") or ""
 
         log.info("Importing page '%s' (%s) into section=%d", title, url, section_id)
         try:
-            result = client.import_page(
-                title=title,
-                markdown_content=markdown,
-                section_id=section_id,
-                display_order=order,
-                create_drive_doc=create_drive_docs,
-            )
+            if raw_html:
+                result = client.import_page(
+                    title=title,
+                    html_content=raw_html,
+                    section_id=section_id,
+                    display_order=order,
+                    create_drive_doc=create_drive_docs,
+                )
+            else:
+                result = client.import_page(
+                    title=title,
+                    markdown_content=markdown,
+                    section_id=section_id,
+                    display_order=order,
+                    create_drive_doc=create_drive_docs,
+                )
             page_id = result.get("id", -1)
             old_url_to_page_id[url] = page_id
             state["page_id_map"] = old_url_to_page_id
