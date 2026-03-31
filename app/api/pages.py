@@ -60,6 +60,7 @@ class PageUpdate(BaseModel):
     section_id: int | None = None
     title: str | None = None
     slug: str | None = None
+    html_content: str | None = None  # Update page HTML content (for link rewriting after import)
     visibility_override: Literal["public", "internal", "external"] | None = None
     display_order: int | None = None
     hide_toc: bool | None = None
@@ -816,6 +817,8 @@ async def update_page(
         page.page_custom_css = body.page_custom_css
     if "featured_image_url" in body.model_fields_set:
         page.featured_image_url = body.featured_image_url
+    if body.html_content is not None:
+        page.html_content = body.html_content
 
     db.commit()
     db.refresh(page)

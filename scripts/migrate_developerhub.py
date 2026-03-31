@@ -2287,6 +2287,43 @@ def rewrite_internal_links(markdown: str, source_domain: str, slug_map: dict[str
     return re.sub(r"\[([^\]]*)\]\(([^)]+)\)", replace_link, markdown)
 
 
+def rewrite_html_internal_links(html: str, source_domain: str, slug_map: dict[str, str]) -> str:
+    """
+    Rewrite internal links in HTML content.
+
+    Converts <a href="https://docs.acceldata.io/pulse/..."> links to
+    [[MIGRATED:slug]] placeholders that AccelDocs can resolve to
+    the correct page URLs after import.
+
+    External links and anchor-only links (#section) are left unchanged.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"]
+        parsed = urlparse(href)
+
+        # Skip external links
+        if parsed.netloc and parsed.netloc != source_domain:
+            continue
+
+        # Skip anchor-only links (e.g., #supported-databases)
+        if not parsed.path or parsed.path == "/":
+            continue
+
+        path = parsed.path.rstrip("/")
+        slug = slug_map.get(path)
+        if slug:
+            # Store the slug in a data attribute for later resolution
+            anchor["href"] = f"[[MIGRATED:{slug}]]"
+            # Preserve fragment if present
+            if parsed.fragment:
+                anchor["href"] += f"#{parsed.fragment}"
+
+    return str(soup)
+
+
 def resolve_migrated_links(markdown: str, old_url_to_page_id: dict[str, int]) -> str:
     def replace_placeholder(m: re.Match) -> str:
         slug = m.group(1)
@@ -2500,6 +2537,107 @@ def import_hierarchy(
         _import_node(node, product_id, "", order)
 
     return old_url_to_page_id
+
+
+def _resolve_and_patch_links(
+    client: AccelDocsClient,
+    old_url_to_page_id: dict[str, int],
+    page_data: dict[str, dict],
+    log: Any,
+) -> None:
+    """
+    Second pass: resolve [[MIGRATED:slug]] placeholders to /pages/{id} URLs.
+
+    After import_hierarchy(), we have the old_url → new_page_id mapping.
+    We resolve all placeholders in page_data and patch each page via PATCH API.
+    """
+    # Build slug → new_page_id mapping from old_url_to_page_id
+    slug_to_page_id: dict[str, int] = {}
+    for old_url, page_id in old_url_to_page_id.items():
+        if not page_id or page_id <= 0:
+            continue
+        slug = _slugify(old_url.rstrip("/").rsplit("/", 1)[-1])
+        slug_to_page_id[slug] = page_id
+
+    pages_to_patch: list[tuple[int, str, str]] = []
+
+    for old_url, data in page_data.items():
+        page_id = old_url_to_page_id.get(old_url)
+        if not page_id or page_id <= 0:
+            continue
+
+        raw_html = data.get("raw_html") or ""
+        markdown = data.get("markdown") or ""
+
+        # Resolve HTML links
+        resolved_html = raw_html
+        if raw_html and "[[MIGRATED:" in raw_html:
+            resolved_html = resolve_migrated_links_html(raw_html, old_url_to_page_id)
+
+        # Resolve Markdown links
+        resolved_md = markdown
+        if markdown and "[[MIGRATED:" in markdown:
+            resolved_md = resolve_migrated_links(markdown, old_url_to_page_id)
+
+        pages_to_patch.append((page_id, resolved_html, resolved_md))
+
+    if not pages_to_patch:
+        return
+
+    log.info("Patching %d pages with resolved internal links...", len(pages_to_patch))
+    success_count = 0
+    for page_id, resolved_html, resolved_md in pages_to_patch:
+        try:
+            body: dict[str, Any] = {}
+            if resolved_html:
+                body["html_content"] = resolved_html
+            elif resolved_md:
+                body["html_content"] = f"<p>{resolved_md}</p>"
+
+            if body:
+                client.patch_page(page_id, body)
+                success_count += 1
+        except Exception as exc:
+            log.warning("Failed to patch page %d: %s", page_id, exc)
+
+    log.info("Patched %d/%d pages with resolved internal links", success_count, len(pages_to_patch))
+
+
+def resolve_migrated_links_html(html: str, old_url_to_page_id: dict[str, int]) -> str:
+    """
+    Resolve [[MIGRATED:slug]] placeholders in HTML to /pages/{id} URLs.
+
+    Also handles fragment anchors: [[MIGRATED:slug]]#section → /pages/{id}#section
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"]
+        if not href.startswith("[[MIGRATED:"):
+            continue
+
+        # Extract slug and optional fragment
+        placeholder = href
+        fragment = ""
+        if "#" in href:
+            placeholder, fragment = href.split("#", 1)
+            fragment = f"#{fragment}"
+
+        slug = placeholder.replace("[[MIGRATED:", "").replace("]]", "")
+        page_id = None
+        for old_url, pid in old_url_to_page_id.items():
+            if _slugify(old_url.rstrip("/").rsplit("/", 1)[-1]) == slug:
+                page_id = pid
+                break
+
+        if page_id:
+            anchor["href"] = f"/pages/{page_id}{fragment}"
+        else:
+            log.warning("Could not resolve migrated slug: %s", slug)
+
+    return str(soup)
 
 
 # ---------------------------------------------------------------------------
@@ -3208,6 +3346,10 @@ def main() -> None:
             data["markdown"] = rewrite_internal_links(
                 data["markdown"], source_domain, slug_map
             )
+        if data.get("raw_html"):
+            data["raw_html"] = rewrite_html_internal_links(
+                data["raw_html"], source_domain, slug_map
+            )
     state["page_data"] = page_data
     save_state(state)
     log.info("Internal links rewritten with [[MIGRATED:slug]] placeholders")
@@ -3230,6 +3372,13 @@ def main() -> None:
         state=state,
         create_drive_docs=getattr(args, "create_drive_docs", False),
     )
+
+    # -----------------------------------------------------------------------
+    # Step 5b: Resolve internal links
+    # Replace [[MIGRATED:slug]] placeholders with actual /pages/{id} URLs.
+    # We couldn't do this during import because page IDs weren't known yet.
+    # ------------------------------------------------------------------------
+    _resolve_and_patch_links(client, old_url_to_page_id, page_data, log)
 
     # -----------------------------------------------------------------------
     # Summary
