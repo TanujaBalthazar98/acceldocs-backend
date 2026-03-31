@@ -2209,6 +2209,84 @@ def _convert_codemirror_to_code_blocks(soup_elem: Tag) -> None:
         wrapper.replace_with(pre_elem)
 
 
+def _convert_custom_html_components(soup_elem: Tag) -> None:
+    """
+    Extract HTML content from DeveloperHub <app-custom-html> Angular components.
+
+    DeveloperHub uses <app-custom-html> components to embed arbitrary HTML content
+    (e.g., compatibility matrices, custom styled sections). The HTML is stored in
+    a pluginobject JSON attribute as URL-encoded data.
+
+    Example:
+        <app-custom-html pluginobject='{"data":{"contents":"<!DOCTYPE html>..."}}'>
+
+    We extract the HTML, parse it, strip the wrapper tags (doctype, html, head, body)
+    and insert the body content directly.
+    """
+    import json as _json
+    from urllib.parse import unquote as _unquote
+
+    custom_html_components = list(soup_elem.find_all("app-custom-html"))
+    if not custom_html_components:
+        return
+
+    # Get the parent soup to create new tags
+    parent_soup = BeautifulSoup("", "html.parser")
+
+    for comp in custom_html_components:
+        plugin_obj = comp.get("pluginobject", "")
+        if not plugin_obj:
+            comp.decompose()
+            continue
+
+        try:
+            data = _json.loads(plugin_obj)
+            contents = data.get("data", {}).get("contents", "")
+            if not contents:
+                comp.decompose()
+                continue
+
+            # Decode URL-encoded HTML
+            decoded_html = _unquote(contents)
+
+            # Find body content boundaries
+            body_start = decoded_html.lower().find("<body")
+            body_end = decoded_html.lower().rfind("</body>")
+
+            if body_start < 0 or body_end < 0 or body_end <= body_start:
+                comp.decompose()
+                continue
+
+            # Extract content between body tags
+            body_start_tag_end = decoded_html.find(">", body_start) + 1
+            body_content = decoded_html[body_start_tag_end:body_end]
+
+            # Parse body content - body_content doesn't include <body> tags
+            body_soup = BeautifulSoup(body_content, "html.parser")
+
+            # Extract all children as a fragment
+            children_html = "".join(str(child) for child in body_soup.children if hasattr(child, 'name') and child.name)
+            if not children_html:
+                comp.decompose()
+                continue
+
+            # Parse the children HTML and append to a wrapper
+            wrapper = parent_soup.new_tag("div")
+            wrapper["class"] = "custom-html-content"
+
+            if children_html:
+                children_soup = BeautifulSoup(children_html, "html.parser")
+                for child in children_soup.children:
+                    if hasattr(child, 'name') and child.name:
+                        wrapper.append(child)
+
+            # Replace the component with the wrapper
+            comp.replace_with(wrapper)
+
+        except Exception:
+            comp.decompose()
+
+
 def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
     """
     Fetch a page, extract main content, handle callouts + tabs, convert to Markdown.
@@ -2267,7 +2345,11 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
     # 3. Convert DeveloperHub tabs to AccelDocs tab HTML
     _convert_tabs_to_html(content_elem)
 
-    # 4. Convert CodeMirror-rendered code lines to proper <pre><code> blocks
+    # 4. Extract HTML content from <app-custom-html> components
+    #    (e.g., compatibility matrices, custom styled sections)
+    _convert_custom_html_components(content_elem)
+
+    # 5. Convert CodeMirror-rendered code lines to proper <pre><code> blocks
     _convert_codemirror_to_code_blocks(content_elem)
 
     # 5. Clean up the HTML: strip DeveloperHub-specific wrappers, classes, scripts
