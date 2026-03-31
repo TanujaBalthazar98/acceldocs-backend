@@ -2165,6 +2165,50 @@ def _admonitions_to_blockquotes(html: str) -> str:
     return str(soup)
 
 
+def _convert_codemirror_to_code_blocks(soup_elem: Tag) -> None:
+    """
+    Convert CodeMirror-rendered code lines into proper <pre><code> blocks.
+
+    DeveloperHub renders code in CodeMirror editors, producing:
+        <div class="CodeMirror-code">
+          <pre class="CodeMirror-line">line 1</pre>
+          <pre class="CodeMirror-line">line 2</pre>
+          ...
+        </div>
+
+    These nested <pre class="CodeMirror-line"> elements don't render as code blocks
+    in Google Docs. We find all CodeMirror-code wrappers, extract the code lines,
+    and replace them with a single <pre><code> block.
+    """
+    # Find all CodeMirror-code wrapper divs
+    cm_wrappers = soup_elem.find_all(
+        "div",
+        class_="CodeMirror-code",
+    )
+
+    for wrapper in cm_wrappers:
+        # Collect all CodeMirror-line text
+        lines: list[str] = []
+        for pre in wrapper.find_all("pre", class_="CodeMirror-line"):
+            text = pre.get_text()
+            lines.append(text)
+
+        if not lines:
+            continue
+
+        # Create proper <pre><code> block
+        code_text = "\n".join(lines)
+        # Use wrapper's underlying soup to create new tags
+        new_soup = BeautifulSoup("", "html.parser")
+        code_elem = new_soup.new_tag("code")
+        code_elem.string = code_text
+        pre_elem = new_soup.new_tag("pre")
+        pre_elem.append(code_elem)
+
+        # Replace the entire CodeMirror-code wrapper with the code block
+        wrapper.replace_with(pre_elem)
+
+
 def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
     """
     Fetch a page, extract main content, handle callouts + tabs, convert to Markdown.
@@ -2223,7 +2267,10 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
     # 3. Convert DeveloperHub tabs to AccelDocs tab HTML
     _convert_tabs_to_html(content_elem)
 
-    # 4. Clean up the HTML: strip DeveloperHub-specific wrappers, classes, scripts
+    # 4. Convert CodeMirror-rendered code lines to proper <pre><code> blocks
+    _convert_codemirror_to_code_blocks(content_elem)
+
+    # 5. Clean up the HTML: strip DeveloperHub-specific wrappers, classes, scripts
     _clean_developerhub_html(content_elem)
 
     content_html = str(content_elem)
