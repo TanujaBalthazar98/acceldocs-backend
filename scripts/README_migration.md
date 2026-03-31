@@ -152,3 +152,54 @@ Drive in AccelDocs Settings → Integrations first.
 | `migration.log` | Timestamped log of every action |
 
 Both are safe to delete to start a fresh import.
+
+---
+
+## Using Playwright for the real multi-level hierarchy (Recommended)
+
+docs.acceldata.io has a **4-5 level deep sidebar hierarchy** (e.g. User Guide →
+Data Reliability → Discover Assets → Asset Details → Find Similar Assets). Because
+the site is a JavaScript SPA, the sidebar is invisible to plain HTTP crawlers.
+
+The `--playwright` flag launches a headless Chromium browser that:
+1. Navigates to the docs URL and waits for JS to render
+2. Clicks open all collapsed sidebar sections to reveal every level
+3. Extracts the full multi-level tree from the rendered DOM
+4. Also uses the browser for page content fetching (no SSR issues)
+
+### Setup
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+### Usage
+
+```bash
+# Dry run first — see the real hierarchy
+python scripts/migrate_developerhub.py \
+  --source https://docs.acceldata.io/documentation \
+  --playwright \
+  --dry-run
+
+# Full import with real hierarchy
+python scripts/migrate_developerhub.py \
+  --source https://docs.acceldata.io/documentation \
+  --backend https://your-backend.vercel.app \
+  --token eyJhbGciOi... \
+  --org-id 42 \
+  --product-id 17 \
+  --playwright
+```
+
+### Comparison
+
+| Mode | Hierarchy depth | Accuracy | Speed |
+|---|---|---|---|
+| `--playwright` | Full (4-5 levels) | Exact sidebar | ~2–3s/page |
+| Sitemap + category map | 2 levels | Approximate grouping | ~0.5s/page |
+| Static HTML | 1–2 levels | Only if sidebar is in HTML | ~0.5s/page |
+
+If playwright is not installed the script falls back to the sitemap + category
+map approach automatically.

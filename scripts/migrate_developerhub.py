@@ -542,72 +542,290 @@ def _sitemap_urls_to_tree(urls: list[str], apply_category_map: bool = True) -> l
     return tree
 
 
-def discover_structure(source_url: str) -> tuple[list[dict], list[str]]:
+# ---------------------------------------------------------------------------
+# Playwright-based discovery — for JavaScript SPAs
+# ---------------------------------------------------------------------------
+
+_PLAYWRIGHT_AVAILABLE: bool | None = None
+
+
+def _check_playwright() -> bool:
+    global _PLAYWRIGHT_AVAILABLE
+    if _PLAYWRIGHT_AVAILABLE is None:
+        try:
+            import playwright  # noqa: F401
+            _PLAYWRIGHT_AVAILABLE = True
+            log.info("playwright is available — can use for JS-rendered sidebar discovery")
+        except ImportError:
+            _PLAYWRIGHT_AVAILABLE = False
+            log.info("playwright not installed — will use static HTML / sitemap fallback")
+    return _PLAYWRIGHT_AVAILABLE
+
+
+def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
     """
-    Load source URL, find sidebar, walk navigation tree.
-    Falls back to sitemap.xml for JavaScript-rendered (SPA) DeveloperHub sites.
-    When using the sitemap fallback, applies the Acceldata category map for
-    a proper section hierarchy (instead of a flat 157-page list).
+    Extract the full navigation tree from a Playwright page object.
+
+    Strategy:
+    1. Try to expand all collapsible sidebar sections by clicking expand buttons.
+    2. Collect all <a> elements inside the sidebar in their DOM order with depth
+       derived from their visual indentation / nesting level.
+    3. Return the tree in the same dict format used by _walk_nav_tree().
+    """
+    # Wait for navigation to settle
+    try:
+        page_obj.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        page_obj.wait_for_timeout(3000)
+
+    # Click all expand/toggle buttons in the sidebar to open nested sections.
+    # DeveloperHub uses various patterns: chevron icons, aria-expanded buttons, etc.
+    expand_selectors = [
+        "nav [aria-expanded='false']",
+        "nav button.expand",
+        "nav .sidebar-chevron",
+        "nav [class*='expand']",
+        "nav [class*='toggle']",
+        "nav [class*='arrow']",
+        "nav [class*='caret']",
+    ]
+    for sel in expand_selectors:
+        try:
+            buttons = page_obj.query_selector_all(sel)
+            for btn in buttons:
+                try:
+                    btn.click(timeout=500)
+                    page_obj.wait_for_timeout(150)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Second pass — some items only become visible after parents are opened
+    for sel in expand_selectors[:3]:
+        try:
+            buttons = page_obj.query_selector_all(sel)
+            for btn in buttons:
+                try:
+                    btn.click(timeout=300)
+                    page_obj.wait_for_timeout(100)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Get rendered HTML and parse with BeautifulSoup
+    html = page_obj.content()
+    soup = BeautifulSoup(html, "html.parser")
+    nav = _find_nav(soup)
+
+    if nav:
+        tree = _walk_nav_tree(nav, base_url)
+        all_urls = _collect_all_urls(tree)
+        has_depth = any(n.get("children") for n in tree)
+        log.info(
+            "Playwright sidebar: %d top-level nodes, %d total URLs, deep=%s",
+            len(tree),
+            len(all_urls),
+            has_depth,
+        )
+        return tree
+
+    # Fallback: extract all <a> tags from nav in order, guess depth from indentation
+    nav_area = (
+        soup.find("nav", attrs={"aria-label": True})
+        or soup.find(class_="sidebar-nav")
+        or soup.find("nav")
+    )
+    if not nav_area:
+        return []
+
+    # Collect all anchor elements with href
+    anchors = nav_area.find_all("a", href=True)
+    flat_nodes: list[dict] = []
+    for anchor in anchors:
+        href = anchor.get("href", "")
+        if not href or href.startswith("#") or href.startswith("javascript"):
+            continue
+        full_url = urljoin(base_url, href)
+        title = anchor.get_text(separator=" ", strip=True) or "Untitled"
+        # Estimate depth: count parent elements that look like list/nav containers
+        depth = 0
+        parent = anchor.parent
+        while parent and parent != nav_area:
+            tag = parent.name or ""
+            if tag in ("ul", "ol", "li"):
+                depth += 1
+            parent = parent.parent
+        depth = min(depth // 2, 6)  # normalise — each li+ul pair = 1 level
+        flat_nodes.append({"title": title, "url": full_url, "depth": depth, "children": []})
+
+    if not flat_nodes:
+        return []
+
+    # Reconstruct tree from depth-annotated flat list
+    return _depth_list_to_tree(flat_nodes)
+
+
+def _depth_list_to_tree(flat: list[dict]) -> list[dict]:
+    """
+    Convert a flat list of dicts with 'depth' field into a nested tree.
+    Each node's children are all immediately following nodes at depth+1
+    before any node at <= current depth.
+    """
+    root: list[dict] = []
+    stack: list[tuple[int, list[dict]]] = [(-1, root)]  # (depth, children_list)
+
+    for node in flat:
+        node = {**node, "children": []}
+        d = node["depth"]
+        # Pop stack until we find a parent at depth < d
+        while len(stack) > 1 and stack[-1][0] >= d:
+            stack.pop()
+        stack[-1][1].append(node)
+        stack.append((d, node["children"]))
+
+    return root
+
+
+def _fetch_html_playwright(url: str, pw_browser: Any) -> str | None:
+    """Fetch a page using a running Playwright browser instance. Returns rendered HTML."""
+    try:
+        page = pw_browser.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            page.wait_for_timeout(2000)
+        html = page.content()
+        page.close()
+        return html
+    except Exception as exc:
+        log.warning("Playwright fetch failed for %s: %s", url, exc)
+        return None
+
+
+def discover_structure(
+    source_url: str,
+    use_playwright: bool = False,
+    apply_category_map: bool = True,
+) -> tuple[list[dict], list[str]]:
+    """
+    Discover the navigation hierarchy of the documentation site.
+
+    Discovery order:
+    1. If use_playwright=True (and playwright is installed): launch a headless
+       Chromium browser, render the JS sidebar, click open all collapsed sections,
+       and walk the full multi-level tree — this is the only reliable way to get
+       the 4-5 level deep hierarchy from a SPA like docs.acceldata.io.
+    2. Static HTML: fetch with requests and try to find a nav element.
+    3. Sitemap.xml fallback with ACCELDATA_CATEGORY_MAP grouping.
+
     Returns (tree, fallback_link_list).
     """
-    log.info("Fetching source page: %s", source_url)
-    html = fetch_html(source_url)
-    if not html:
-        log.error("Could not load source URL: %s", source_url)
-        sys.exit(1)
-
-    soup = BeautifulSoup(html, "html.parser")
     parsed = urlparse(source_url)
     base_url = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
     source_path = parsed.path.rstrip("/")
 
-    nav = _find_nav(soup)
     tree: list[dict] = []
-    if nav:
-        tree = _walk_nav_tree(nav, source_url)
-
     fallback_links: list[str] = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.startswith("/") or href.startswith(parsed.scheme + "://"):
-            full = urljoin(source_url, href)
-            if urlparse(full).netloc == parsed.netloc:
-                fallback_links.append(full)
-    fallback_links = list(dict.fromkeys(fallback_links))
 
-    # Fallback: sitemap.xml — used when the site is a JavaScript SPA
-    if not tree and not fallback_links:
-        log.info("Page appears to be a JS-rendered SPA — trying sitemap.xml discovery")
+    # -----------------------------------------------------------------------
+    # Strategy 1: Playwright — renders JS, clicks open all collapsed sections,
+    # gives the true multi-level hierarchy
+    # -----------------------------------------------------------------------
+    if use_playwright and _check_playwright():
+        log.info("Using Playwright for JS-rendered sidebar discovery…")
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    )
+                )
+                page_obj = context.new_page()
+                log.info("Playwright: navigating to %s", source_url)
+                page_obj.goto(source_url, wait_until="domcontentloaded", timeout=30000)
+                tree = _pw_extract_nav_tree(page_obj, source_url)
+                browser.close()
+        except Exception as exc:
+            log.warning("Playwright discovery failed: %s — falling back to static", exc)
+            tree = []
+
+        if tree:
+            all_urls = _collect_all_urls(tree)
+            fallback_links = all_urls
+            log.info(
+                "Playwright discovery complete: %d sections, %d pages total",
+                len(tree),
+                len(all_urls),
+            )
+
+    # -----------------------------------------------------------------------
+    # Strategy 2: Static HTML (works for server-rendered sites)
+    # -----------------------------------------------------------------------
+    if not tree:
+        log.info("Fetching source page (static): %s", source_url)
+        html = fetch_html(source_url)
+        if not html:
+            log.error("Could not load source URL: %s", source_url)
+            sys.exit(1)
+
+        soup = BeautifulSoup(html, "html.parser")
+        nav = _find_nav(soup)
+        if nav:
+            tree = _walk_nav_tree(nav, source_url)
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if href.startswith("/") or href.startswith(parsed.scheme + "://"):
+                full = urljoin(source_url, href)
+                if urlparse(full).netloc == parsed.netloc:
+                    fallback_links.append(full)
+        fallback_links = list(dict.fromkeys(fallback_links))
+
+    # -----------------------------------------------------------------------
+    # Strategy 3: Sitemap.xml fallback + category map
+    # -----------------------------------------------------------------------
+    if not tree:
+        log.info("No sidebar found — trying sitemap.xml")
         sitemap_urls = _fetch_sitemap_urls(base_url, source_path + "/")
         if not sitemap_urls:
             sitemap_urls = _fetch_sitemap_urls(base_url, source_path)
         if sitemap_urls:
-            log.info("Using sitemap.xml: %d URLs found — applying category hierarchy", len(sitemap_urls))
-            tree = _sitemap_urls_to_tree(sitemap_urls, apply_category_map=True)
-            fallback_links = sitemap_urls
-        else:
-            log.warning("Sitemap yielded no matching URLs — discovery incomplete")
-    elif not tree and fallback_links:
-        log.warning("No structured sidebar found — using flat link list")
-        for url in fallback_links:
-            path_parts = urlparse(url).path.strip("/").split("/")
-            title = path_parts[-1].replace("-", " ").replace("_", " ").title() if path_parts else "Page"
-            tree.append({"title": title, "url": url, "depth": 0, "children": []})
-    elif tree:
-        # Sidebar-based tree found — check if it's suspiciously flat
-        all_urls = _collect_all_urls(tree)
-        has_children = any(n.get("children") for n in tree)
-        if not has_children and len(all_urls) > 20:
             log.info(
-                "Sidebar tree is flat (%d pages, no hierarchy) — applying category map",
-                len(all_urls),
+                "Sitemap: %d URLs — applying %s",
+                len(sitemap_urls),
+                "category hierarchy" if apply_category_map else "path grouping",
             )
+            tree = _sitemap_urls_to_tree(sitemap_urls, apply_category_map=apply_category_map)
+            fallback_links = sitemap_urls
+        elif fallback_links:
+            log.warning("No sitemap — building flat tree from page links")
+            for url in fallback_links:
+                path_parts = urlparse(url).path.strip("/").split("/")
+                title = path_parts[-1].replace("-", " ").replace("_", " ").title() if path_parts else "Page"
+                tree.append({"title": title, "url": url, "depth": 0, "children": []})
+        else:
+            log.error("Could not discover any pages. Check the source URL.")
+            sys.exit(1)
+
+    # If we got a static/sitemap tree that is suspiciously flat, apply category map
+    if not use_playwright and apply_category_map:
+        all_urls = _collect_all_urls(tree)
+        has_depth = any(n.get("children") for n in tree)
+        if not has_depth and len(all_urls) > 20:
+            log.info("Tree is flat (%d pages) — applying Acceldata category map", len(all_urls))
             tree = _apply_category_hierarchy(tree)
 
     log.info(
-        "Discovery: %d top-level tree nodes, %d fallback links",
+        "Discovery complete: %d top-level sections/nodes, %d total pages",
         len(tree),
-        len(fallback_links),
+        len(_collect_all_urls(tree)),
     )
     return tree, fallback_links
 
@@ -926,13 +1144,21 @@ def _html_to_markdown_fallback(html: str) -> str:
     return "\n".join(lines)
 
 
-def fetch_and_convert_page(url: str) -> dict | None:
+def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
     """
     Fetch a page, extract main content, handle callouts + tabs, convert to Markdown.
+
+    If pw_browser is supplied (a Playwright Browser instance), uses it to render
+    the page with JavaScript so that dynamically-loaded content is included.
+    Otherwise falls back to a plain HTTP GET.
+
     Returns dict with keys: url, title, markdown, raw_html
     """
     log.debug("Fetching page: %s", url)
-    html = fetch_html(url)
+    if pw_browser is not None:
+        html = _fetch_html_playwright(url, pw_browser)
+    else:
+        html = fetch_html(url)
     if not html:
         log.warning("Could not fetch page: %s", url)
         return None
@@ -1272,6 +1498,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable the Acceldata category map and use generic path-based grouping instead",
     )
+    p.add_argument(
+        "--playwright",
+        action="store_true",
+        help=(
+            "Use a headless Chromium browser (via Playwright) to render the JavaScript sidebar "
+            "and capture the full multi-level section hierarchy. This is the RECOMMENDED option "
+            "for docs.acceldata.io because it is a JS SPA. Also uses Playwright for page content "
+            "fetching so dynamically-rendered content is included. "
+            "Requires: pip install playwright && playwright install chromium"
+        ),
+    )
     return p.parse_args()
 
 
@@ -1299,10 +1536,14 @@ def main() -> None:
     org_id = int(org_id_raw) if org_id_raw else 0
     product_id = int(product_id_raw) if product_id_raw else 0
 
+    use_playwright = getattr(args, "playwright", False)
+    use_category_map = not args.no_category_map
+
     log.info("=== DeveloperHub → AccelDocs Migration ===")
     log.info("Source: %s", args.source)
     log.info("Backend: %s", args.backend)
     log.info("Dry run: %s", args.dry_run)
+    log.info("Playwright: %s", use_playwright)
     log.info("Create Drive docs: %s", getattr(args, "create_drive_docs", False))
 
     # Load or start fresh state
@@ -1315,26 +1556,26 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Step 1: Discover structure
     # -----------------------------------------------------------------------
-    if state.get("tree"):
+    if state.get("tree") and not use_playwright:
+        # Reuse cached tree (skip re-discovery). When --playwright is set we
+        # always re-discover because the previous run may have used the flat sitemap.
         tree: list[dict] = state["tree"]
         fallback_links: list[str] = state.get("fallback_links", [])
         log.info("Using cached tree from state (%d top-level nodes)", len(tree))
         # Re-apply category map if the cached tree is flat (from a previous dry run)
         all_urls_cached = _collect_all_urls(tree)
         has_children_cached = any(n.get("children") for n in tree)
-        if not has_children_cached and len(all_urls_cached) > 10 and not args.no_category_map:
+        if not has_children_cached and len(all_urls_cached) > 10 and use_category_map:
             log.info("Cached tree is flat — applying category hierarchy now")
             tree = _apply_category_hierarchy(tree)
             state["tree"] = tree
             save_state(state)
     else:
-        tree, fallback_links = discover_structure(args.source)
-        # Apply category map override for the sitemap fallback if needed
-        if args.no_category_map:
-            # Re-discover without category map
-            all_flat = _collect_all_urls(tree)
-            if all_flat:
-                tree = _sitemap_urls_to_tree(all_flat, apply_category_map=False)
+        tree, fallback_links = discover_structure(
+            args.source,
+            use_playwright=use_playwright,
+            apply_category_map=use_category_map,
+        )
         state["tree"] = tree
         state["fallback_links"] = fallback_links
         state["source"] = args.source
@@ -1363,17 +1604,18 @@ def main() -> None:
         _print_tree(tree)
         print(f"\n{'=' * 60}")
         print(f"Total unique page URLs: {total_pages}")
-        print(f"\nTo run the full import:")
+        print(f"\nRecommended: use --playwright for the full multi-level hierarchy:")
+        print(f"  pip install playwright && playwright install chromium")
         print(
-            f"  python scripts/migrate_developerhub.py \\\n"
+            f"\n  python scripts/migrate_developerhub.py \\\n"
             f"    --source {args.source} \\\n"
             f"    --backend {args.backend} \\\n"
             f"    --token <YOUR_TOKEN> \\\n"
             f"    --org-id <YOUR_ORG_ID> \\\n"
-            f"    --product-id <YOUR_PRODUCT_ID>"
+            f"    --product-id <YOUR_PRODUCT_ID> \\\n"
+            f"    --playwright"
         )
-        print(f"\nTo also create Google Drive docs (editability):")
-        print(f"    add --create-drive-docs")
+        print(f"\nTo also create Google Drive docs add:  --create-drive-docs")
         return
 
     # -----------------------------------------------------------------------
@@ -1385,14 +1627,53 @@ def main() -> None:
     urls_to_fetch = [u for u in all_page_urls if u not in already_fetched]
     log.info("Pages to fetch: %d (already cached: %d)", len(urls_to_fetch), len(already_fetched))
 
-    for idx, url in enumerate(urls_to_fetch, 1):
-        log.info("[%d/%d] Fetching: %s", idx, len(urls_to_fetch), url)
-        result = fetch_and_convert_page(url)
-        if result:
-            page_data[url] = result
-            state["page_data"] = page_data
-            if idx % 10 == 0:
-                save_state(state)
+    if use_playwright and _check_playwright() and urls_to_fetch:
+        # Use a single persistent browser instance for all page fetches.
+        # This is much faster than launching a new browser per page.
+        log.info("Using Playwright browser for page content fetching…")
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    )
+                )
+                for idx, url in enumerate(urls_to_fetch, 1):
+                    log.info("[%d/%d] Fetching (Playwright): %s", idx, len(urls_to_fetch), url)
+                    result = fetch_and_convert_page(url, pw_browser=context)
+                    if result:
+                        page_data[url] = result
+                        state["page_data"] = page_data
+                        if idx % 10 == 0:
+                            save_state(state)
+                    time.sleep(_REQUEST_DELAY)
+                browser.close()
+        except Exception as exc:
+            log.warning("Playwright page fetch failed: %s — falling back to static HTTP", exc)
+            # Fall back to static for remaining pages
+            for idx, url in enumerate(urls_to_fetch, 1):
+                if url in page_data:
+                    continue
+                log.info("[%d/%d] Fetching (static): %s", idx, len(urls_to_fetch), url)
+                result = fetch_and_convert_page(url)
+                if result:
+                    page_data[url] = result
+                    state["page_data"] = page_data
+                    if idx % 10 == 0:
+                        save_state(state)
+    else:
+        for idx, url in enumerate(urls_to_fetch, 1):
+            log.info("[%d/%d] Fetching: %s", idx, len(urls_to_fetch), url)
+            result = fetch_and_convert_page(url)
+            if result:
+                page_data[url] = result
+                state["page_data"] = page_data
+                if idx % 10 == 0:
+                    save_state(state)
 
     save_state(state)
     log.info("Fetched %d pages total", len(page_data))
