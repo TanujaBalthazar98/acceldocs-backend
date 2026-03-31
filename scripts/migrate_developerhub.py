@@ -102,6 +102,32 @@ def save_state(state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Acceldata top-level tabs
+# The docs site has three independent tab sections visible at the top of the
+# page (Documentation, API, Release Notes). Each has its own sidebar hierarchy.
+# --all-tabs will migrate all of them, creating a top-level section per tab.
+# ---------------------------------------------------------------------------
+
+ACCELDATA_TABS: list[dict[str, str]] = [
+    {
+        "name": "Documentation",
+        "url": "https://docs.acceldata.io/documentation",
+        "sitemap_prefix": "/documentation/",
+    },
+    {
+        "name": "API Reference",
+        "url": "https://docs.acceldata.io/api",
+        "sitemap_prefix": "/api/",
+    },
+    {
+        "name": "Release Notes",
+        "url": "https://docs.acceldata.io/release",
+        "sitemap_prefix": "/release/",
+    },
+]
+
+
+# ---------------------------------------------------------------------------
 # Acceldata category map
 # Each entry: category name → list of URL slug prefixes that belong to it.
 # Pages whose slug starts with any of these prefixes are grouped into that
@@ -1509,6 +1535,16 @@ def parse_args() -> argparse.Namespace:
             "Requires: pip install playwright && playwright install chromium"
         ),
     )
+    p.add_argument(
+        "--all-tabs",
+        action="store_true",
+        help=(
+            "Migrate ALL top-level tabs from the Acceldata docs site: Documentation, "
+            "API Reference, and Release Notes. Each tab becomes a top-level section in "
+            "AccelDocs with its own nested hierarchy. Without this flag, only the single "
+            "tab specified by --source is migrated."
+        ),
+    )
     return p.parse_args()
 
 
@@ -1538,13 +1574,29 @@ def main() -> None:
 
     use_playwright = getattr(args, "playwright", False)
     use_category_map = not args.no_category_map
+    use_all_tabs = getattr(args, "all_tabs", False)
 
     log.info("=== DeveloperHub → AccelDocs Migration ===")
     log.info("Source: %s", args.source)
+    log.info("All tabs: %s", use_all_tabs)
     log.info("Backend: %s", args.backend)
     log.info("Dry run: %s", args.dry_run)
     log.info("Playwright: %s", use_playwright)
     log.info("Create Drive docs: %s", getattr(args, "create_drive_docs", False))
+
+    # Determine which source URLs to process
+    if use_all_tabs:
+        sources = [
+            {"name": tab["name"], "url": tab["url"]}
+            for tab in ACCELDATA_TABS
+        ]
+        log.info(
+            "All-tabs mode: will process %d tabs: %s",
+            len(sources),
+            ", ".join(s["name"] for s in sources),
+        )
+    else:
+        sources = [{"name": None, "url": args.source}]
 
     # Load or start fresh state
     state: dict = {}
@@ -1554,15 +1606,13 @@ def main() -> None:
             log.info("Loaded existing state from %s", STATE_FILE)
 
     # -----------------------------------------------------------------------
-    # Step 1: Discover structure
+    # Step 1: Discover structure (for each source tab)
     # -----------------------------------------------------------------------
-    if state.get("tree") and not use_playwright:
-        # Reuse cached tree (skip re-discovery). When --playwright is set we
-        # always re-discover because the previous run may have used the flat sitemap.
+    if state.get("tree") and not use_playwright and not use_all_tabs:
+        # Reuse cached tree (skip re-discovery) — only for single-source mode.
         tree: list[dict] = state["tree"]
         fallback_links: list[str] = state.get("fallback_links", [])
         log.info("Using cached tree from state (%d top-level nodes)", len(tree))
-        # Re-apply category map if the cached tree is flat (from a previous dry run)
         all_urls_cached = _collect_all_urls(tree)
         has_children_cached = any(n.get("children") for n in tree)
         if not has_children_cached and len(all_urls_cached) > 10 and use_category_map:
@@ -1571,14 +1621,46 @@ def main() -> None:
             state["tree"] = tree
             save_state(state)
     else:
-        tree, fallback_links = discover_structure(
-            args.source,
-            use_playwright=use_playwright,
-            apply_category_map=use_category_map,
-        )
+        tree = []
+        fallback_links = []
+
+        for source in sources:
+            tab_name = source["name"]
+            tab_url = source["url"]
+            log.info("--- Discovering: %s (%s) ---", tab_name or "source", tab_url)
+
+            tab_tree, tab_links = discover_structure(
+                tab_url,
+                use_playwright=use_playwright,
+                apply_category_map=use_category_map,
+            )
+
+            if use_all_tabs and tab_name and tab_tree:
+                # Wrap the tab's tree under a top-level section node named
+                # after the tab (e.g. "Documentation", "API Reference",
+                # "Release Notes"). This preserves the site's tab structure
+                # in AccelDocs as top-level sections.
+                total_tab_pages = len(_collect_all_urls(tab_tree))
+                log.info(
+                    "Tab '%s': %d sections, %d pages",
+                    tab_name,
+                    len(tab_tree),
+                    total_tab_pages,
+                )
+                tree.append({
+                    "title": tab_name,
+                    "url": None,
+                    "depth": 0,
+                    "children": tab_tree,
+                })
+            else:
+                tree.extend(tab_tree)
+            fallback_links.extend(tab_links)
+
         state["tree"] = tree
-        state["fallback_links"] = fallback_links
+        state["fallback_links"] = list(dict.fromkeys(fallback_links))
         state["source"] = args.source
+        state["all_tabs"] = use_all_tabs
         state["discovered_at"] = datetime.now(timezone.utc).isoformat()
         save_state(state)
 
@@ -1604,9 +1686,15 @@ def main() -> None:
         _print_tree(tree)
         print(f"\n{'=' * 60}")
         print(f"Total unique page URLs: {total_pages}")
+        if use_all_tabs:
+            print("\nTabs discovered:")
+            for node in tree:
+                if not node.get("url") and node.get("children"):
+                    tab_pages = len(_collect_all_urls([node]))
+                    print(f"  • {node['title']}: {tab_pages} pages, {len(node['children'])} sub-sections")
         print(f"\nRecommended: use --playwright for the full multi-level hierarchy:")
         print(f"  pip install playwright && playwright install chromium")
-        print(
+        import_cmd = (
             f"\n  python scripts/migrate_developerhub.py \\\n"
             f"    --source {args.source} \\\n"
             f"    --backend {args.backend} \\\n"
@@ -1615,6 +1703,9 @@ def main() -> None:
             f"    --product-id <YOUR_PRODUCT_ID> \\\n"
             f"    --playwright"
         )
+        if not use_all_tabs:
+            import_cmd += " \\\n    --all-tabs  # migrates Documentation + API + Release Notes"
+        print(import_cmd)
         print(f"\nTo also create Google Drive docs add:  --create-drive-docs")
         return
 

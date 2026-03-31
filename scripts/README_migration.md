@@ -203,3 +203,53 @@ python scripts/migrate_developerhub.py \
 
 If playwright is not installed the script falls back to the sitemap + category
 map approach automatically.
+
+---
+
+## Migrating all tabs (Documentation + API + Release Notes)
+
+The Acceldata docs site has three top-level tabs visible at the top of the page.
+By default the migration only processes the single URL given by `--source`.
+
+Use `--all-tabs` to migrate all three tabs in one run. Each tab becomes a
+top-level section in AccelDocs:
+
+```
+AccelDocs
+├─ Documentation
+│  ├─ Getting Started
+│  ├─ Core Concepts
+│  ├─ User Guide → Data Reliability → Discover Assets → ...
+│  └─ ...
+├─ API Reference
+│  ├─ Authentication
+│  └─ Endpoints
+└─ Release Notes
+   ├─ v3.0
+   └─ ...
+```
+
+### Usage
+
+```bash
+# Dry run — see all three tabs
+python scripts/migrate_developerhub.py \
+  --source https://docs.acceldata.io/documentation \
+  --all-tabs \
+  --playwright \
+  --dry-run
+
+# Full import with all tabs
+python scripts/migrate_developerhub.py \
+  --source https://docs.acceldata.io/documentation \
+  --all-tabs \
+  --playwright \
+  --backend https://your-backend.vercel.app \
+  --token eyJhbGciOi... \
+  --org-id 42 \
+  --product-id 17
+```
+
+The `--source` URL is still required (it sets the base domain) but when
+`--all-tabs` is present, all three tab URLs from `ACCELDATA_TABS` are
+processed automatically.
