@@ -72,6 +72,7 @@ class PageImport(BaseModel):
     title: str
     markdown_content: str = ""
     html_content: str = ""  # If provided, stored directly — bypasses Markdown conversion
+    drive_html_content: str = ""  # Google Docs-compatible HTML for Drive (admonitions as blockquotes)
     section_id: int | None = None
     display_order: int = 0
     create_drive_doc: bool = False  # If True, also create a Google Doc in the section's Drive folder
@@ -600,10 +601,13 @@ async def import_page(
                 org = db.query(Organization).filter_by(id=org_id).first()
                 parent_folder_id = org.drive_folder_id if org else None
 
-            # Upload HTML content into the Google Doc (not blank)
-            if html_content:
+            # Upload HTML content into the Google Doc (not blank).
+            # Use drive_html_content if provided (Google Docs-compatible HTML),
+            # otherwise fall back to the standard html_content.
+            drive_html = body.drive_html_content or html_content
+            if drive_html:
                 google_doc_id = _create_drive_doc_with_content(
-                    service, title, html_content, parent_folder_id,
+                    service, title, drive_html, parent_folder_id,
                 )
             else:
                 google_doc_id = _create_drive_doc(service, title, parent_folder_id)

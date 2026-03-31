@@ -2097,6 +2097,74 @@ def _clean_developerhub_html(soup_elem: Tag) -> None:
         _strip_attrs(tag)
 
 
+def _admonitions_to_blockquotes(html: str) -> str:
+    """
+    Convert AccelDocs-style admonition HTML to Google Docs-compatible blockquotes.
+
+    AccelDocs admonitions use:
+        <div class="admonition warning">
+          <p class="admonition-title">Warning</p>
+          <div class="admonition-body"><p>Body text...</p></div>
+        </div>
+
+    Google Docs only renders semantic HTML. We convert to:
+        <blockquote>
+          <p><strong>Warning:</strong></p>
+          <p>Body text...</p>
+        </blockquote>
+
+    Google Docs renders <blockquote> as indented text with a left border,
+    which is the closest equivalent to a callout box.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for adv in list(soup.find_all("div", class_="admonition")):
+        title_elem = adv.find("p", class_="admonition-title")
+        body_elem = adv.find("div", class_="admonition-body")
+
+        # Extract type from class for blockquote styling
+        adv_classes = adv.get("class", [])
+        atype = next(
+            (c for c in adv_classes if c != "admonition"),
+            "note",
+        )
+
+        title_text = title_elem.get_text(strip=True) if title_elem else atype.capitalize()
+        body_html = body_elem.decode_contents().strip() if body_elem else ""
+
+        if not body_html:
+            adv.decompose()
+            continue
+
+        # Build blockquote with bold title
+        blockquote = soup.new_tag("blockquote")
+        title_p = soup.new_tag("p")
+        title_strong = soup.new_tag("strong")
+        title_strong.string = f"{title_text}:"
+        title_p.append(title_strong)
+        blockquote.append(title_p)
+
+        # Parse body HTML and append children (wrap bare text in <p> tags)
+        body_soup = BeautifulSoup(body_html, "html.parser")
+        body_children = list(body_soup.children)
+        if not body_children or all(isinstance(c, str) and c.strip() for c in body_children):
+            # No block elements — wrap the whole thing in a <p>
+            p = soup.new_tag("p")
+            p.string = body_html
+            blockquote.append(p)
+        else:
+            for child in body_children:
+                if isinstance(child, str) and child.strip():
+                    p = soup.new_tag("p")
+                    p.string = child.strip()
+                    blockquote.append(p)
+                else:
+                    blockquote.append(child)
+
+        adv.replace_with(blockquote)
+
+    return str(soup)
+
+
 def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
     """
     Fetch a page, extract main content, handle callouts + tabs, convert to Markdown.
@@ -2278,6 +2346,7 @@ class AccelDocsClient:
         create_drive_doc: bool = False,
         markdown_content: str = "",
         html_content: str = "",
+        drive_html_content: str = "",
     ) -> dict:
         """
         POST /api/pages/import — create a page from HTML or Markdown.
@@ -2285,6 +2354,7 @@ class AccelDocsClient:
         If html_content is provided, it is stored directly (no conversion).
         Otherwise markdown_content is converted to HTML on the backend.
         If create_drive_doc is True, also creates a Google Doc in Drive.
+        drive_html_content provides Google Docs-compatible HTML (admonitions as blockquotes).
         """
         body: dict[str, Any] = {
             "title": title,
@@ -2295,6 +2365,8 @@ class AccelDocsClient:
             body["html_content"] = html_content
         else:
             body["markdown_content"] = markdown_content
+        if drive_html_content:
+            body["drive_html_content"] = drive_html_content
         if create_drive_doc:
             body["create_drive_doc"] = True
         return self._post_json("/api/pages/import", body)
@@ -2394,6 +2466,8 @@ def import_hierarchy(
         # over markdown to avoid lossy round-trip
         raw_html = data.get("raw_html") or ""
         markdown = data.get("markdown") or ""
+        # Google Docs-compatible HTML: admonitions as blockquotes
+        drive_html = _admonitions_to_blockquotes(raw_html) if raw_html else ""
 
         log.info("Importing page '%s' (%s) into section=%d", title, url, section_id)
         try:
@@ -2404,6 +2478,7 @@ def import_hierarchy(
                     section_id=section_id,
                     display_order=order,
                     create_drive_doc=create_drive_docs,
+                    drive_html_content=drive_html,
                 )
             else:
                 result = client.import_page(
