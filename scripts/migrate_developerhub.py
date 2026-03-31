@@ -1624,6 +1624,19 @@ def _detect_callout_type(elem: Tag) -> str | None:
     data_type = (elem.get("data-type") or elem.get("data-callout-type") or "").lower()
     role = (elem.get("role") or "").lower()
 
+    # Check pluginobject JSON attribute (DeveloperHub <app-callout> Angular component)
+    plugin_obj = elem.get("pluginobject")
+    if plugin_obj:
+        try:
+            import json
+            obj = json.loads(plugin_obj)
+            data = obj.get("data", {})
+            plugin_type = (data.get("type") or "").lower()
+            if plugin_type in _CALLOUT_TYPE_MAP:
+                return _CALLOUT_TYPE_MAP[plugin_type]
+        except Exception:
+            pass
+
     # data attribute takes precedence
     for raw in [data_type, role]:
         if raw in _CALLOUT_TYPE_MAP:
@@ -1860,7 +1873,7 @@ def _html_to_markdown_pandoc(html: str) -> str:
         [
             "pandoc",
             "--from=html",
-            "--to=gfm+pipe_tables+task_lists+fenced_code_blocks",
+            "--to=gfm+pipe_tables+task_lists",
             "--wrap=none",
         ],
         input=html,
@@ -1914,57 +1927,74 @@ def _convert_callouts_to_admonition_html(soup_elem: Tag) -> None:
         <div class="callout warning">
           <div class="callout-text">Do not restart the pods...</div>
         </div>
+    Or Angular component:
+        <app-callout pluginobject='{"data":{"text":"...","type":"info"}}'>
     Or:
         <span class="cbadge info">Important</span>
 
     Converts to:
         <div class="admonition warning">
           <p class="admonition-title">Warning</p>
-          <p>Do not restart the pods...</p>
+          <div class="admonition-body">Do not restart the pods...</div>
         </div>
 
     This matches the CSS in AccelDocs' docs.html template.
     """
-    for tag_name in ["aside", "div", "section", "blockquote"]:
+    import json as _json
+
+    # Include app-callout Angular component alongside standard HTML elements
+    for tag_name in ["aside", "div", "section", "blockquote", "app-callout"]:
         for elem in list(soup_elem.find_all(tag_name)):
             atype = _detect_callout_type(elem)
             if not atype:
                 continue
 
-            # Skip nested callout-text divs (handled by their parent callout div)
             classes = " ".join(elem.get("class", []) or []).lower()
             if "callout-text" in classes:
                 continue
 
-            # Extract title: DeveloperHub uses <span class="cbadge info"> or
-            # a dedicated title child element
-            title_elem = elem.find(
-                lambda t: t and t.name in ("p", "span", "strong", "h1", "h2", "h3", "h4", "h5")
-                and any(
-                    cls in " ".join(t.get("class", []) or []).lower()
-                    for cls in ("title", "header", "heading", "callout-title", "admonition-title", "cbadge")
+            # Handle <app-callout> Angular component: extract from pluginobject JSON
+            plugin_obj = elem.get("pluginobject")
+            if plugin_obj:
+                try:
+                    obj = _json.loads(plugin_obj)
+                    data = obj.get("data", {})
+                    body_html = data.get("text", "").strip()
+                    title_text = (data.get("title") or atype.capitalize()).strip()
+                except Exception:
+                    body_html = ""
+                    title_text = atype.capitalize()
+            else:
+                # Extract title from child elements
+                title_elem = elem.find(
+                    lambda t: t and t.name in ("p", "span", "strong", "h1", "h2", "h3", "h4", "h5")
+                    and any(
+                        cls in " ".join(t.get("class", []) or []).lower()
+                        for cls in ("title", "header", "heading", "callout-title", "admonition-title", "cbadge")
+                    )
                 )
-            )
-            if title_elem:
-                title_text = title_elem.get_text(strip=True)
-                title_elem.decompose()
-            else:
-                title_text = atype.capitalize()
+                if title_elem:
+                    title_text = title_elem.get_text(strip=True)
+                    title_elem.decompose()
+                else:
+                    title_text = atype.capitalize()
 
-            # Extract body: DeveloperHub wraps body in <div class="callout-text">
-            callout_text_div = elem.find(class_="callout-text")
-            if callout_text_div:
-                body_html = callout_text_div.decode_contents().strip()
-            else:
-                body_html = elem.decode_contents().strip()
+                # Extract body from callout-text wrapper
+                callout_text_div = elem.find(class_="callout-text")
+                if callout_text_div:
+                    body_html = callout_text_div.decode_contents().strip()
+                else:
+                    body_html = elem.decode_contents().strip()
 
             if not body_html:
                 continue
 
+            # Build admonition: body may contain block elements (p, ul, etc.)
+            # Use div wrapper instead of <p> to avoid invalid nesting
             admonition_html = (
                 f'<div class="admonition {atype}">'
                 f'<p class="admonition-title">{title_text}</p>'
-                f'<p>{body_html}</p>'
+                f'<div class="admonition-body">{body_html}</div>'
                 f'</div>'
             )
             new_elem = BeautifulSoup(admonition_html, "html.parser")
@@ -2048,10 +2078,9 @@ def _clean_developerhub_html(soup_elem: Tag) -> None:
         ]):
             div.decompose()
 
-    # Strip data-* attributes and Angular-specific attributes
-    for tag in soup_elem.find_all(True):
+    def _strip_attrs(tag: Tag) -> None:
         if not hasattr(tag, "attrs") or not tag.attrs:
-            continue
+            return
         attrs_to_remove = [
             attr for attr in tag.attrs
             if (attr.startswith("data-") and attr not in ("data-tab",))
@@ -2061,6 +2090,11 @@ def _clean_developerhub_html(soup_elem: Tag) -> None:
         ]
         for attr in attrs_to_remove:
             del tag[attr]
+
+    # Strip attrs from root element and all descendants
+    _strip_attrs(soup_elem)
+    for tag in soup_elem.find_all(True):
+        _strip_attrs(tag)
 
 
 def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
