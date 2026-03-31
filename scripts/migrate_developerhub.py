@@ -2292,8 +2292,8 @@ def rewrite_html_internal_links(html: str, source_domain: str, slug_map: dict[st
     Rewrite internal links in HTML content.
 
     Converts <a href="https://docs.acceldata.io/pulse/..."> links to
-    [[MIGRATED:slug]] placeholders that AccelDocs can resolve to
-    the correct page URLs after import.
+    [[MIGRATED:path]] placeholders (URL path) that can be resolved to
+    /pages/{id} URLs after import using old_url_to_page_id mapping.
 
     External links and anchor-only links (#section) are left unchanged.
     """
@@ -2303,24 +2303,21 @@ def rewrite_html_internal_links(html: str, source_domain: str, slug_map: dict[st
     for anchor in soup.find_all("a", href=True):
         href = anchor["href"]
         parsed = urlparse(href)
-
         # Skip external links
         if parsed.netloc and parsed.netloc != source_domain:
             continue
-
         # Skip anchor-only links (e.g., #supported-databases)
         if not parsed.path or parsed.path == "/":
             continue
-
         path = parsed.path.rstrip("/")
         slug = slug_map.get(path)
         if slug:
-            # Store the slug in a data attribute for later resolution
-            anchor["href"] = f"[[MIGRATED:{slug}]]"
+            # Store the path as identifier for later resolution
+            # Format: [[MIGRATED:/pulse/user-guide/overview]]
+            anchor["href"] = f"[[MIGRATED:{path}]]"
             # Preserve fragment if present
             if parsed.fragment:
                 anchor["href"] += f"#{parsed.fragment}"
-
     return str(soup)
 
 
@@ -2605,9 +2602,12 @@ def _resolve_and_patch_links(
 
 def resolve_migrated_links_html(html: str, old_url_to_page_id: dict[str, int]) -> str:
     """
-    Resolve [[MIGRATED:slug]] placeholders in HTML to /pages/{id} URLs.
+    Resolve [[MIGRATED:path]] placeholders in HTML to /pages/{id} URLs.
 
-    Also handles fragment anchors: [[MIGRATED:slug]]#section → /pages/{id}#section
+    Also handles fragment anchors: [[MIGRATED:/path]]#section → /pages/{id}#section
+
+    Placeholders store the URL path (e.g., /pulse/user-guide/overview), which is
+    used to look up the page_id from old_url_to_page_id.
     """
     from bs4 import BeautifulSoup
 
@@ -2618,24 +2618,27 @@ def resolve_migrated_links_html(html: str, old_url_to_page_id: dict[str, int]) -
         if not href.startswith("[[MIGRATED:"):
             continue
 
-        # Extract slug and optional fragment
+        # Extract path and optional fragment
         placeholder = href
         fragment = ""
         if "#" in href:
             placeholder, fragment = href.split("#", 1)
             fragment = f"#{fragment}"
 
-        slug = placeholder.replace("[[MIGRATED:", "").replace("]]", "")
+        path = placeholder.replace("[[MIGRATED:", "").replace("]]", "")
+
+        # Look up the page_id using the full path as key
         page_id = None
         for old_url, pid in old_url_to_page_id.items():
-            if _slugify(old_url.rstrip("/").rsplit("/", 1)[-1]) == slug:
+            old_path = urlparse(old_url).path.rstrip("/")
+            if old_path == path:
                 page_id = pid
                 break
 
         if page_id:
             anchor["href"] = f"/pages/{page_id}{fragment}"
         else:
-            log.warning("Could not resolve migrated slug: %s", slug)
+            log.warning("Could not resolve migrated path: %s", path)
 
     return str(soup)
 
