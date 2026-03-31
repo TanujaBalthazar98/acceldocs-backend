@@ -711,24 +711,19 @@ def _walk_angular_tree(element: Tag, base_url: str, depth: int = 0) -> list[dict
             "_is_category": is_category,
         })
 
-    tree: list[dict] = []
-    for node in parsed_nodes:
-        lvl = node["_level"]
+    # Use the generic depth-based tree builder to handle arbitrary nesting
+    # (levels 1–N). The parsed_nodes already have correct 'depth' set to
+    # node_level - 1, so level-1 → depth 0, level-2 → depth 1, etc.
+    tree = _depth_list_to_tree(parsed_nodes)
 
-        if lvl == 1:
-            tree.append(node)
-        elif lvl == 2:
-            if tree and isinstance(tree[-1], dict) and tree[-1].get("_level") == 1:
-                tree[-1]["children"].append(node)
-            else:
-                tree.append(node)
+    # Recursively clean up private keys from all nodes
+    def _cleanup(nodes: list[dict]) -> None:
+        for n in nodes:
+            n.pop("_level", None)
+            n.pop("_is_category", None)
+            _cleanup(n.get("children", []))
 
-    for node in tree:
-        node.pop("_level", None)
-        node.pop("_is_category", None)
-        for child in node.get("children", []):
-            child.pop("_level", None)
-            child.pop("_is_category", None)
+    _cleanup(tree)
 
     return tree
 
@@ -914,7 +909,11 @@ def _pw_discover_versions(page_obj: Any) -> list[dict]:
 
 
 def _pw_switch_version(page_obj: Any, version_label: str) -> bool:
-    """Click the version picker and select the given version. Returns True on success."""
+    """Click the version picker and select the given version. Returns True on success.
+
+    Uses normalized text matching: strips whitespace and compares case-insensitively,
+    falling back to substring containment if exact match fails.
+    """
     locator = page_obj.locator(".version-picker-container").first
     try:
         locator.click(force=True)
@@ -923,19 +922,36 @@ def _pw_switch_version(page_obj: Any, version_label: str) -> bool:
         return False
 
     items = page_obj.locator(".version-picker-container .dropdown-item").all()
+    target = version_label.strip().lower()
+
+    # Pass 1: exact case-insensitive match
     for item in items:
         txt = item.inner_text().strip()
-        if txt == version_label:
+        if txt.lower() == target:
             try:
                 item.click(force=True)
                 page_obj.wait_for_timeout(4000)
-                log.info("Switched to version: %s (now at %s)", version_label, page_obj.url)
+                log.info("Switched to version: %s (now at %s)", txt, page_obj.url)
                 return True
             except Exception as exc:
-                log.warning("Failed to click version '%s': %s", version_label, exc)
+                log.warning("Failed to click version '%s': %s", txt, exc)
                 return False
 
-    log.warning("Version '%s' not found in dropdown", version_label)
+    # Pass 2: substring containment (handles "Pulse 4.1.x" matching "4.1.x")
+    for item in items:
+        txt = item.inner_text().strip()
+        if target in txt.lower() or txt.lower() in target:
+            try:
+                item.click(force=True)
+                page_obj.wait_for_timeout(4000)
+                log.info("Switched to version: %s (fuzzy match for '%s', now at %s)", txt, version_label, page_obj.url)
+                return True
+            except Exception as exc:
+                log.warning("Failed to click version '%s': %s", txt, exc)
+                return False
+
+    available = [item.inner_text().strip() for item in items]
+    log.warning("Version '%s' not found in dropdown. Available: %s", version_label, available)
     return False
 
 
@@ -992,14 +1008,18 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
     """
     Extract the full navigation tree from a Playwright page object.
 
+    DeveloperHub uses an Angular tree with an accordion pattern — only one
+    section can be expanded at a time. Child nodes are loaded into the DOM when
+    their parent is expanded.
+
     Strategy:
     1. Wait for page to settle.
-    2. Click all expand/toggle buttons in the sidebar (category-container rows
-       for DeveloperHub Angular tree, plus standard nav/aria patterns).
-    3. Parse the rendered HTML with BeautifulSoup.
-    4. Detect whether sidebar is an Angular tree component or a standard nav/ul,
-       and walk accordingly.
-    5. Return the tree in the same dict format used by _walk_nav_tree().
+    2. Iterate through all category sections: click to expand, capture level-2
+       children from the DOM (accordion collapses previous sections but their
+       children remain in the DOM).
+    3. For each level-2 child that has sub-pages (tree-node-collapsed), navigate
+       to that page and extract level-3 sub-pages from the sidebar.
+    4. Return a 3-level tree: sections > pages/subsections > sub-pages.
     """
     try:
         page_obj.wait_for_load_state("networkidle", timeout=15000)
@@ -1007,42 +1027,10 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
         page_obj.wait_for_load_state("domcontentloaded", timeout=15000)
         page_obj.wait_for_timeout(3000)
 
-    expand_selectors = [
-        ".angular-tree-component .category-container",
-        ".sidebar .category-container",
-        ".angular-tree-component .tree-node-collapsed",
-        ".sidebar .tree-node-collapsed",
-        ".angular-tree-component [aria-expanded='false']",
-        ".sidebar [aria-expanded='false']",
-        "[class*='sidebar'] [aria-expanded='false']",
-        "[aria-expanded='false']",
-    ]
-
-    for sel in expand_selectors:
-        try:
-            buttons = page_obj.query_selector_all(sel)
-            for btn in buttons:
-                try:
-                    btn.click(timeout=500)
-                    page_obj.wait_for_timeout(150)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    for sel in expand_selectors[:2]:
-        try:
-            buttons = page_obj.query_selector_all(sel)
-            for btn in buttons:
-                try:
-                    btn.click(timeout=300)
-                    page_obj.wait_for_timeout(100)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    page_obj.wait_for_timeout(1000)
+    try:
+        page_obj.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        page_obj.wait_for_timeout(3000)
 
     html = page_obj.content()
     soup = BeautifulSoup(html, "html.parser")
@@ -1052,16 +1040,17 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
         nav_classes = " ".join(nav.get("class", [])) if isinstance(nav.get("class"), list) else nav.get("class", "") or ""
 
         if "angular-tree-component" in nav_classes:
-            tree = _walk_angular_tree(nav, base_url)
-            all_urls = _collect_all_urls(tree)
-            has_depth = any(n.get("children") for n in tree)
-            log.info(
-                "Playwright sidebar (Angular tree): %d top-level nodes, %d total URLs, deep=%s",
-                len(tree),
-                len(all_urls),
-                has_depth,
-            )
-            return tree
+            tree = _pw_extract_angular_deep(page_obj, nav, base_url)
+            if tree:
+                all_urls = _collect_all_urls(tree)
+                has_depth = any(n.get("children") for n in tree)
+                log.info(
+                    "Playwright Angular deep: %d sections, %d total URLs, deep=%s",
+                    len(tree),
+                    len(all_urls),
+                    has_depth,
+                )
+                return tree
 
         tree = _walk_nav_tree(nav, base_url)
         all_urls = _collect_all_urls(tree)
@@ -1104,6 +1093,266 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
         return []
 
     return _depth_list_to_tree(flat_nodes)
+
+
+def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str) -> list[dict]:
+    """
+    Extract a deep (3+ level) navigation tree from a DeveloperHub Angular tree.
+
+    DeveloperHub sidebar is an Angular tree with accordion behavior: only one
+    top-level section is expanded at a time. Collapsed sections' children are
+    not visible in the DOM, but they ARE present (just hidden with CSS).
+
+    Algorithm:
+    1. Get all section elements and names.
+    2. Iterate through each section: click to expand it, wait for the accordion
+       to settle, extract level-2 children for that section by finding nodes between
+       this section and the next in the DOM. Previous sections collapse but their
+       nodes remain in the DOM (hidden), so we capture them during iteration.
+    3. For each level-2 child marked as collapsed (has sub-pages), navigate
+       to that child's URL and extract level-3 sub-pages from its sidebar.
+    """
+    try:
+        page_obj.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        page_obj.wait_for_timeout(3000)
+
+    section_selectors = [
+        ".angular-tree-component .category-container",
+        ".sidebar .category-container",
+    ]
+
+    section_elements: list[Any] = []
+    for sel in section_selectors:
+        try:
+            section_elements = page_obj.query_selector_all(sel)
+            if section_elements:
+                break
+        except Exception:
+            pass
+
+    if not section_elements:
+        log.warning("No category sections found in Angular tree")
+        return []
+
+    section_names: list[str] = []
+    for sec_el in section_elements:
+        try:
+            html = sec_el.inner_html()
+            s_soup = BeautifulSoup(html, "html.parser")
+            span_cat = s_soup.find(
+                "span",
+                class_=lambda x: x and "category" in (" ".join(x) if isinstance(x, list) else (x or "")),
+            )
+            name = span_cat.get_text(strip=True) if span_cat else sec_el.inner_text().strip().split("\n")[0]
+            section_names.append(name)
+        except Exception:
+            section_names.append("")
+
+    log.info("Angular accordion: found %d sections, extracting L2 children", len(section_names))
+
+    current_url = page_obj.url
+    tree: list[dict] = []
+
+    skipped_sections = 0
+    for sec_idx, sec_name in enumerate(section_names):
+        if not sec_name:
+            continue
+
+        if sec_idx > 0:
+            try:
+                page_obj.goto(current_url, wait_until="networkidle", timeout=30000)
+                page_obj.wait_for_timeout(3000)
+            except Exception:
+                try:
+                    page_obj.goto(current_url, wait_until="domcontentloaded", timeout=30000)
+                    page_obj.wait_for_timeout(3000)
+                except Exception:
+                    pass
+
+            section_elements = []
+            for sel in section_selectors:
+                try:
+                    section_elements = page_obj.query_selector_all(sel)
+                    if section_elements:
+                        break
+                except Exception:
+                    pass
+
+            if sec_idx >= len(section_elements):
+                continue
+
+        sec_el = section_elements[sec_idx]
+        try:
+            sec_el.click(timeout=500)
+            page_obj.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+        soup = BeautifulSoup(page_obj.content(), "html.parser")
+        tnc = soup.find("tree-node-collection")
+        if not tnc:
+            continue
+
+        container = tnc.find("div")
+        if not container:
+            continue
+
+        all_tree = container.find_all(
+            "div",
+            class_=lambda x: (
+                x and "tree-node-level-" in (" ".join(x) if isinstance(x, list) else (x or ""))
+            ),
+        )
+
+        section_positions: dict[str, int] = {}
+        for idx, node in enumerate(all_tree):
+            classes = node.get("class", [])
+            classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
+            node_func = node.find("span", class_="node-function")
+            if node_func:
+                node_text = node_func.find("div", class_="node-text")
+                if node_text:
+                    span_cat = node_text.find(
+                        "span",
+                        class_=lambda x: x and "category" in (" ".join(x) if isinstance(x, list) else (x or "")),
+                    )
+                    if span_cat:
+                        section_positions[span_cat.get_text(strip=True)] = idx
+
+        sorted_positions = sorted(section_positions.items(), key=lambda x: x[1])
+
+        for s_idx, (s_name, s_pos) in enumerate(sorted_positions):
+            if s_name != sec_name:
+                continue
+            next_pos = sorted_positions[s_idx + 1][1] if s_idx + 1 < len(sorted_positions) else len(all_tree)
+
+            section_node: dict[str, Any] = {
+                "title": sec_name,
+                "url": None,
+                "depth": 0,
+                "children": [],
+            }
+            l2_count = 0
+
+            for node in all_tree[s_pos + 1 : next_pos]:
+                classes = node.get("class", [])
+                classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
+                if "tree-node-level-2" not in classes_str:
+                    continue
+
+                anchor = node.find("a", href=True)
+                if not anchor:
+                    continue
+
+                href = anchor.get("href", "")
+                if href.startswith("#") or href.startswith("javascript"):
+                    continue
+
+                l2_url = urljoin(base_url, href)
+                l2_title = anchor.get_text(separator=" ", strip=True)
+
+                has_l3 = "tree-node-collapsed" in classes_str
+                l2_node: dict[str, Any] = {
+                    "title": l2_title,
+                    "url": l2_url,
+                    "depth": 1,
+                    "children": [],
+                }
+
+                if has_l3:
+                    log.info("    L3: extracting from %s", l2_url)
+                    l3_nodes = _pw_extract_l3_from_page(page_obj, l2_url)
+                    log.info("    L3: got %d nodes for %s", len(l3_nodes), l2_title[:30])
+                    if l3_nodes:
+                        l2_node["children"] = l3_nodes
+
+                section_node["children"].append(l2_node)
+                l2_count += 1
+
+            if l2_count > 0:
+                log.info("  Angular accordion section '%s': %d L2 children", sec_name, l2_count)
+            tree.append(section_node)
+            break
+
+    return tree
+
+
+def _pw_extract_l3_from_page(page_obj: Any, page_url: str) -> list[dict]:
+    """
+    Extract level-3 sub-pages from the sidebar when viewing a page that has them.
+
+    When navigating to a page like /pulse/user-guide/analyze-cluster-health-in-detail,
+    the sidebar shows all section headers + the current page's section with its
+    L2 and L3 children expanded. We find the current L2 page node and extract
+    all L3 siblings that follow it until the next section header.
+    """
+    try:
+        page_obj.goto(page_url, wait_until="networkidle", timeout=30000)
+        page_obj.wait_for_timeout(3000)
+    except Exception:
+        try:
+            page_obj.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+            page_obj.wait_for_timeout(3000)
+        except Exception:
+            pass
+
+    try:
+        soup = BeautifulSoup(page_obj.content(), "html.parser")
+        tnc = soup.find("tree-node-collection")
+        if not tnc:
+            return []
+
+        container = tnc.find("div")
+        if not container:
+            return []
+
+        all_tree = container.find_all(
+            "div",
+            class_=lambda x: (
+                x and "tree-node-level-" in (" ".join(x) if isinstance(x, list) else (x or ""))
+            ),
+        )
+
+        parsed_url = urlparse(page_url)
+        page_path = parsed_url.path.rstrip("/")
+
+        current_idx: int | None = None
+        for idx, node in enumerate(all_tree):
+            anchor = node.find("a", href=True)
+            if not anchor:
+                continue
+            href_path = urlparse(anchor.get("href", "")).path.rstrip("/")
+            if href_path == page_path or page_path.endswith(href_path):
+                if current_idx is None or idx < current_idx:
+                    current_idx = idx
+
+        if current_idx is None:
+            return []
+
+        l3_nodes: list[dict] = []
+        for node in all_tree[current_idx + 1 :]:
+            classes = node.get("class", [])
+            classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
+
+            if "tree-node-level-1" in classes_str and "category-container" in classes_str:
+                break
+
+            if "tree-node-level-3" in classes_str:
+                anchor = node.find("a", href=True)
+                if anchor:
+                    href = anchor.get("href", "")
+                    if not href.startswith("#") and not href.startswith("javascript"):
+                        l3_nodes.append({
+                            "title": anchor.get_text(separator=" ", strip=True),
+                            "url": urljoin("https://docs.acceldata.io", href),
+                            "depth": 2,
+                            "children": [],
+                        })
+
+        return l3_nodes
+    except Exception:
+        return []
 
 
 def _depth_list_to_tree(flat: list[dict]) -> list[dict]:
@@ -1203,7 +1452,7 @@ def discover_structure(
                 len(all_urls),
             )
 
-            if len(all_urls) < 10 and apply_category_map:
+            if len(all_urls) < 200 and apply_category_map:
                 log.info(
                     "Playwright sidebar has only %d URLs (collapsed sections) — "
                     "supplementing with sitemap, preserving Playwright section hierarchy",
@@ -2062,12 +2311,29 @@ def _discover_product_tree(
     """
     product_children: list[dict] = []
 
-    # For Playwright + all_versions, we discover versions live from the dropdown
-    # and use the Playwright browser context to switch between them.
-    if use_playwright and _check_playwright() and all_versions:
-        return _discover_product_tree_playwright(product, use_category_map)
+    # Playwright path: use a headless browser for sidebar discovery.
+    # When all_versions=True, also auto-discover and switch between versions.
+    # When all_versions=False, use Playwright for sidebar only (latest version).
+    if use_playwright and _check_playwright():
+        if all_versions:
+            # Full version discovery + switching via dropdown
+            return _discover_product_tree_playwright(product, use_category_map)
+        else:
+            # Playwright for sidebar only, latest version, no version switching
+            return _discover_product_tree_playwright_latest(product, use_category_map)
 
-    # Non-Playwright (sitemap) path: iterate configured versions x tabs
+    # Non-Playwright (sitemap) path: iterate configured versions x tabs.
+    # NOTE: DeveloperHub versions are JS-only (no URL change), so sitemap
+    # always returns the LATEST version's pages. When multiple versions are
+    # configured we can only meaningfully migrate the latest via sitemap.
+    if len(versions) > 1:
+        log.warning(
+            "Non-Playwright mode: DeveloperHub version switching requires JavaScript. "
+            "Only the latest version's pages will be discovered via sitemap. "
+            "Use --playwright --all-versions to migrate older versions."
+        )
+        versions = [v for v in versions if v.is_latest] or [versions[0]]
+
     for version in versions:
         version_children: list[dict] = []
 
@@ -2081,7 +2347,7 @@ def _discover_product_tree(
 
             tab_tree, _ = discover_structure(
                 tab_url,
-                use_playwright=use_playwright,
+                use_playwright=False,  # explicitly static in this branch
                 apply_category_map=use_category_map,
             )
 
@@ -2114,6 +2380,96 @@ def _discover_product_tree(
                     "children": version_children,
                     "_section_type": "version",
                 })
+
+    return product_children
+
+
+def _discover_product_tree_playwright_latest(
+    product: ProductConfig,
+    use_category_map: bool,
+) -> list[dict]:
+    """Playwright-based product discovery for the LATEST version only.
+
+    Uses Playwright for rendering the JS sidebar (deep nesting) but does NOT
+    iterate versions. This is used when --playwright is set without --all-versions.
+    """
+    from playwright.sync_api import sync_playwright
+
+    product_children: list[dict] = []
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        )
+        page_obj = ctx.new_page()
+
+        # Discover tabs (use configured tabs as starting point)
+        tabs_to_process = [
+            {"name": t.name, "url_path": t.url_path}
+            for t in product.tabs
+        ]
+
+        # Navigate to first tab and try to discover tabs dynamically
+        first_tab_url = product.base_url + product.tabs[0].url_path if product.tabs else product.base_url
+        log.info("Playwright (latest): navigating to %s", first_tab_url)
+        page_obj.goto(first_tab_url, wait_until="networkidle", timeout=30000)
+        page_obj.wait_for_timeout(2000)
+
+        discovered_tabs = _pw_discover_tabs(page_obj)
+        if discovered_tabs:
+            tabs_to_process = discovered_tabs
+
+        for tab_info in tabs_to_process:
+            tab_name = tab_info["name"]
+            tab_path = tab_info.get("url_path", "")
+            tab_url = product.base_url + tab_path if tab_path.startswith("/") else tab_path
+
+            log.info("  Tab: %s (%s)", tab_name, tab_url)
+
+            if tab_url != page_obj.url:
+                try:
+                    page_obj.goto(tab_url, wait_until="networkidle", timeout=30000)
+                    page_obj.wait_for_timeout(2000)
+                except Exception as exc:
+                    log.warning("  Could not navigate to tab %s: %s", tab_name, exc)
+                    continue
+
+            tab_tree = _pw_extract_nav_tree(page_obj, tab_url)
+
+            if tab_tree:
+                total_pages = len(_collect_all_urls(tab_tree))
+                log.info("  %s > %s: %d sections, %d pages", product.name, tab_name, len(tab_tree), total_pages)
+                product_children.append({
+                    "title": tab_name,
+                    "url": None,
+                    "depth": 1,
+                    "children": tab_tree,
+                    "_section_type": "tab",
+                })
+            else:
+                # Sitemap fallback for this tab
+                log.info("  Playwright sidebar empty for %s — trying sitemap", tab_name)
+                parsed_tab = urlparse(tab_url)
+                base = urlunparse((parsed_tab.scheme, parsed_tab.netloc, "", "", "", ""))
+                sitemap_urls = _fetch_sitemap_urls(base, parsed_tab.path.rstrip("/") + "/")
+                if sitemap_urls:
+                    tree_from_sitemap = _sitemap_urls_to_tree(sitemap_urls, apply_category_map=use_category_map)
+                    total_pages = len(_collect_all_urls(tree_from_sitemap))
+                    log.info("  %s > %s (sitemap): %d pages", product.name, tab_name, total_pages)
+                    product_children.append({
+                        "title": tab_name,
+                        "url": None,
+                        "depth": 1,
+                        "children": tree_from_sitemap,
+                        "_section_type": "tab",
+                    })
+
+        browser.close()
 
     return product_children
 
