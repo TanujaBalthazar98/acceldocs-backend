@@ -102,29 +102,188 @@ def save_state(state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Acceldata top-level tabs
-# The docs site has three independent tab sections visible at the top of the
-# page (Documentation, API, Release Notes). Each has its own sidebar hierarchy.
-# --all-tabs will migrate all of them, creating a top-level section per tab.
+# Acceldata multi-product structure
+# docs.acceldata.io has a product switcher dropdown with three products:
+#   ADOC, Pulse, ODP
+# Each product has its own set of top-level tabs and version switcher.
+# --all-products iterates every product; --product picks one by slug.
+# --all-versions migrates every known version; default = latest only.
 # ---------------------------------------------------------------------------
 
-ACCELDATA_TABS: list[dict[str, str]] = [
-    {
-        "name": "Documentation",
-        "url": "https://docs.acceldata.io/documentation",
-        "sitemap_prefix": "/documentation/",
-    },
-    {
-        "name": "API Reference",
-        "url": "https://docs.acceldata.io/api",
-        "sitemap_prefix": "/api/",
-    },
-    {
-        "name": "Release Notes",
-        "url": "https://docs.acceldata.io/release",
-        "sitemap_prefix": "/release/",
-    },
+from dataclasses import dataclass, field as dc_field
+from typing import Optional
+
+
+@dataclass
+class ProductTab:
+    """One top-level tab within a product (e.g. "User Guide", "API Reference")."""
+    name: str
+    url_path: str  # path segment, e.g. "/documentation", "/api"
+    sitemap_prefix: str = ""  # for sitemap fallback filtering
+
+
+@dataclass
+class ProductVersion:
+    """A specific version of a product (e.g. Pulse 4.1.x, ODP 3.3.6.3-1)."""
+    label: str  # display name shown in the version switcher
+    url_path: str = ""  # path segment if version changes the URL (empty = default)
+    is_latest: bool = False
+
+
+@dataclass
+class ProductConfig:
+    """Full configuration for one product in the Acceldata docs site."""
+    name: str
+    slug: str  # used in CLI --product filter
+    base_url: str  # e.g. "https://docs.acceldata.io"
+    tabs: list[ProductTab] = dc_field(default_factory=list)
+    versions: list[ProductVersion] = dc_field(default_factory=list)
+    # CSS selector / strategy hints for Playwright product switching
+    dropdown_label: str = ""  # text shown in the product dropdown
+
+
+# --- Known products (fall back when Playwright can't auto-discover) ---
+
+ACCELDATA_PRODUCTS: list[ProductConfig] = [
+    ProductConfig(
+        name="ADOC",
+        slug="adoc",
+        base_url="https://docs.acceldata.io",
+        dropdown_label="ADOC",
+        tabs=[
+            ProductTab(
+                name="Documentation",
+                url_path="/documentation",
+                sitemap_prefix="/documentation/",
+            ),
+            ProductTab(
+                name="API Reference",
+                url_path="/api",
+                sitemap_prefix="/api/",
+            ),
+            ProductTab(
+                name="Release Notes",
+                url_path="/release",
+                sitemap_prefix="/release/",
+            ),
+        ],
+        versions=[
+            ProductVersion(label="latest", is_latest=True),
+        ],
+    ),
+    ProductConfig(
+        name="Pulse",
+        slug="pulse",
+        base_url="https://docs.acceldata.io",
+        dropdown_label="Pulse",
+        tabs=[
+            ProductTab(
+                name="User Guide",
+                url_path="/pulse/user-guide",
+                sitemap_prefix="/pulse/user-guide/",
+            ),
+            ProductTab(
+                name="Installation Guide",
+                url_path="/pulse/installation-guide",
+                sitemap_prefix="/pulse/installation-guide/",
+            ),
+            ProductTab(
+                name="Release Notes",
+                url_path="/pulse/release-notes",
+                sitemap_prefix="/pulse/release-notes/",
+            ),
+            ProductTab(
+                name="Interface Reference Guide",
+                url_path="/pulse/interface-reference-guide",
+                sitemap_prefix="/pulse/interface-reference-guide/",
+            ),
+            ProductTab(
+                name="Compatibility Matrix",
+                url_path="/pulse/compatibility-matrix",
+                sitemap_prefix="/pulse/compatibility-matrix/",
+            ),
+            ProductTab(
+                name="FAQs",
+                url_path="/pulse/faqs",
+                sitemap_prefix="/pulse/faqs/",
+            ),
+        ],
+        versions=[
+            ProductVersion(label="Pulse 4.1.x", is_latest=True),
+            # Versions are selected via the DeveloperHub dropdown (JS), not URL path.
+            # Add older versions here if Playwright-based version switching is added.
+        ],
+    ),
+    ProductConfig(
+        name="ODP",
+        slug="odp",
+        base_url="https://docs.acceldata.io",
+        dropdown_label="ODP",
+        tabs=[
+            ProductTab(
+                name="Documentation",
+                url_path="/odp/documentation",
+                sitemap_prefix="/odp/documentation/",
+            ),
+            ProductTab(
+                name="Support Matrix",
+                url_path="/odp/support-matrix",
+                sitemap_prefix="/odp/support-matrix/",
+            ),
+        ],
+        versions=[
+            ProductVersion(label="ODP 3.3.6.3-1", is_latest=True),
+            # Versions are selected via the DeveloperHub dropdown (JS), not URL path.
+        ],
+    ),
 ]
+
+# Legacy alias — kept for backward compatibility with --all-tabs
+ACCELDATA_TABS: list[dict[str, str]] = [
+    {"name": t.name, "url": ACCELDATA_PRODUCTS[0].base_url + t.url_path, "sitemap_prefix": t.sitemap_prefix}
+    for t in ACCELDATA_PRODUCTS[0].tabs  # ADOC tabs only (legacy)
+]
+
+
+def get_product_by_slug(slug: str) -> ProductConfig | None:
+    """Look up a product config by its slug (case-insensitive)."""
+    slug_lower = slug.lower()
+    for p in ACCELDATA_PRODUCTS:
+        if p.slug == slug_lower or p.name.lower() == slug_lower:
+            return p
+    return None
+
+
+def get_products_to_migrate(
+    args_product: str | None,
+    args_all_products: bool,
+) -> list[ProductConfig]:
+    """Determine which products to migrate based on CLI flags."""
+    if args_all_products:
+        return list(ACCELDATA_PRODUCTS)
+    if args_product:
+        prod = get_product_by_slug(args_product)
+        if not prod:
+            available = ", ".join(p.slug for p in ACCELDATA_PRODUCTS)
+            log.error("Unknown product '%s'. Available: %s", args_product, available)
+            sys.exit(1)
+        return [prod]
+    # Default: ADOC only (backward compatible)
+    return [ACCELDATA_PRODUCTS[0]]
+
+
+def get_versions_to_migrate(
+    product: ProductConfig,
+    all_versions: bool = False,
+) -> list[ProductVersion]:
+    """Return the versions to migrate for a product."""
+    if not product.versions:
+        return [ProductVersion(label="latest", is_latest=True)]
+    if all_versions:
+        return list(product.versions)
+    # Default: latest only
+    latest = [v for v in product.versions if v.is_latest]
+    return latest if latest else [product.versions[0]]
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +550,9 @@ _SIDEBAR_SELECTORS = [
     lambda soup: soup.find(lambda t: t.name and "sidebar" in " ".join(t.get("class", [])) and t.find("nav")),
     lambda soup: soup.find(lambda t: t.name and "navigation" in " ".join(t.get("class", []))),
     lambda soup: soup.find("nav"),
+    lambda soup: soup.find("div", class_="angular-tree-component"),
+    lambda soup: soup.find("div", class_="sidebar"),
+    lambda soup: soup.find(lambda t: t.name == "div" and "sidebar" in " ".join(t.get("class", []))),
 ]
 
 _SELECTOR_NAMES = [
@@ -399,6 +561,9 @@ _SELECTOR_NAMES = [
     "[class*='sidebar'] nav",
     "[class*='navigation']",
     "nav (fallback)",
+    "div.angular-tree-component",
+    "div.sidebar",
+    "[class*='sidebar'] div",
 ]
 
 
@@ -461,6 +626,113 @@ def _walk_nav_tree(element: Tag, base_url: str, depth: int = 0) -> list[dict]:
     return nodes
 
 
+def _walk_angular_tree(element: Tag, base_url: str, depth: int = 0) -> list[dict]:
+    """Walk an Angular tree component (DeveloperHub div.tree-node structure).
+
+    The Angular tree renders ALL tree-node divs flat in the DOM, using
+    tree-node-level-X classes to indicate nesting depth. There are no nested
+    <ul>/<li> structures. Nodes are identified as:
+
+      - Section: has "category-container" in class — acts as a section heading,
+        may or may not have an <a> link (some sections are also pages).
+      - Page: has a direct <a href> link.
+
+    Children are siblings in the flat DOM, identified by level class.
+    Collapsed sections show no children in the DOM.
+
+    Structure:
+      <div class="angular-tree-component">
+        <tree-node-collection>
+          <div>  <- plain container
+            <div class="... tree-node-level-1 category-container">Section Name</div>
+            <div class="... tree-node-level-2 tree-node-leaf"><a href="/path">Page</a></div>
+          </div>
+        </tree-node-collection>
+      </div>
+    """
+    tree_node_collection = element.find("tree-node-collection")
+    container = tree_node_collection.find("div") if tree_node_collection else element
+
+    all_tree_divs = container.find_all(
+        "div",
+        class_=lambda x: (
+            x and "tree-node-level-" in (" ".join(x) if isinstance(x, list) else (x or ""))
+        ),
+    )
+
+    if not all_tree_divs:
+        return []
+
+    parsed_nodes: list[dict] = []
+    for div in all_tree_divs:
+        classes = div.get("class", [])
+        classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
+
+        level_match = re.search(r"tree-node-level-(\d+)", classes_str)
+        node_level = int(level_match.group(1)) if level_match else 1
+
+        is_category = "category-container" in classes_str
+        anchor = div.find("a", href=True)
+        href = anchor.get("href", "") if anchor else ""
+
+        url: str | None = None
+        if href and not href.startswith("#") and not href.startswith("javascript"):
+            url = urljoin(base_url, href)
+
+        title: str = "Untitled"
+        node_func = div.find("span", class_="node-function")
+        if node_func:
+            node_text = node_func.find("div", class_="node-text")
+            if node_text:
+                category_span = node_text.find(
+                    "span",
+                    class_=lambda x: x and "category" in (" ".join(x) if isinstance(x, list) else x),
+                )
+                if category_span:
+                    title = category_span.get_text(separator=" ", strip=True)
+                else:
+                    page_span = node_text.find("span", class_=lambda x: x and "node" in (" ".join(x) if isinstance(x, list) else x))
+                    if page_span:
+                        title = page_span.get_text(separator=" ", strip=True)
+
+        if title == "Untitled" and anchor:
+            title = anchor.get_text(separator=" ", strip=True)
+
+        if title == "Untitled":
+            title_raw = div.get_text(separator=" ", strip=True)
+            title = title_raw.split("\n")[0].strip() or "Untitled"
+
+        parsed_nodes.append({
+            "title": title,
+            "url": url,
+            "depth": node_level - 1,
+            "children": [],
+            "_level": node_level,
+            "_is_category": is_category,
+        })
+
+    tree: list[dict] = []
+    for node in parsed_nodes:
+        lvl = node["_level"]
+
+        if lvl == 1:
+            tree.append(node)
+        elif lvl == 2:
+            if tree and isinstance(tree[-1], dict) and tree[-1].get("_level") == 1:
+                tree[-1]["children"].append(node)
+            else:
+                tree.append(node)
+
+    for node in tree:
+        node.pop("_level", None)
+        node.pop("_is_category", None)
+        for child in node.get("children", []):
+            child.pop("_level", None)
+            child.pop("_is_category", None)
+
+    return tree
+
+
 def _collect_all_urls(tree: list[dict]) -> list[str]:
     """Flatten tree into all unique page URLs (depth-first)."""
     urls: list[str] = []
@@ -483,31 +755,57 @@ def _fetch_sitemap_urls(base_url: str, source_path_prefix: str) -> list[str]:
     """
     Try to fetch sitemap.xml and return URLs matching the source path prefix.
     Returns empty list if sitemap not available or contains no matching URLs.
+
+    Tries multiple sitemap locations:
+    1. Product-specific sitemap (e.g. /pulse/sitemap.xml) — derived from source_path_prefix
+    2. Root sitemap at /sitemap.xml
     """
     parsed = urlparse(base_url)
-    sitemap_url = urlunparse((parsed.scheme, parsed.netloc, "/sitemap.xml", "", "", ""))
-    log.info("Checking sitemap: %s", sitemap_url)
-    html = fetch_html(sitemap_url)
-    if not html:
-        return []
 
-    try:
-        soup = BeautifulSoup(html, "xml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
+    # Build list of sitemap URLs to try
+    sitemap_candidates: list[str] = []
 
-    urls: list[str] = []
-    for loc in soup.find_all("loc"):
-        u = loc.get_text(strip=True)
-        if not u:
+    # Try product-specific sitemap first (e.g. /pulse/sitemap.xml for /pulse/user-guide/)
+    prefix_parts = source_path_prefix.strip("/").split("/")
+    if prefix_parts and prefix_parts[0]:
+        product_sitemap = urlunparse((
+            parsed.scheme, parsed.netloc,
+            f"/{prefix_parts[0]}/sitemap.xml", "", "", "",
+        ))
+        sitemap_candidates.append(product_sitemap)
+
+    # Always try root sitemap
+    root_sitemap = urlunparse((parsed.scheme, parsed.netloc, "/sitemap.xml", "", "", ""))
+    if root_sitemap not in sitemap_candidates:
+        sitemap_candidates.append(root_sitemap)
+
+    for sitemap_url in sitemap_candidates:
+        log.info("Checking sitemap: %s", sitemap_url)
+        html = fetch_html(sitemap_url)
+        if not html:
             continue
-        u_path = urlparse(u).path
-        if source_path_prefix and not u_path.startswith(source_path_prefix):
-            continue
-        urls.append(u)
 
-    log.info("Sitemap: found %d matching URLs under %s", len(urls), source_path_prefix)
-    return list(dict.fromkeys(urls))
+        try:
+            soup = BeautifulSoup(html, "xml")
+        except Exception:
+            soup = BeautifulSoup(html, "html.parser")
+
+        urls: list[str] = []
+        for loc in soup.find_all("loc"):
+            u = loc.get_text(strip=True)
+            if not u:
+                continue
+            u_path = urlparse(u).path
+            if source_path_prefix and not u_path.startswith(source_path_prefix):
+                continue
+            urls.append(u)
+
+        if urls:
+            log.info("Sitemap: found %d matching URLs under %s", len(urls), source_path_prefix)
+            return list(dict.fromkeys(urls))
+
+    log.info("Sitemap: found 0 matching URLs under %s", source_path_prefix)
+    return []
 
 
 def _sitemap_urls_to_tree(urls: list[str], apply_category_map: bool = True) -> list[dict]:
@@ -575,6 +873,108 @@ def _sitemap_urls_to_tree(urls: list[str], apply_category_map: bool = True) -> l
 _PLAYWRIGHT_AVAILABLE: bool | None = None
 
 
+def _pw_discover_versions(page_obj: Any) -> list[dict]:
+    """Use Playwright to discover available versions from the version picker dropdown.
+
+    Uses force-click since the dropdown toggle may appear hidden to Playwright.
+    Returns list of dicts: [{"label": "Pulse 4.1.x", "is_latest": True}, ...]
+    The first item in the dropdown is assumed to be the latest.
+    """
+    locator = page_obj.locator(".version-picker-container").first
+    try:
+        if not locator.count():
+            log.info("No version picker found on page")
+            return []
+    except Exception:
+        return []
+
+    try:
+        locator.click(force=True)
+        page_obj.wait_for_timeout(1500)
+    except Exception as exc:
+        log.warning("Could not click version picker: %s", exc)
+        return []
+
+    items = page_obj.locator(".version-picker-container .dropdown-item").all()
+    versions: list[dict] = []
+    for idx, item in enumerate(items):
+        txt = item.inner_text().strip()
+        if txt:
+            versions.append({"label": txt, "is_latest": idx == 0})
+
+    # Close the dropdown
+    try:
+        page_obj.locator("body").click(position={"x": 10, "y": 10}, force=True)
+        page_obj.wait_for_timeout(300)
+    except Exception:
+        pass
+
+    log.info("Discovered %d versions: %s", len(versions), ", ".join(v["label"] for v in versions))
+    return versions
+
+
+def _pw_switch_version(page_obj: Any, version_label: str) -> bool:
+    """Click the version picker and select the given version. Returns True on success."""
+    locator = page_obj.locator(".version-picker-container").first
+    try:
+        locator.click(force=True)
+        page_obj.wait_for_timeout(1500)
+    except Exception:
+        return False
+
+    items = page_obj.locator(".version-picker-container .dropdown-item").all()
+    for item in items:
+        txt = item.inner_text().strip()
+        if txt == version_label:
+            try:
+                item.click(force=True)
+                page_obj.wait_for_timeout(4000)
+                log.info("Switched to version: %s (now at %s)", version_label, page_obj.url)
+                return True
+            except Exception as exc:
+                log.warning("Failed to click version '%s': %s", version_label, exc)
+                return False
+
+    log.warning("Version '%s' not found in dropdown", version_label)
+    return False
+
+
+def _pw_discover_tabs(page_obj: Any) -> list[dict]:
+    """Discover tabs from the current page.
+
+    DeveloperHub renders tabs as visible <a> links in a top bar (y ~40-100px),
+    NOT inside a dropdown. The hidden `.section-picker-container` is not used
+    when tabs are shown as top-bar links.
+
+    Returns list of dicts: [{"name": "User Guide", "url_path": "/pulse/user-guide"}, ...]
+    """
+    tabs_data = page_obj.evaluate("""() => {
+        const results = [];
+        const allLinks = document.querySelectorAll('a');
+        for (const a of allLinks) {
+            const rect = a.getBoundingClientRect();
+            // Tabs are in the top bar area (y between 30 and 100) and are visible
+            if (rect.top > 30 && rect.top < 100 && rect.width > 20 && rect.height > 0) {
+                const text = a.textContent.trim();
+                const href = a.getAttribute('href') || '';
+                // Filter: must have a path href (not # or empty) and non-empty text
+                if (text && href.startsWith('/')) {
+                    results.push({name: text, url_path: href});
+                }
+            }
+        }
+        return results;
+    }""")
+
+    if tabs_data:
+        log.info(
+            "Discovered %d tabs: %s",
+            len(tabs_data),
+            ", ".join(t["name"] for t in tabs_data),
+        )
+    return tabs_data
+
+
 def _check_playwright() -> bool:
     global _PLAYWRIGHT_AVAILABLE
     if _PLAYWRIGHT_AVAILABLE is None:
@@ -593,28 +993,31 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
     Extract the full navigation tree from a Playwright page object.
 
     Strategy:
-    1. Try to expand all collapsible sidebar sections by clicking expand buttons.
-    2. Collect all <a> elements inside the sidebar in their DOM order with depth
-       derived from their visual indentation / nesting level.
-    3. Return the tree in the same dict format used by _walk_nav_tree().
+    1. Wait for page to settle.
+    2. Click all expand/toggle buttons in the sidebar (category-container rows
+       for DeveloperHub Angular tree, plus standard nav/aria patterns).
+    3. Parse the rendered HTML with BeautifulSoup.
+    4. Detect whether sidebar is an Angular tree component or a standard nav/ul,
+       and walk accordingly.
+    5. Return the tree in the same dict format used by _walk_nav_tree().
     """
-    # Wait for navigation to settle
     try:
         page_obj.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
+        page_obj.wait_for_load_state("domcontentloaded", timeout=15000)
         page_obj.wait_for_timeout(3000)
 
-    # Click all expand/toggle buttons in the sidebar to open nested sections.
-    # DeveloperHub uses various patterns: chevron icons, aria-expanded buttons, etc.
     expand_selectors = [
-        "nav [aria-expanded='false']",
-        "nav button.expand",
-        "nav .sidebar-chevron",
-        "nav [class*='expand']",
-        "nav [class*='toggle']",
-        "nav [class*='arrow']",
-        "nav [class*='caret']",
+        ".angular-tree-component .category-container",
+        ".sidebar .category-container",
+        ".angular-tree-component .tree-node-collapsed",
+        ".sidebar .tree-node-collapsed",
+        ".angular-tree-component [aria-expanded='false']",
+        ".sidebar [aria-expanded='false']",
+        "[class*='sidebar'] [aria-expanded='false']",
+        "[aria-expanded='false']",
     ]
+
     for sel in expand_selectors:
         try:
             buttons = page_obj.query_selector_all(sel)
@@ -627,8 +1030,7 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
         except Exception:
             pass
 
-    # Second pass — some items only become visible after parents are opened
-    for sel in expand_selectors[:3]:
+    for sel in expand_selectors[:2]:
         try:
             buttons = page_obj.query_selector_all(sel)
             for btn in buttons:
@@ -640,12 +1042,27 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
         except Exception:
             pass
 
-    # Get rendered HTML and parse with BeautifulSoup
+    page_obj.wait_for_timeout(1000)
+
     html = page_obj.content()
     soup = BeautifulSoup(html, "html.parser")
     nav = _find_nav(soup)
 
     if nav:
+        nav_classes = " ".join(nav.get("class", [])) if isinstance(nav.get("class"), list) else nav.get("class", "") or ""
+
+        if "angular-tree-component" in nav_classes:
+            tree = _walk_angular_tree(nav, base_url)
+            all_urls = _collect_all_urls(tree)
+            has_depth = any(n.get("children") for n in tree)
+            log.info(
+                "Playwright sidebar (Angular tree): %d top-level nodes, %d total URLs, deep=%s",
+                len(tree),
+                len(all_urls),
+                has_depth,
+            )
+            return tree
+
         tree = _walk_nav_tree(nav, base_url)
         all_urls = _collect_all_urls(tree)
         has_depth = any(n.get("children") for n in tree)
@@ -657,7 +1074,6 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
         )
         return tree
 
-    # Fallback: extract all <a> tags from nav in order, guess depth from indentation
     nav_area = (
         soup.find("nav", attrs={"aria-label": True})
         or soup.find(class_="sidebar-nav")
@@ -666,7 +1082,6 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
     if not nav_area:
         return []
 
-    # Collect all anchor elements with href
     anchors = nav_area.find_all("a", href=True)
     flat_nodes: list[dict] = []
     for anchor in anchors:
@@ -675,7 +1090,6 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
             continue
         full_url = urljoin(base_url, href)
         title = anchor.get_text(separator=" ", strip=True) or "Untitled"
-        # Estimate depth: count parent elements that look like list/nav containers
         depth = 0
         parent = anchor.parent
         while parent and parent != nav_area:
@@ -683,13 +1097,12 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
             if tag in ("ul", "ol", "li"):
                 depth += 1
             parent = parent.parent
-        depth = min(depth // 2, 6)  # normalise — each li+ul pair = 1 level
+        depth = min(depth // 2, 6)
         flat_nodes.append({"title": title, "url": full_url, "depth": depth, "children": []})
 
     if not flat_nodes:
         return []
 
-    # Reconstruct tree from depth-annotated flat list
     return _depth_list_to_tree(flat_nodes)
 
 
@@ -784,12 +1197,73 @@ def discover_structure(
 
         if tree:
             all_urls = _collect_all_urls(tree)
-            fallback_links = all_urls
             log.info(
                 "Playwright discovery complete: %d sections, %d pages total",
                 len(tree),
                 len(all_urls),
             )
+
+            if len(all_urls) < 10 and apply_category_map:
+                log.info(
+                    "Playwright sidebar has only %d URLs (collapsed sections) — "
+                    "supplementing with sitemap, preserving Playwright section hierarchy",
+                    len(all_urls),
+                )
+                sitemap_urls = _fetch_sitemap_urls(base_url, source_path + "/")
+                if not sitemap_urls:
+                    sitemap_urls = _fetch_sitemap_urls(base_url, source_path)
+                if sitemap_urls:
+                    existing_urls: set[str] = set()
+                    for node in tree:
+                        if node.get("url"):
+                            existing_urls.add(node["url"])
+                        for child in _flatten_pages(node.get("children", [])):
+                            if child.get("url"):
+                                existing_urls.add(child["url"])
+
+                    for node in tree:
+                        if not node.get("children"):
+                            node["children"] = []
+
+                    uncategorized: list[dict] = []
+                    for url in sitemap_urls:
+                        if url in existing_urls:
+                            continue
+                        slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+                        title = slug.replace("-", " ").replace("_", " ").title()
+                        category = _categorize_url(slug)
+                        page_node = {"title": title, "url": url, "depth": 1, "children": []}
+                        if category:
+                            matched = False
+                            for section in tree:
+                                if section["title"] == category:
+                                    section["children"].append(page_node)
+                                    matched = True
+                                    break
+                            if not matched:
+                                uncategorized.append(page_node)
+                        else:
+                            uncategorized.append(page_node)
+
+                    if uncategorized:
+                        tree.append({
+                            "title": "Other",
+                            "url": None,
+                            "depth": 0,
+                            "children": uncategorized,
+                        })
+
+                    merged_urls = _collect_all_urls(tree)
+                    log.info(
+                        "Merged tree: %d sections, %d total pages",
+                        len(tree),
+                        len(merged_urls),
+                    )
+                    fallback_links = sitemap_urls
+                else:
+                    fallback_links = all_urls
+            else:
+                fallback_links = all_urls
 
     # -----------------------------------------------------------------------
     # Strategy 2: Static HTML (works for server-rendered sites)
@@ -1545,7 +2019,255 @@ def parse_args() -> argparse.Namespace:
             "tab specified by --source is migrated."
         ),
     )
+    # --- Multi-product flags ---
+    p.add_argument(
+        "--all-products",
+        action="store_true",
+        help=(
+            "Migrate ALL known products (ADOC, Pulse, ODP). Each product becomes a "
+            "root section with its own tabs and version hierarchy underneath."
+        ),
+    )
+    p.add_argument(
+        "--product",
+        type=str,
+        default=None,
+        help=(
+            "Migrate a single product by slug (e.g. adoc, pulse, odp). "
+            "Default: adoc. Use --all-products to migrate everything."
+        ),
+    )
+    p.add_argument(
+        "--all-versions",
+        action="store_true",
+        help="Migrate all known versions for each product (default: latest only).",
+    )
     return p.parse_args()
+
+
+def _discover_product_tree(
+    product: ProductConfig,
+    versions: list[ProductVersion],
+    use_playwright: bool,
+    use_category_map: bool,
+    all_versions: bool = False,
+) -> list[dict]:
+    """Discover the full tree for one product (all tabs x versions).
+
+    Returns a list of tree nodes. The product itself becomes a root node,
+    with tab nodes underneath, each containing the discovered page hierarchy.
+
+    When use_playwright=True and all_versions=True, auto-discovers versions
+    from the version picker dropdown and iterates each one with version switching.
+    """
+    product_children: list[dict] = []
+
+    # For Playwright + all_versions, we discover versions live from the dropdown
+    # and use the Playwright browser context to switch between them.
+    if use_playwright and _check_playwright() and all_versions:
+        return _discover_product_tree_playwright(product, use_category_map)
+
+    # Non-Playwright (sitemap) path: iterate configured versions x tabs
+    for version in versions:
+        version_children: list[dict] = []
+
+        for tab in product.tabs:
+            tab_url = product.base_url + tab.url_path
+
+            log.info(
+                "--- Discovering: %s / %s / %s (%s) ---",
+                product.name, version.label, tab.name, tab_url,
+            )
+
+            tab_tree, _ = discover_structure(
+                tab_url,
+                use_playwright=use_playwright,
+                apply_category_map=use_category_map,
+            )
+
+            if tab_tree:
+                total_tab_pages = len(_collect_all_urls(tab_tree))
+                log.info(
+                    "  %s > %s > %s: %d sections, %d pages",
+                    product.name, version.label, tab.name,
+                    len(tab_tree), total_tab_pages,
+                )
+                version_children.append({
+                    "title": tab.name,
+                    "url": None,
+                    "depth": 1,
+                    "children": tab_tree,
+                    "_section_type": "tab",
+                })
+            else:
+                log.warning("  No pages found for %s > %s > %s", product.name, version.label, tab.name)
+
+        # If only one version (latest), skip the version wrapper node
+        if len(versions) == 1:
+            product_children.extend(version_children)
+        else:
+            if version_children:
+                product_children.append({
+                    "title": version.label,
+                    "url": None,
+                    "depth": 1,
+                    "children": version_children,
+                    "_section_type": "version",
+                })
+
+    return product_children
+
+
+def _discover_product_tree_playwright(
+    product: ProductConfig,
+    use_category_map: bool,
+) -> list[dict]:
+    """Playwright-based product discovery with live version/tab switching.
+
+    Launches a single browser, navigates to the product's first tab, discovers
+    available versions from the version picker dropdown, then for each version:
+    1. Clicks the version in the dropdown
+    2. Discovers tabs from the section picker (tabs may differ per version)
+    3. For each tab, extracts the sidebar navigation tree
+
+    Returns the product children list (version > tab > section hierarchy).
+    """
+    from playwright.sync_api import sync_playwright
+
+    product_children: list[dict] = []
+
+    first_tab_url = product.base_url + product.tabs[0].url_path if product.tabs else product.base_url
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        )
+        page_obj = ctx.new_page()
+
+        log.info("Playwright: navigating to %s for version discovery", first_tab_url)
+        page_obj.goto(first_tab_url, wait_until="networkidle", timeout=30000)
+        page_obj.wait_for_timeout(2000)
+
+        # Discover versions from the dropdown
+        discovered_versions = _pw_discover_versions(page_obj)
+        if not discovered_versions:
+            # No version picker — treat as single-version product
+            discovered_versions = [{"label": "latest", "is_latest": True}]
+
+        for ver_idx, ver in enumerate(discovered_versions):
+            ver_label = ver["label"]
+            is_latest = ver.get("is_latest", False)
+            log.info("=== Version %d/%d: %s ===", ver_idx + 1, len(discovered_versions), ver_label)
+
+            # Switch to this version (skip for the first/latest — already there)
+            if ver_idx > 0:
+                # Navigate back to the first tab's base URL first
+                page_obj.goto(first_tab_url, wait_until="networkidle", timeout=30000)
+                page_obj.wait_for_timeout(2000)
+
+                if not _pw_switch_version(page_obj, ver_label):
+                    log.warning("Could not switch to version %s — skipping", ver_label)
+                    continue
+
+            # After version switch, discover what tabs are available
+            # (tabs may differ between versions)
+            current_url = page_obj.url
+            log.info("Version %s active at: %s", ver_label, current_url)
+
+            # Discover tabs from the section picker for this version
+            discovered_tabs = _pw_discover_tabs(page_obj)
+            if not discovered_tabs:
+                # Use configured tabs as fallback
+                discovered_tabs = [
+                    {"name": t.name, "url_path": t.url_path}
+                    for t in product.tabs
+                ]
+
+            version_children: list[dict] = []
+
+            for tab_info in discovered_tabs:
+                tab_name = tab_info["name"]
+                tab_path = tab_info.get("url_path", "")
+
+                # Navigate to the tab
+                if tab_path.startswith("http"):
+                    tab_url = tab_path
+                elif tab_path.startswith("/"):
+                    tab_url = product.base_url + tab_path
+                else:
+                    tab_url = current_url  # already on this tab
+
+                log.info("  Tab: %s (%s)", tab_name, tab_url)
+
+                if tab_url != page_obj.url:
+                    try:
+                        page_obj.goto(tab_url, wait_until="networkidle", timeout=30000)
+                        page_obj.wait_for_timeout(2000)
+                    except Exception as exc:
+                        log.warning("  Could not navigate to tab %s: %s", tab_name, exc)
+                        continue
+
+                # Extract sidebar tree from current page
+                tab_tree = _pw_extract_nav_tree(page_obj, tab_url)
+
+                if tab_tree:
+                    total_tab_pages = len(_collect_all_urls(tab_tree))
+                    log.info(
+                        "  %s > %s > %s: %d sections, %d pages",
+                        product.name, ver_label, tab_name,
+                        len(tab_tree), total_tab_pages,
+                    )
+                    version_children.append({
+                        "title": tab_name,
+                        "url": None,
+                        "depth": 1,
+                        "children": tab_tree,
+                        "_section_type": "tab",
+                    })
+                else:
+                    # Fallback to sitemap for this tab
+                    log.info("  Playwright sidebar empty for %s — trying sitemap", tab_name)
+                    parsed_tab = urlparse(tab_url)
+                    base = urlunparse((parsed_tab.scheme, parsed_tab.netloc, "", "", "", ""))
+                    sitemap_urls = _fetch_sitemap_urls(base, parsed_tab.path.rstrip("/") + "/")
+                    if sitemap_urls:
+                        tree_from_sitemap = _sitemap_urls_to_tree(
+                            sitemap_urls, apply_category_map=use_category_map,
+                        )
+                        total_pages = len(_collect_all_urls(tree_from_sitemap))
+                        log.info(
+                            "  %s > %s > %s (sitemap): %d sections, %d pages",
+                            product.name, ver_label, tab_name,
+                            len(tree_from_sitemap), total_pages,
+                        )
+                        version_children.append({
+                            "title": tab_name,
+                            "url": None,
+                            "depth": 1,
+                            "children": tree_from_sitemap,
+                            "_section_type": "tab",
+                        })
+
+            if version_children:
+                if len(discovered_versions) == 1:
+                    product_children.extend(version_children)
+                else:
+                    product_children.append({
+                        "title": ver_label,
+                        "url": None,
+                        "depth": 1,
+                        "children": version_children,
+                        "_section_type": "version",
+                    })
+
+        browser.close()
+
+    return product_children
 
 
 def main() -> None:
@@ -1575,28 +2297,20 @@ def main() -> None:
     use_playwright = getattr(args, "playwright", False)
     use_category_map = not args.no_category_map
     use_all_tabs = getattr(args, "all_tabs", False)
+    use_all_products = getattr(args, "all_products", False)
+    use_all_versions = getattr(args, "all_versions", False)
+    selected_product = getattr(args, "product", None)
+
+    # Determine which products to process
+    products = get_products_to_migrate(selected_product, use_all_products)
 
     log.info("=== DeveloperHub → AccelDocs Migration ===")
-    log.info("Source: %s", args.source)
-    log.info("All tabs: %s", use_all_tabs)
+    log.info("Products: %s", ", ".join(p.name for p in products))
+    log.info("All versions: %s", use_all_versions)
     log.info("Backend: %s", args.backend)
     log.info("Dry run: %s", args.dry_run)
     log.info("Playwright: %s", use_playwright)
     log.info("Create Drive docs: %s", getattr(args, "create_drive_docs", False))
-
-    # Determine which source URLs to process
-    if use_all_tabs:
-        sources = [
-            {"name": tab["name"], "url": tab["url"]}
-            for tab in ACCELDATA_TABS
-        ]
-        log.info(
-            "All-tabs mode: will process %d tabs: %s",
-            len(sources),
-            ", ".join(s["name"] for s in sources),
-        )
-    else:
-        sources = [{"name": None, "url": args.source}]
 
     # Load or start fresh state
     state: dict = {}
@@ -1606,11 +2320,42 @@ def main() -> None:
             log.info("Loaded existing state from %s", STATE_FILE)
 
     # -----------------------------------------------------------------------
-    # Step 1: Discover structure (for each source tab)
+    # Step 1: Discover structure — multi-product aware
     # -----------------------------------------------------------------------
-    if state.get("tree") and not use_playwright and not use_all_tabs:
-        # Reuse cached tree (skip re-discovery) — only for single-source mode.
-        tree: list[dict] = state["tree"]
+    # New multi-product path: --all-products or --product <slug>
+    if use_all_products or selected_product:
+        tree = []
+        for product in products:
+            versions = get_versions_to_migrate(product, use_all_versions)
+            log.info(
+                "Product '%s': %d tabs, %d versions to migrate",
+                product.name, len(product.tabs), len(versions),
+            )
+
+            product_children = _discover_product_tree(
+                product, versions, use_playwright, use_category_map,
+                all_versions=use_all_versions,
+            )
+
+            if product_children:
+                # Wrap under a product root node
+                tree.append({
+                    "title": product.name,
+                    "url": None,
+                    "depth": 0,
+                    "children": product_children,
+                    "_section_type": "section",
+                })
+
+        state["tree"] = tree
+        state["source"] = args.source
+        state["products"] = [p.slug for p in products]
+        state["discovered_at"] = datetime.now(timezone.utc).isoformat()
+        save_state(state)
+
+    # Legacy single-product path: --all-tabs or plain --source
+    elif state.get("tree") and not use_playwright and not use_all_tabs:
+        tree = state["tree"]
         fallback_links: list[str] = state.get("fallback_links", [])
         log.info("Using cached tree from state (%d top-level nodes)", len(tree))
         all_urls_cached = _collect_all_urls(tree)
@@ -1624,6 +2369,19 @@ def main() -> None:
         tree = []
         fallback_links = []
 
+        if use_all_tabs:
+            sources = [
+                {"name": tab["name"], "url": tab["url"]}
+                for tab in ACCELDATA_TABS
+            ]
+            log.info(
+                "All-tabs mode: will process %d tabs: %s",
+                len(sources),
+                ", ".join(s["name"] for s in sources),
+            )
+        else:
+            sources = [{"name": None, "url": args.source}]
+
         for source in sources:
             tab_name = source["name"]
             tab_url = source["url"]
@@ -1636,10 +2394,6 @@ def main() -> None:
             )
 
             if use_all_tabs and tab_name and tab_tree:
-                # Wrap the tab's tree under a top-level section node named
-                # after the tab (e.g. "Documentation", "API Reference",
-                # "Release Notes"). This preserves the site's tab structure
-                # in AccelDocs as top-level sections.
                 total_tab_pages = len(_collect_all_urls(tab_tree))
                 log.info(
                     "Tab '%s': %d sections, %d pages",
@@ -1676,22 +2430,34 @@ def main() -> None:
     # -----------------------------------------------------------------------
     if args.dry_run:
         print(f"\n{'=' * 60}")
-        print(f"DRY RUN — Source: {args.source}")
+        print(f"DRY RUN — Products: {', '.join(p.name for p in products)}")
         print(f"{'=' * 60}\n")
-        print(f"Discovered {total_pages} page URLs")
-        top_sections = [n for n in tree if n.get("children")]
-        print(f"Sections: {len(top_sections)}")
+        print(f"Discovered {total_pages} page URLs across {len(products)} product(s)")
         print("\nHierarchy:")
         print("-" * 40)
         _print_tree(tree)
         print(f"\n{'=' * 60}")
         print(f"Total unique page URLs: {total_pages}")
-        if use_all_tabs:
+
+        # Per-product summary
+        if len(products) > 1 or use_all_products or selected_product:
+            print("\nProducts:")
+            for node in tree:
+                if not node.get("url") and node.get("children"):
+                    prod_pages = len(_collect_all_urls([node]))
+                    tab_count = len([c for c in node["children"] if not c.get("url")])
+                    print(f"  {node['title']}: {prod_pages} pages, {tab_count} tabs")
+                    for child in node.get("children", []):
+                        if not child.get("url") and child.get("children"):
+                            child_pages = len(_collect_all_urls([child]))
+                            print(f"    {child['title']}: {child_pages} pages")
+        elif use_all_tabs:
             print("\nTabs discovered:")
             for node in tree:
                 if not node.get("url") and node.get("children"):
                     tab_pages = len(_collect_all_urls([node]))
-                    print(f"  • {node['title']}: {tab_pages} pages, {len(node['children'])} sub-sections")
+                    print(f"  {node['title']}: {tab_pages} pages, {len(node['children'])} sub-sections")
+
         print(f"\nRecommended: use --playwright for the full multi-level hierarchy:")
         print(f"  pip install playwright && playwright install chromium")
         import_cmd = (
@@ -1703,8 +2469,8 @@ def main() -> None:
             f"    --product-id <YOUR_PRODUCT_ID> \\\n"
             f"    --playwright"
         )
-        if not use_all_tabs:
-            import_cmd += " \\\n    --all-tabs  # migrates Documentation + API + Release Notes"
+        if not (use_all_products or selected_product):
+            import_cmd += " \\\n    --all-products  # migrates ADOC + Pulse + ODP"
         print(import_cmd)
         print(f"\nTo also create Google Drive docs add:  --create-drive-docs")
         return
@@ -1719,8 +2485,6 @@ def main() -> None:
     log.info("Pages to fetch: %d (already cached: %d)", len(urls_to_fetch), len(already_fetched))
 
     if use_playwright and _check_playwright() and urls_to_fetch:
-        # Use a single persistent browser instance for all page fetches.
-        # This is much faster than launching a new browser per page.
         log.info("Using Playwright browser for page content fetching…")
         try:
             from playwright.sync_api import sync_playwright
@@ -1745,7 +2509,6 @@ def main() -> None:
                 browser.close()
         except Exception as exc:
             log.warning("Playwright page fetch failed: %s — falling back to static HTTP", exc)
-            # Fall back to static for remaining pages
             for idx, url in enumerate(urls_to_fetch, 1):
                 if url in page_data:
                     continue
@@ -1813,6 +2576,7 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("Migration Complete")
     print("=" * 60)
+    print(f"  Products migrated:      {', '.join(p.name for p in products)}")
     print(f"  Total pages discovered: {total_pages}")
     print(f"  Pages imported:         {imported}")
     print(f"  Pages skipped/failed:   {skipped}")
