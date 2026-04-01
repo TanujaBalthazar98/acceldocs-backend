@@ -261,6 +261,8 @@ async def discover(
         tree, fallback_links = discover_structure(
             body.source_url, use_playwright=use_playwright, apply_category_map=True, max_depth=2
         )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="Discovery timed out. Try disabling Playwright or using a smaller subset.") from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Discovery failed: {exc}") from exc
 

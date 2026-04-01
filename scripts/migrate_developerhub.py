@@ -1025,12 +1025,7 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str, max_depth: int = 0) -> li
         page_obj.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         page_obj.wait_for_load_state("domcontentloaded", timeout=15000)
-        page_obj.wait_for_timeout(3000)
-
-    try:
-        page_obj.wait_for_load_state("networkidle", timeout=15000)
-    except Exception:
-        page_obj.wait_for_timeout(3000)
+        page_obj.wait_for_timeout(1500)
 
     html = page_obj.content()
     soup = BeautifulSoup(html, "html.parser")
@@ -1115,7 +1110,7 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
     try:
         page_obj.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
-        page_obj.wait_for_timeout(3000)
+        page_obj.wait_for_timeout(1500)
 
     section_selectors = [
         ".angular-tree-component .category-container",
@@ -1161,12 +1156,12 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
 
         if sec_idx > 0:
             try:
-                page_obj.goto(current_url, wait_until="networkidle", timeout=30000)
-                page_obj.wait_for_timeout(3000)
+                page_obj.goto(current_url, wait_until="domcontentloaded", timeout=15000)
+                page_obj.wait_for_timeout(1500)
             except Exception:
                 try:
-                    page_obj.goto(current_url, wait_until="domcontentloaded", timeout=30000)
-                    page_obj.wait_for_timeout(3000)
+                    page_obj.goto(current_url, wait_until="domcontentloaded", timeout=15000)
+                    page_obj.wait_for_timeout(1500)
                 except Exception:
                     pass
 
@@ -1185,7 +1180,7 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
         sec_el = section_elements[sec_idx]
         try:
             sec_el.click(timeout=500)
-            page_obj.wait_for_timeout(1500)
+            page_obj.wait_for_timeout(1000)
         except Exception:
             pass
 
@@ -1451,7 +1446,7 @@ def discover_structure(
                 )
                 page_obj = context.new_page()
                 log.info("Playwright: navigating to %s", source_url)
-                page_obj.goto(source_url, wait_until="domcontentloaded", timeout=30000)
+                page_obj.goto(source_url, wait_until="domcontentloaded", timeout=45000)
                 tree = _pw_extract_nav_tree(page_obj, source_url, max_depth=max_depth)
                 browser.close()
         except Exception as exc:
