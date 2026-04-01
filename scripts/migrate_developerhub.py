@@ -1469,7 +1469,28 @@ def discover_structure(
                 page_obj = context.new_page()
                 log.info("Playwright: navigating to %s", source_url)
                 page_obj.goto(source_url, wait_until="domcontentloaded", timeout=45000)
-                tree = _pw_extract_nav_tree(page_obj, source_url, max_depth=max_depth)
+                page_obj.wait_for_timeout(2000)
+                tabs = _pw_discover_tabs(page_obj)
+                if tabs:
+                    log.info("Discovered %d tabs, extracting sections for each", len(tabs))
+                    for tab in tabs:
+                        tab_url = urljoin(base_url, tab["url_path"])
+                        log.info("  Tab: %s -> %s", tab["name"], tab_url)
+                        try:
+                            page_obj.goto(tab_url, wait_until="domcontentloaded", timeout=15000)
+                            page_obj.wait_for_timeout(1000)
+                            tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth)
+                            if tab_tree:
+                                tree.append({
+                                    "title": tab["name"],
+                                    "url": tab_url,
+                                    "depth": 0,
+                                    "children": tab_tree,
+                                })
+                        except Exception as exc:
+                            log.warning("  Failed to extract tab %s: %s", tab["name"], exc)
+                else:
+                    tree = _pw_extract_nav_tree(page_obj, source_url, max_depth=max_depth)
                 browser.close()
         except Exception as exc:
             log.warning("Playwright discovery failed: %s — falling back to static", exc)
