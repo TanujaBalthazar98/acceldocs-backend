@@ -30,7 +30,7 @@ from app.models import User
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/migration", tags=["migration"])
+router = APIRouter(tags=["migration"])
 
 MIGRATION_STATE_DIR = Path(__file__).parent.parent.parent / "migration_states"
 MIGRATION_STATE_DIR.mkdir(exist_ok=True)
