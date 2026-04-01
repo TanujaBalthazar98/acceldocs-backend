@@ -1578,7 +1578,7 @@ def discover_structure(
                                 log.info("  Version %s: %d pages across %d tabs", ver_name, version_page_count, len(version_node["children"]))
                         except Exception as exc:
                             log.warning("  Failed version %s: %s", ver_name, exc)
-                    else:
+                    if not tree:
                         tabs = _pw_discover_tabs(page_obj)
                         if tabs:
                             log.info("Discovered %d tabs, extracting sections for each", len(tabs))
@@ -1599,8 +1599,8 @@ def discover_structure(
                                         })
                                 except Exception as exc:
                                     log.warning("  Failed to extract tab %s: %s", tab["name"], exc)
-                    else:
-                        tree = _pw_extract_nav_tree(page_obj, source_url, max_depth=max_depth)
+                        elif not tree:
+                            tree = _pw_extract_nav_tree(page_obj, source_url, max_depth=max_depth)
                 browser.close()
         except Exception as exc:
             log.warning("Playwright discovery failed: %s — falling back to static", exc)
