@@ -1289,6 +1289,7 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
                 "title": sec_name,
                 "url": None,
                 "depth": 0,
+                "_section_type": "section",
                 "children": [],
             }
             l2_count = 0
@@ -1577,26 +1578,27 @@ def discover_structure(
                                 log.info("  Version %s: %d pages across %d tabs", ver_name, version_page_count, len(version_node["children"]))
                         except Exception as exc:
                             log.warning("  Failed version %s: %s", ver_name, exc)
-                else:
-                    tabs = _pw_discover_tabs(page_obj)
-                    if tabs:
-                        log.info("Discovered %d tabs, extracting sections for each", len(tabs))
-                        for tab in tabs:
-                            tab_url = urljoin(base_url, tab["url_path"])
-                            log.info("  Tab: %s -> %s", tab["name"], tab_url)
-                            try:
-                                page_obj.goto(tab_url, wait_until="domcontentloaded", timeout=15000)
-                                page_obj.wait_for_timeout(1000)
-                                tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth)
-                                if tab_tree:
-                                    tree.append({
-                                        "title": tab["name"],
-                                        "url": tab_url,
-                                        "depth": 0,
-                                        "children": tab_tree,
-                                    })
-                            except Exception as exc:
-                                log.warning("  Failed to extract tab %s: %s", tab["name"], exc)
+                    else:
+                        tabs = _pw_discover_tabs(page_obj)
+                        if tabs:
+                            log.info("Discovered %d tabs, extracting sections for each", len(tabs))
+                            for tab in tabs:
+                                tab_url = urljoin(base_url, tab["url_path"])
+                                log.info("  Tab: %s -> %s", tab["name"], tab_url)
+                                try:
+                                    page_obj.goto(tab_url, wait_until="domcontentloaded", timeout=15000)
+                                    page_obj.wait_for_timeout(1000)
+                                    tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth)
+                                    if tab_tree:
+                                        tree.append({
+                                            "title": tab["name"],
+                                            "url": tab_url,
+                                            "depth": 0,
+                                            "_section_type": "tab",
+                                            "children": tab_tree,
+                                        })
+                                except Exception as exc:
+                                    log.warning("  Failed to extract tab %s: %s", tab["name"], exc)
                     else:
                         tree = _pw_extract_nav_tree(page_obj, source_url, max_depth=max_depth)
                 browser.close()
