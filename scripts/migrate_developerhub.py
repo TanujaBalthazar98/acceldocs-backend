@@ -1110,7 +1110,7 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
     try:
         page_obj.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
-        page_obj.wait_for_timeout(1500)
+        page_obj.wait_for_timeout(2000)
 
     section_selectors = [
         ".angular-tree-component .category-container",
@@ -1146,60 +1146,34 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
 
     log.info("Angular accordion: found %d sections, extracting L2 children", len(section_names))
 
-    current_url = page_obj.url
     tree: list[dict] = []
 
-    skipped_sections = 0
-    for sec_idx, sec_name in enumerate(section_names):
-        if not sec_name:
-            continue
-
-        if sec_idx > 0:
-            try:
-                page_obj.goto(current_url, wait_until="domcontentloaded", timeout=15000)
-                page_obj.wait_for_timeout(1500)
-            except Exception:
-                try:
-                    page_obj.goto(current_url, wait_until="domcontentloaded", timeout=15000)
-                    page_obj.wait_for_timeout(1500)
-                except Exception:
-                    pass
-
-            section_elements = []
-            for sel in section_selectors:
-                try:
-                    section_elements = page_obj.query_selector_all(sel)
-                    if section_elements:
-                        break
-                except Exception:
-                    pass
-
-            if sec_idx >= len(section_elements):
-                continue
-
-        sec_el = section_elements[sec_idx]
+    section_elements = []
+    for sel in section_selectors:
         try:
-            sec_el.click(timeout=500)
-            page_obj.wait_for_timeout(1000)
+            section_elements = page_obj.query_selector_all(sel)
+            if section_elements:
+                break
         except Exception:
             pass
 
-        soup = BeautifulSoup(page_obj.content(), "html.parser")
+    def get_l2_for_section(sec_el: Any) -> list[dict]:
+        try:
+            soup = BeautifulSoup(page_obj.content(), "html.parser")
+        except Exception:
+            return []
         tnc = soup.find("tree-node-collection")
         if not tnc:
-            continue
-
+            return []
         container = tnc.find("div")
         if not container:
-            continue
-
+            return []
         all_tree = container.find_all(
             "div",
             class_=lambda x: (
                 x and "tree-node-level-" in (" ".join(x) if isinstance(x, list) else (x or ""))
             ),
         )
-
         section_positions: dict[str, int] = {}
         for idx, node in enumerate(all_tree):
             classes = node.get("class", [])
@@ -1214,7 +1188,55 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
                     )
                     if span_cat:
                         section_positions[span_cat.get_text(strip=True)] = idx
+        sorted_positions = sorted(section_positions.items(), key=lambda x: x[1])
+        return all_tree, sorted_positions
 
+    prev_expanded_idx = 0
+
+    for sec_idx, sec_name in enumerate(section_names):
+        if not sec_name:
+            continue
+
+        if sec_idx != prev_expanded_idx:
+            try:
+                sec_el = section_elements[sec_idx]
+                sec_el.click(timeout=2000)
+                page_obj.wait_for_timeout(1000)
+                prev_expanded_idx = sec_idx
+            except Exception as exc:
+                log.warning("Could not expand section %d '%s': %s", sec_idx, sec_name, exc)
+                continue
+
+        try:
+            soup = BeautifulSoup(page_obj.content(), "html.parser")
+        except Exception:
+            continue
+        tnc = soup.find("tree-node-collection")
+        if not tnc:
+            continue
+        container = tnc.find("div")
+        if not container:
+            continue
+        all_tree = container.find_all(
+            "div",
+            class_=lambda x: (
+                x and "tree-node-level-" in (" ".join(x) if isinstance(x, list) else (x or ""))
+            ),
+        )
+        section_positions: dict[str, int] = {}
+        for idx, node in enumerate(all_tree):
+            classes = node.get("class", [])
+            classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
+            node_func = node.find("span", class_="node-function")
+            if node_func:
+                node_text = node_func.find("div", class_="node-text")
+                if node_text:
+                    span_cat = node_text.find(
+                        "span",
+                        class_=lambda x: x and "category" in (" ".join(x) if isinstance(x, list) else (x or "")),
+                    )
+                    if span_cat:
+                        section_positions[span_cat.get_text(strip=True)] = idx
         sorted_positions = sorted(section_positions.items(), key=lambda x: x[1])
 
         for s_idx, (s_name, s_pos) in enumerate(sorted_positions):
@@ -1257,7 +1279,7 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
 
                 if has_l3:
                     if max_depth <= 2:
-                        log.info("    Skipping L3 (max_depth=%d): %s", max_depth, l2_url)
+                        pass
                     else:
                         log.info("    L3: extracting from %s", l2_url)
                         l3_nodes = _pw_extract_l3_from_page(page_obj, l2_url)
