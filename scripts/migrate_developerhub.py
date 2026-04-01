@@ -1004,7 +1004,7 @@ def _check_playwright() -> bool:
     return _PLAYWRIGHT_AVAILABLE
 
 
-def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
+def _pw_extract_nav_tree(page_obj: Any, base_url: str, max_depth: int = 0) -> list[dict]:
     """
     Extract the full navigation tree from a Playwright page object.
 
@@ -1040,7 +1040,7 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
         nav_classes = " ".join(nav.get("class", [])) if isinstance(nav.get("class"), list) else nav.get("class", "") or ""
 
         if "angular-tree-component" in nav_classes:
-            tree = _pw_extract_angular_deep(page_obj, nav, base_url)
+            tree = _pw_extract_angular_deep(page_obj, nav, base_url, max_depth=max_depth)
             if tree:
                 all_urls = _collect_all_urls(tree)
                 has_depth = any(n.get("children") for n in tree)
@@ -1095,7 +1095,7 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str) -> list[dict]:
     return _depth_list_to_tree(flat_nodes)
 
 
-def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str) -> list[dict]:
+def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: int = 0) -> list[dict]:
     """
     Extract a deep (3+ level) navigation tree from a DeveloperHub Angular tree.
 
@@ -1261,11 +1261,14 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str) -> list[dic
                 }
 
                 if has_l3:
-                    log.info("    L3: extracting from %s", l2_url)
-                    l3_nodes = _pw_extract_l3_from_page(page_obj, l2_url)
-                    log.info("    L3: got %d nodes for %s", len(l3_nodes), l2_title[:30])
-                    if l3_nodes:
-                        l2_node["children"] = l3_nodes
+                    if max_depth <= 2:
+                        log.info("    Skipping L3 (max_depth=%d): %s", max_depth, l2_url)
+                    else:
+                        log.info("    L3: extracting from %s", l2_url)
+                        l3_nodes = _pw_extract_l3_from_page(page_obj, l2_url)
+                        log.info("    L3: got %d nodes for %s", len(l3_nodes), l2_title[:30])
+                        if l3_nodes:
+                            l2_node["children"] = l3_nodes
 
                 section_node["children"].append(l2_node)
                 l2_count += 1
@@ -1407,6 +1410,7 @@ def discover_structure(
     source_url: str,
     use_playwright: bool = False,
     apply_category_map: bool = True,
+    max_depth: int = 0,
 ) -> tuple[list[dict], list[str]]:
     """
     Discover the navigation hierarchy of the documentation site.
@@ -1448,7 +1452,7 @@ def discover_structure(
                 page_obj = context.new_page()
                 log.info("Playwright: navigating to %s", source_url)
                 page_obj.goto(source_url, wait_until="domcontentloaded", timeout=30000)
-                tree = _pw_extract_nav_tree(page_obj, source_url)
+                tree = _pw_extract_nav_tree(page_obj, source_url, max_depth=max_depth)
                 browser.close()
         except Exception as exc:
             log.warning("Playwright discovery failed: %s — falling back to static", exc)
@@ -1462,7 +1466,7 @@ def discover_structure(
                 len(all_urls),
             )
 
-            if len(all_urls) < 200 and apply_category_map:
+            if len(all_urls) < 200 and apply_category_map and max_depth > 2:
                 log.info(
                     "Playwright sidebar has only %d URLs (collapsed sections) — "
                     "supplementing with sitemap, preserving Playwright section hierarchy",

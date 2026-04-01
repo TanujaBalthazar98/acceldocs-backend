@@ -150,7 +150,7 @@ def _run_migration_in_thread(migration_id: str, params: dict) -> None:
         state["progress"] = {"phase": "discovering", "message": "Discovering structure..."}
         _save_migration_state(migration_id, state)
 
-        tree, fallback_links = _discover_structure(source_url, use_playwright=use_playwright, apply_category_map=True)
+        tree, fallback_links = _discover_structure(source_url, use_playwright=use_playwright, apply_category_map=True, max_depth=0)
 
         max_pages = params.get("max_pages", 0)
         if max_pages > 0 and len(fallback_links) > max_pages:
@@ -259,7 +259,7 @@ async def discover(
 
     try:
         tree, fallback_links = discover_structure(
-            body.source_url, use_playwright=use_playwright, apply_category_map=True
+            body.source_url, use_playwright=use_playwright, apply_category_map=True, max_depth=2
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Discovery failed: {exc}") from exc
