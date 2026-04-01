@@ -43,6 +43,7 @@ from app.api.search import router as search_router
 from app.api.users import router as users_router
 from app.api.ui import router as ui_router
 from app.api.brand_extract import router as brand_extract_router
+from app.api.migration import router as migration_router
 from app.auth.routes import router as auth_router
 
 logging.basicConfig(
@@ -190,3 +191,4 @@ app.include_router(agent_inline_router, tags=["agent-inline"])
 from app.api.agent_history import router as agent_history_router
 app.include_router(agent_history_router, tags=["agent-history"])
 app.include_router(ui_router, tags=["ui"])
+app.include_router(migration_router, prefix="/api/migration", tags=["migration"])
