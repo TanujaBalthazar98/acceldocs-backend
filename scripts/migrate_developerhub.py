@@ -955,6 +955,47 @@ def _pw_switch_version(page_obj: Any, version_label: str) -> bool:
     return False
 
 
+def _pw_discover_versions(page_obj: Any) -> list[dict]:
+    """Discover all available versions from the version picker dropdown.
+
+    Opens the dropdown, reads version names, returns list. Does NOT close the dropdown.
+    Returns list of dicts: [{"name": "Pulse 4.1.x", "href": ""}, ...]
+    """
+    try:
+        page_obj.click("app-version-picker .top-picker", timeout=5000)
+        page_obj.wait_for_timeout(1500)
+    except Exception:
+        return []
+
+    versions: list[dict] = []
+    try:
+        html = page_obj.content()
+        soup = BeautifulSoup(html, "html.parser")
+        picker = soup.find("app-version-picker")
+        if picker:
+            menu = picker.find("ul", class_="dropdown-menu")
+            if menu:
+                for li in menu.find_all("li", role="menuitem"):
+                    text = li.get_text(separator=" ", strip=True)
+                    if text:
+                        versions.append({"name": text})
+    except Exception:
+        pass
+
+    if versions:
+        log.info("Discovered %d versions: %s", len(versions), ", ".join(v["name"] for v in versions))
+    return versions
+
+
+def _pw_close_dropdown(page_obj: Any) -> None:
+    """Close any open dropdown by pressing Escape."""
+    try:
+        page_obj.keyboard.press("Escape")
+        page_obj.wait_for_timeout(300)
+    except Exception:
+        pass
+
+
 def _pw_discover_tabs(page_obj: Any) -> list[dict]:
     """Discover tabs from the current page.
 
@@ -1435,8 +1476,8 @@ def discover_structure(
     Discovery order:
     1. If use_playwright=True (and playwright is installed): launch a headless
        Chromium browser, render the JS sidebar, click open all collapsed sections,
-       and walk the full multi-level tree — this is the only reliable way to get
-       the 4-5 level deep hierarchy from a SPA like docs.acceldata.io.
+       and walk the full multi-level hierarchy for ALL versions and tabs.
+       This extracts everything: all versions, all tabs, all sections/subsections.
     2. Static HTML: fetch with requests and try to find a nav element.
     3. Sitemap.xml fallback with ACCELDATA_CATEGORY_MAP grouping.
 
@@ -1470,27 +1511,78 @@ def discover_structure(
                 log.info("Playwright: navigating to %s", source_url)
                 page_obj.goto(source_url, wait_until="domcontentloaded", timeout=45000)
                 page_obj.wait_for_timeout(2000)
-                tabs = _pw_discover_tabs(page_obj)
-                if tabs:
-                    log.info("Discovered %d tabs, extracting sections for each", len(tabs))
-                    for tab in tabs:
-                        tab_url = urljoin(base_url, tab["url_path"])
-                        log.info("  Tab: %s -> %s", tab["name"], tab_url)
+                versions = _pw_discover_versions(page_obj)
+                _pw_close_dropdown(page_obj)
+                if versions:
+                    log.info("Discovered %d versions, extracting all tabs/sections for each", len(versions))
+                    all_urls: list[str] = []
+                    for ver_idx, ver in enumerate(versions):
+                        ver_name = ver.get("name") or f"Version {ver_idx + 1}"
                         try:
-                            page_obj.goto(tab_url, wait_until="domcontentloaded", timeout=15000)
+                            page_obj.click("app-version-picker .top-picker", timeout=5000)
                             page_obj.wait_for_timeout(1000)
-                            tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth)
-                            if tab_tree:
-                                tree.append({
-                                    "title": tab["name"],
-                                    "url": tab_url,
-                                    "depth": 0,
-                                    "children": tab_tree,
-                                })
+                            page_obj.evaluate(
+                                f"""() => {{
+                                    const items = document.querySelectorAll("app-version-picker li");
+                                    for (const li of items) {{
+                                        if (li.innerText?.trim() === "{ver["name"]}") {{
+                                            li.click();
+                                            break;
+                                        }}
+                                    }}
+                                }}"""
+                            )
+                            page_obj.wait_for_timeout(2000)
+                            ver_url = page_obj.url
+                            log.info("  Version %d/%d: %s -> %s", ver_idx + 1, len(versions), ver_name, ver_url)
+
+                            page_obj.wait_for_timeout(1000)
+                            tabs = _pw_discover_tabs(page_obj)
+                            if not tabs:
+                                tabs = [{"name": ver_name, "url_path": urlparse(ver_url).path.rstrip("/")}]
+
+                            for tab in tabs:
+                                tab_url = urljoin(base_url, tab["url_path"])
+                                try:
+                                    page_obj.goto(tab_url, wait_until="domcontentloaded", timeout=15000)
+                                    page_obj.wait_for_timeout(1000)
+                                    tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth)
+                                    if tab_tree:
+                                        tab_urls = _collect_all_urls(tab_tree)
+                                        all_urls.extend(tab_urls)
+                                        tree.append({
+                                            "title": f"{ver_name} / {tab['name']}",
+                                            "url": tab_url,
+                                            "depth": 0,
+                                            "children": tab_tree,
+                                        })
+                                        log.info("    %s: %d pages", tab["name"], len(tab_urls))
+                                except Exception as exc:
+                                    log.warning("    Failed tab %s: %s", tab["name"], exc)
                         except Exception as exc:
-                            log.warning("  Failed to extract tab %s: %s", tab["name"], exc)
+                            log.warning("  Failed version %s: %s", ver_name, exc)
                 else:
-                    tree = _pw_extract_nav_tree(page_obj, source_url, max_depth=max_depth)
+                    tabs = _pw_discover_tabs(page_obj)
+                    if tabs:
+                        log.info("Discovered %d tabs, extracting sections for each", len(tabs))
+                        for tab in tabs:
+                            tab_url = urljoin(base_url, tab["url_path"])
+                            log.info("  Tab: %s -> %s", tab["name"], tab_url)
+                            try:
+                                page_obj.goto(tab_url, wait_until="domcontentloaded", timeout=15000)
+                                page_obj.wait_for_timeout(1000)
+                                tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth)
+                                if tab_tree:
+                                    tree.append({
+                                        "title": tab["name"],
+                                        "url": tab_url,
+                                        "depth": 0,
+                                        "children": tab_tree,
+                                    })
+                            except Exception as exc:
+                                log.warning("  Failed to extract tab %s: %s", tab["name"], exc)
+                    else:
+                        tree = _pw_extract_nav_tree(page_obj, source_url, max_depth=max_depth)
                 browser.close()
         except Exception as exc:
             log.warning("Playwright discovery failed: %s — falling back to static", exc)
@@ -1504,7 +1596,7 @@ def discover_structure(
                 len(all_urls),
             )
 
-            if len(all_urls) < 200 and apply_category_map and max_depth > 2:
+            if len(all_urls) < 200 and apply_category_map and max_depth > 2 and not versions:
                 log.info(
                     "Playwright sidebar has only %d URLs (collapsed sections) — "
                     "supplementing with sitemap, preserving Playwright section hierarchy",
