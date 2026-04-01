@@ -1541,6 +1541,15 @@ def discover_structure(
                             if not tabs:
                                 tabs = [{"name": ver_name, "url_path": urlparse(ver_url).path.rstrip("/")}]
 
+                            version_node = {
+                                "title": ver_name,
+                                "url": ver_url,
+                                "depth": 0,
+                                "_section_type": "version",
+                                "children": [],
+                            }
+                            version_page_count = 0
+
                             for tab in tabs:
                                 tab_url = urljoin(base_url, tab["url_path"])
                                 try:
@@ -1550,15 +1559,22 @@ def discover_structure(
                                     if tab_tree:
                                         tab_urls = _collect_all_urls(tab_tree)
                                         all_urls.extend(tab_urls)
-                                        tree.append({
-                                            "title": f"{ver_name} / {tab['name']}",
+                                        version_page_count += len(tab_urls)
+                                        tab_node = {
+                                            "title": tab["name"],
                                             "url": tab_url,
                                             "depth": 0,
+                                            "_section_type": "tab",
                                             "children": tab_tree,
-                                        })
+                                        }
+                                        version_node["children"].append(tab_node)
                                         log.info("    %s: %d pages", tab["name"], len(tab_urls))
                                 except Exception as exc:
                                     log.warning("    Failed tab %s: %s", tab["name"], exc)
+
+                            if version_node["children"]:
+                                tree.append(version_node)
+                                log.info("  Version %s: %d pages across %d tabs", ver_name, version_page_count, len(version_node["children"]))
                         except Exception as exc:
                             log.warning("  Failed version %s: %s", ver_name, exc)
                 else:
