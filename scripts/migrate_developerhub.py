@@ -2552,6 +2552,13 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
 
     content_html = str(content_elem)
 
+    # Strip <body> and </body> tags if present (they shouldn't be in the content)
+    if content_html.startswith("<body>"):
+        content_html = content_html[6:]
+    if content_html.endswith("</body>"):
+        content_html = content_html[:-7]
+    content_html = content_html.strip()
+
     # 5. Also produce Markdown as fallback (for pages where raw_html fails)
     # Use placeholders for callouts/tabs since they don't survive pandoc well
     md_soup = BeautifulSoup(content_html, "html.parser")
