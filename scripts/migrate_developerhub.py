@@ -2559,6 +2559,20 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
         content_html = content_html[:-7]
     content_html = content_html.strip()
 
+    # Strip embedded HTML documents (from app-custom-html components)
+    # These appear as <!DOCTYPE html>...<body>...</body> embedded in the content
+    import re
+    # Remove everything from <!DOCTYPE to </body> (the embedded doc)
+    content_html = re.sub(
+        r'<![^>]*DOCTYPE[^>]*>.*?</body>',
+        '',
+        content_html,
+        flags=re.DOTALL | re.IGNORECASE
+    )
+    # Also remove standalone html/body tags that might remain
+    content_html = re.sub(r'</body>', '', content_html, flags=re.IGNORECASE)
+    content_html = content_html.strip()
+
     # 5. Also produce Markdown as fallback (for pages where raw_html fails)
     # Use placeholders for callouts/tabs since they don't survive pandoc well
     md_soup = BeautifulSoup(content_html, "html.parser")
