@@ -2491,7 +2491,7 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
         log.warning("Could not fetch page: %s", url)
         return None
 
-        soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, "html.parser")
     title = ""
     title_tag = soup.find("title")
     if title_tag:
