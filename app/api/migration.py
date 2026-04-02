@@ -174,9 +174,13 @@ def _run_migration_in_thread(migration_id: str, params: dict) -> None:
                     "fetched": idx + 1,
                     "total": len(fallback_links),
                 }
+                # Save page_data periodically so we can resume if interrupted
+                state["page_data"] = page_data
                 _save_migration_state(migration_id, state)
 
+        # Save final page_data
         state = _load_migration_state(migration_id)
+        state["page_data"] = page_data
         state["progress"] = {"phase": "rewriting_links", "message": "Rewriting internal links..."}
         _save_migration_state(migration_id, state)
 
@@ -196,12 +200,16 @@ def _run_migration_in_thread(migration_id: str, params: dict) -> None:
         state["progress"] = {"phase": "importing", "message": "Importing into AccelDocs...", "imported": 0}
         _save_migration_state(migration_id, state)
 
+        migration_state: dict[str, Any] = {
+            "page_id_map": {},
+            "section_map": {},
+        }
         old_url_to_page_id = import_hierarchy(
             client=client,
             tree=tree,
             product_id=product_id,
             page_data=page_data,
-            state={},
+            state=migration_state,
             create_drive_docs=create_drive_docs,
         )
 
@@ -213,9 +221,12 @@ def _run_migration_in_thread(migration_id: str, params: dict) -> None:
             "message": f"Imported {len(old_url_to_page_id)} pages",
             "imported": len(old_url_to_page_id),
         }
+        # Get section count from migration_state
+        sections_created = len(migration_state.get("section_map", {}))
         state["result"] = {
             "pages_imported": len(old_url_to_page_id),
-            "sections_created": sum(1 for v in old_url_to_page_id.values() if v),
+            "sections_created": sections_created,
+            "page_id_map": old_url_to_page_id,
         }
         _save_migration_state(migration_id, state)
 
