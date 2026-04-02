@@ -1579,6 +1579,16 @@ def discover_structure(
                                     tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth)
                                     # Always add tab, even if sidebar is empty
                                     tab_urls = _collect_all_urls(tab_tree) if tab_tree else []
+                                    
+                                    # Sitemap fallback if no sidebar found
+                                    if not tab_tree:
+                                        log.info("    No sidebar for %s — trying sitemap", tab["name"])
+                                        sitemap_urls = _fetch_sitemap_urls(base_url, tab["url_path"])
+                                        if sitemap_urls:
+                                            tab_tree = _sitemap_urls_to_tree(sitemap_urls, apply_category_map=True)
+                                            tab_urls = _collect_all_urls(tab_tree)
+                                            log.info("    %s (sitemap): %d pages", tab["name"], len(tab_urls))
+                                    
                                     all_urls.extend(tab_urls)
                                     version_page_count += len(tab_urls)
                                     tab_node = {
@@ -1592,7 +1602,7 @@ def discover_structure(
                                     if tab_tree:
                                         log.info("    %s: %d pages", tab["name"], len(tab_urls))
                                     else:
-                                        log.info("    %s: no sidebar (empty tab)", tab["name"])
+                                        log.info("    %s: no sidebar or sitemap", tab["name"])
                                 except Exception as exc:
                                     log.warning("    Failed tab %s: %s", tab["name"], exc)
 
