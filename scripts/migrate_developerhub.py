@@ -2560,7 +2560,7 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
     content_html = content_html.strip()
 
     # Strip embedded HTML documents (from app-custom-html components)
-    # These appear as <!DOCTYPE html>...<body>...</body> embedded in the content
+    # These appear as <!DOCTYPE html>...<body>...</body> or <html><head>... embedded in content
     import re
     # Remove everything from <!DOCTYPE to </body> (the embedded doc)
     content_html = re.sub(
@@ -2569,7 +2569,15 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
         content_html,
         flags=re.DOTALL | re.IGNORECASE
     )
-    # Also remove standalone html/body tags that might remain
+    # Remove embedded <html><head>...</html> documents
+    content_html = re.sub(
+        r'<html[^>]*>.*?</html>',
+        '',
+        content_html,
+        flags=re.DOTALL | re.IGNORECASE
+    )
+    # Also remove standalone body tags
+    content_html = re.sub(r'<body[^>]*>', '', content_html, flags=re.IGNORECASE)
     content_html = re.sub(r'</body>', '', content_html, flags=re.IGNORECASE)
     content_html = content_html.strip()
 
