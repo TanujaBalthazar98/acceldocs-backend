@@ -606,8 +606,19 @@ def _walk_nav_tree(element: Tag, base_url: str, depth: int = 0) -> list[dict]:
         if href and not href.startswith("#") and not href.startswith("javascript"):
             url = urljoin(base_url, href)
 
+        # If no title from sidebar link, try URL slug
+        if not title and url:
+            from urllib.parse import urlparse, unquote
+            parsed = urlparse(url)
+            slug = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+            slug = unquote(slug)
+            title = slug.replace("-", " ").replace("_", " ").strip()
+            title = " ".join(word.capitalize() for word in title.split() if word) or "Untitled"
+        elif not title:
+            title = "Untitled"
+
         node: dict[str, Any] = {
-            "title": title or "Untitled",
+            "title": title,
             "url": url,
             "depth": depth,
             "children": [],
@@ -1310,6 +1321,15 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
 
                 l2_url = urljoin(base_url, href)
                 l2_title = anchor.get_text(separator=" ", strip=True)
+                
+                # If no title from sidebar, try URL slug
+                if not l2_title:
+                    from urllib.parse import urlparse, unquote
+                    parsed = urlparse(l2_url)
+                    slug = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+                    slug = unquote(slug)
+                    l2_title = slug.replace("-", " ").replace("_", " ").strip()
+                    l2_title = " ".join(word.capitalize() for word in l2_title.split() if word) or "Untitled"
 
                 has_l3 = "tree-node-collapsed" in classes_str
                 l2_node: dict[str, Any] = {
@@ -1557,19 +1577,22 @@ def discover_structure(
                                     page_obj.goto(tab_url, wait_until="domcontentloaded", timeout=15000)
                                     page_obj.wait_for_timeout(1000)
                                     tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth)
+                                    # Always add tab, even if sidebar is empty
+                                    tab_urls = _collect_all_urls(tab_tree) if tab_tree else []
+                                    all_urls.extend(tab_urls)
+                                    version_page_count += len(tab_urls)
+                                    tab_node = {
+                                        "title": tab["name"],
+                                        "url": tab_url,
+                                        "depth": 0,
+                                        "_section_type": "tab",
+                                        "children": tab_tree or [],
+                                    }
+                                    version_node["children"].append(tab_node)
                                     if tab_tree:
-                                        tab_urls = _collect_all_urls(tab_tree)
-                                        all_urls.extend(tab_urls)
-                                        version_page_count += len(tab_urls)
-                                        tab_node = {
-                                            "title": tab["name"],
-                                            "url": tab_url,
-                                            "depth": 0,
-                                            "_section_type": "tab",
-                                            "children": tab_tree,
-                                        }
-                                        version_node["children"].append(tab_node)
                                         log.info("    %s: %d pages", tab["name"], len(tab_urls))
+                                    else:
+                                        log.info("    %s: no sidebar (empty tab)", tab["name"])
                                 except Exception as exc:
                                     log.warning("    Failed tab %s: %s", tab["name"], exc)
 
@@ -1589,14 +1612,14 @@ def discover_structure(
                                     page_obj.goto(tab_url, wait_until="domcontentloaded", timeout=15000)
                                     page_obj.wait_for_timeout(1000)
                                     tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth)
-                                    if tab_tree:
-                                        tree.append({
-                                            "title": tab["name"],
-                                            "url": tab_url,
-                                            "depth": 0,
-                                            "_section_type": "tab",
-                                            "children": tab_tree,
-                                        })
+                                    # Always add tab, even if sidebar is empty
+                                    tree.append({
+                                        "title": tab["name"],
+                                        "url": tab_url,
+                                        "depth": 0,
+                                        "_section_type": "tab",
+                                        "children": tab_tree or [],
+                                    })
                                 except Exception as exc:
                                     log.warning("  Failed to extract tab %s: %s", tab["name"], exc)
                         elif not tree:
@@ -2458,7 +2481,7 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
         log.warning("Could not fetch page: %s", url)
         return None
 
-    soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, "html.parser")
     title = ""
     title_tag = soup.find("title")
     if title_tag:
@@ -2467,6 +2490,16 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
             title = title.split(" | ")[0].strip()
         elif " - " in title:
             title = title.split(" - ")[0].strip()
+
+    # If no title found, try to extract from URL slug
+    if not title:
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(url)
+        slug = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+        slug = unquote(slug)
+        title = slug.replace("-", " ").replace("_", " ").replace("/", " ").strip()
+        # Capitalize words
+        title = " ".join(word.capitalize() for word in title.split() if word)
 
     # 1. Extract main content area first
     content_elem = None
