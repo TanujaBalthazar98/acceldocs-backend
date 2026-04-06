@@ -2250,18 +2250,39 @@ def _clean_developerhub_html(soup_elem: Tag) -> None:
     for tag in soup_elem.find_all(["script", "style", "noscript"]):
         tag.decompose()
 
-    # Remove known DeveloperHub UI chrome divs
+    # Remove Angular component tags (app-*)
+    for tag in list(soup_elem.find_all(True)):
+        if tag.name and tag.name.startswith("app-"):
+            tag.decompose()
+        elif tag.name in ("app-root",):
+            tag.decompose()
+
+    # Remove known DeveloperHub UI chrome divs and popup elements
+    ui_classes_to_remove = [
+        "sidebar", "nav-", "breadcrumb", "footer", "header-",
+        "feedback", "was-this-helpful", "edit-page", "table-of-contents",
+        "on-this-page", "page-nav", "pagination",
+        # Popup/menu elements that are UI, not content
+        "link-selector", "in-doc-menu", "context-popper", "context-popper-container",
+        "glossary-popper", "glossary-popper-container", "glossary-popper-arrow",
+        "items-container", "notification-", "cookie-consent",
+        # HR-like elements
+        "hr", "line",
+        # Hidden elements
+        "d-none",
+    ]
     for div in soup_elem.find_all("div"):
         try:
             classes = " ".join(div.get("class", []) or []).lower()
         except (AttributeError, TypeError):
             continue
-        if any(x in classes for x in [
-            "sidebar", "nav-", "breadcrumb", "footer", "header-",
-            "feedback", "was-this-helpful", "edit-page", "table-of-contents",
-            "on-this-page", "page-nav", "pagination",
-        ]):
+        if any(x in classes for x in ui_classes_to_remove):
             div.decompose()
+
+    # Convert <div class="hr"> to <hr>
+    for hr_div in soup_elem.find_all("div", class_="hr"):
+        hr = soup_elem.new_tag("hr")
+        hr_div.replace_with(hr)
 
     def _strip_attrs(tag: Tag) -> None:
         if not hasattr(tag, "attrs") or not tag.attrs:
@@ -2392,6 +2413,68 @@ def _convert_codemirror_to_code_blocks(soup_elem: Tag) -> None:
 
         # Replace the entire CodeMirror-code wrapper with the code block
         wrapper.replace_with(pre_elem)
+
+
+def _convert_code_block_components(soup_elem: Tag) -> None:
+    """
+    Extract code blocks from DeveloperHub <app-code-block> Angular components.
+
+    DeveloperHub renders code in <app-code-block> components with the actual
+    code stored in a pluginobject JSON attribute as URL-encoded data.
+
+    Example structure:
+        <app-code-block pluginobject='{"data":{"languageBlocks":[{"code":"...","language":"bash"}]}}'>
+
+    We extract the code and language, then create proper <pre><code class="language-*"> blocks.
+    """
+    import json as _json
+    from urllib.parse import unquote as _unquote
+
+    code_blocks = list(soup_elem.find_all("app-code-block"))
+    if not code_blocks:
+        return
+
+    for block in code_blocks:
+        plugin_obj = block.get("pluginobject", "")
+        if not plugin_obj:
+            block.decompose()
+            continue
+
+        try:
+            # URL-decode the JSON first
+            decoded_plugin = _unquote(plugin_obj)
+            data = _json.loads(decoded_plugin)
+            language_blocks = data.get("data", {}).get("languageBlocks", [])
+            if not language_blocks:
+                block.decompose()
+                continue
+
+            # Create container for code blocks
+            container = BeautifulSoup("", "html.parser").new_tag("div")
+            container["class"] = "code-blocks"
+
+            for lang_block in language_blocks:
+                code = lang_block.get("code", "")
+                language = lang_block.get("language", "")
+
+                if not code:
+                    continue
+
+                # Create <pre><code class="language-{lang}">{code}</code></pre>
+                pre_tag = BeautifulSoup("", "html.parser").new_tag("pre")
+                code_tag = BeautifulSoup("", "html.parser").new_tag("code")
+                if language:
+                    code_tag["class"] = f"language-{language}"
+                code_tag.string = _unquote(code)
+                pre_tag.append(code_tag)
+                container.append(pre_tag)
+
+            # Replace the Angular component with our clean code blocks
+            block.replace_with(container)
+
+        except Exception as exc:
+            log.debug("Failed to convert code block: %s", exc)
+            block.decompose()
 
 
 def _convert_custom_html_components(soup_elem: Tag) -> None:
@@ -2544,7 +2627,11 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
     #    (e.g., compatibility matrices, custom styled sections)
     _convert_custom_html_components(content_elem)
 
-    # 5. Convert CodeMirror-rendered code lines to proper <pre><code> blocks
+    # 5. Extract code blocks from <app-code-block> components
+    #    (these contain shell commands, config files, etc.)
+    _convert_code_block_components(content_elem)
+
+    # 6. Convert CodeMirror-rendered code lines to proper <pre><code> blocks
     _convert_codemirror_to_code_blocks(content_elem)
 
     # 5. Clean up the HTML: strip DeveloperHub-specific wrappers, classes, scripts
