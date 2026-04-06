@@ -270,6 +270,8 @@ def _run_migration_in_thread(migration_id: str, params: dict) -> None:
             logger.info("Tree import covered %d/%d pages, importing remaining %d pages directly",
                        pages_imported_via_tree, pages_in_page_data, pages_in_page_data - pages_imported_via_tree)
 
+            import time
+            
             # Import pages that weren't imported via the tree
             for idx, (url, data) in enumerate(page_data.items()):
                 if url in old_url_to_page_id:
@@ -294,8 +296,24 @@ def _run_migration_in_thread(migration_id: str, params: dict) -> None:
                     if page_id:
                         old_url_to_page_id[url] = page_id
                         migration_state["page_id_map"][url] = page_id
+                    
+                    # Rate limiting: add small delay to avoid hitting API rate limits (200/min)
+                    time.sleep(0.35)
+                    
+                    # Update progress every 10 pages
+                    if idx % 10 == 0:
+                        state = _load_migration_state(migration_id)
+                        state["progress"] = {
+                            "phase": "importing_fallback",
+                            "message": f"Importing pages... {idx + 1}/{pages_in_page_data - pages_imported_via_tree}",
+                            "imported": idx + 1,
+                            "total": pages_in_page_data - pages_imported_via_tree,
+                        }
+                        _save_migration_state(migration_id, state)
+                        
                 except Exception as exc:
                     logger.warning("Failed to import page %s: %s", url, exc)
+                    time.sleep(1)  # Longer delay on error
 
         state = _load_migration_state(migration_id)
         state["status"] = "completed"

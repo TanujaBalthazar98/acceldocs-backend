@@ -2880,8 +2880,10 @@ def import_hierarchy(
             state["page_id_map"] = old_url_to_page_id
             save_state(state)
             log.info("Imported page '%s' → id=%d", title, page_id)
+            time.sleep(0.35)  # Rate limiting: 200 requests/min = 0.3s per request
         except Exception as exc:
             log.error("Failed to import page '%s' (%s): %s", title, url, exc)
+            time.sleep(1)  # Longer delay on error
 
     for order, node in enumerate(tree):
         _import_node(node, product_id, "", order)
