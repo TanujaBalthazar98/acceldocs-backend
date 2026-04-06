@@ -32,8 +32,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["migration"])
 
-MIGRATION_STATE_DIR = Path(__file__).parent.parent.parent / "migration_states"
-MIGRATION_STATE_DIR.mkdir(exist_ok=True)
+# Use /tmp for state files (writable on Vercel, Heroku, etc.)
+# Falls back to local directory if not in serverless environment
+_migration_state_dir = Path("/tmp/migration_states")
+try:
+    _migration_state_dir.mkdir(exist_ok=True)
+except OSError:
+    # Fallback to local directory for local development
+    _migration_state_dir = Path(__file__).parent.parent.parent / "migration_states"
+    _migration_state_dir.mkdir(exist_ok=True)
+
+MIGRATION_STATE_DIR = _migration_state_dir
 
 
 class DiscoverRequest(BaseModel):
