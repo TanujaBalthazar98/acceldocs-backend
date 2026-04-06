@@ -164,19 +164,58 @@ def _run_migration_in_thread(migration_id: str, params: dict) -> None:
         _save_migration_state(migration_id, state)
 
         page_data: dict[str, Any] = {}
-        for idx, url in enumerate(fallback_links):
-            page_data[url] = fetch_and_convert_page(url)
-            if idx % 50 == 0:
-                state = _load_migration_state(migration_id)
-                state["progress"] = {
-                    "phase": "fetching",
-                    "message": f"Fetching pages... {idx + 1}/{len(fallback_links)}",
-                    "fetched": idx + 1,
-                    "total": len(fallback_links),
-                }
-                # Save page_data periodically so we can resume if interrupted
-                state["page_data"] = page_data
-                _save_migration_state(migration_id, state)
+
+        if use_playwright:
+            from playwright.sync_api import sync_playwright
+            from migrate_developerhub import _fetch_html_playwright
+
+            try:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.launch(headless=True)
+                    context = browser.new_context(
+                        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+                    )
+                    for idx, url in enumerate(fallback_links):
+                        result = fetch_and_convert_page(url, pw_browser=context)
+                        page_data[url] = result
+                        if idx % 10 == 0:
+                            state = _load_migration_state(migration_id)
+                            state["progress"] = {
+                                "phase": "fetching",
+                                "message": f"Fetching pages... {idx + 1}/{len(fallback_links)}",
+                                "fetched": idx + 1,
+                                "total": len(fallback_links),
+                            }
+                            state["page_data"] = page_data
+                            _save_migration_state(migration_id, state)
+                    browser.close()
+            except Exception as exc:
+                logger.warning("Playwright page fetch failed: %s — falling back to static", exc)
+                for idx, url in enumerate(fallback_links):
+                    page_data[url] = fetch_and_convert_page(url)
+                    if idx % 50 == 0:
+                        state = _load_migration_state(migration_id)
+                        state["progress"] = {
+                            "phase": "fetching",
+                            "message": f"Fetching pages... {idx + 1}/{len(fallback_links)}",
+                            "fetched": idx + 1,
+                            "total": len(fallback_links),
+                        }
+                        state["page_data"] = page_data
+                        _save_migration_state(migration_id, state)
+        else:
+            for idx, url in enumerate(fallback_links):
+                page_data[url] = fetch_and_convert_page(url)
+                if idx % 50 == 0:
+                    state = _load_migration_state(migration_id)
+                    state["progress"] = {
+                        "phase": "fetching",
+                        "message": f"Fetching pages... {idx + 1}/{len(fallback_links)}",
+                        "fetched": idx + 1,
+                        "total": len(fallback_links),
+                    }
+                    state["page_data"] = page_data
+                    _save_migration_state(migration_id, state)
 
         # Save final page_data
         state = _load_migration_state(migration_id)
