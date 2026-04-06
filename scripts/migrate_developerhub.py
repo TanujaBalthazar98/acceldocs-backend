@@ -1717,7 +1717,7 @@ def discover_structure(
         html = fetch_html(source_url)
         if not html:
             log.error("Could not load source URL: %s", source_url)
-            sys.exit(1)
+            raise RuntimeError(f"Could not load source URL: {source_url}")
 
         soup = BeautifulSoup(html, "html.parser")
         nav = _find_nav(soup)
@@ -1756,7 +1756,7 @@ def discover_structure(
                 tree.append({"title": title, "url": url, "depth": 0, "children": []})
         else:
             log.error("Could not discover any pages. Check the source URL.")
-            sys.exit(1)
+            raise RuntimeError("Could not discover any pages from the source URL. Check that the URL is accessible and has a sitemap.xml.")
 
     # If we got a static/sitemap tree that is suspiciously flat, apply category map
     if not use_playwright and apply_category_map:
