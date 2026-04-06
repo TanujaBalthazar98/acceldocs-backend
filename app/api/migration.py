@@ -152,6 +152,12 @@ def _run_migration_in_thread(migration_id: str, params: dict) -> None:
 
         tree, fallback_links = _discover_structure(source_url, use_playwright=use_playwright, apply_category_map=True, max_depth=0)
 
+        # Save tree and fallback_links to state for debugging and resume
+        state = _load_migration_state(migration_id)
+        state["tree"] = tree
+        state["fallback_links"] = fallback_links
+        _save_migration_state(migration_id, state)
+
         max_pages = params.get("max_pages", 0)
         if max_pages > 0 and len(fallback_links) > max_pages:
             fallback_links = fallback_links[:max_pages]
@@ -251,6 +257,45 @@ def _run_migration_in_thread(migration_id: str, params: dict) -> None:
             state=migration_state,
             create_drive_docs=create_drive_docs,
         )
+
+        # Fallback: import any pages from page_data that weren't imported via tree
+        state = _load_migration_state(migration_id)
+        state["progress"] = {"phase": "importing_fallback", "message": "Importing remaining pages..."}
+        _save_migration_state(migration_id, state)
+
+        pages_imported_via_tree = len(old_url_to_page_id)
+        pages_in_page_data = len(page_data)
+
+        if pages_in_page_data > pages_imported_via_tree:
+            logger.info("Tree import covered %d/%d pages, importing remaining %d pages directly",
+                       pages_imported_via_tree, pages_in_page_data, pages_in_page_data - pages_imported_via_tree)
+
+            # Import pages that weren't imported via the tree
+            for idx, (url, data) in enumerate(page_data.items()):
+                if url in old_url_to_page_id:
+                    continue
+                if not data or not data.get("raw_html"):
+                    continue
+
+                try:
+                    title = data.get("title", url.split("/")[-1])
+                    html_content = data.get("raw_html", "")
+                    drive_html = data.get("raw_html", "")
+
+                    result = client.import_page(
+                        title=title,
+                        html_content=html_content,
+                        section_id=product_id,  # Import to product root if no section found
+                        display_order=1000 + idx,
+                        create_drive_doc=create_drive_docs,
+                        drive_html_content=drive_html,
+                    )
+                    page_id = result.get("id")
+                    if page_id:
+                        old_url_to_page_id[url] = page_id
+                        migration_state["page_id_map"][url] = page_id
+                except Exception as exc:
+                    logger.warning("Failed to import page %s: %s", url, exc)
 
         state = _load_migration_state(migration_id)
         state["status"] = "completed"
