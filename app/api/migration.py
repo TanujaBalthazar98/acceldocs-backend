@@ -380,17 +380,23 @@ async def discover(
     use_playwright = body.use_playwright
 
     try:
-        tree, fallback_links = await asyncio.to_thread(
-            discover_structure,
-            body.source_url,
-            use_playwright=use_playwright,
-            apply_category_map=True,
-            max_depth=2,
+        tree, fallback_links = await asyncio.wait_for(
+            asyncio.to_thread(
+                discover_structure,
+                body.source_url,
+                use_playwright=use_playwright,
+                apply_category_map=True,
+                max_depth=2,
+            ),
+            timeout=55.0,
         )
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="Discovery timed out. Try disabling Playwright or using a smaller subset.") from exc
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="Discovery timed out after 55 seconds. The source site may be slow or unreachable.",
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Discovery failed: {exc}") from exc
+        raise HTTPException(status_code=400, detail=f"Discovery failed: {exc!r}") from exc
 
     return DiscoverResponse(
         source_url=body.source_url,
