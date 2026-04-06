@@ -1,0 +1,458 @@
+{% extends "base.html" %}
+
+{% block title %}Migration — AccelDocs{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 2rem;">
+    <h1 style="margin: 0 0 0.5rem 0;">Import Documentation</h1>
+    <p style="margin: 0; color: #666;">Import documentation from external sources like GitBook, DeveloperHub, or custom URLs into AccelDocs.</p>
+</div>
+
+<!-- Migration Form Card -->
+<div class="card mb-4">
+    <div style="padding: 1.5rem; border-bottom: 1px solid #eee;">
+        <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Source Configuration</h2>
+    </div>
+    <div style="padding: 1.5rem;">
+        <div style="display: grid; gap: 1.5rem;">
+            <!-- Source URL -->
+            <div>
+                <label class="form-label">Source URL *</label>
+                <input type="url" id="source_url" class="form-input" placeholder="https://docs.acceldata.io/pulse" required>
+                <p class="form-help">The URL of the documentation site to import from</p>
+            </div>
+
+            <!-- Target Configuration -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                <div>
+                    <label class="form-label">Backend URL *</label>
+                    <input type="url" id="backend_url" class="form-input" placeholder="https://api.acceldata.io" required>
+                    <p class="form-help">AccelDocs backend API URL</p>
+                </div>
+                <div>
+                    <label class="form-label">API Token *</label>
+                    <input type="password" id="api_token" class="form-input" placeholder="eyJ..." required>
+                    <p class="form-help">JWT token from AccelDocs account</p>
+                </div>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;">
+                <div>
+                    <label class="form-label">Organization ID *</label>
+                    <input type="number" id="org_id" class="form-input" placeholder="1" required>
+                    <p class="form-help">AccelDocs organization ID</p>
+                </div>
+                <div>
+                    <label class="form-label">Product/Section ID *</label>
+                    <input type="number" id="product_id" class="form-input" placeholder="123" required>
+                    <p class="form-help">Target section ID in AccelDocs</p>
+                </div>
+                <div>
+                    <label class="form-label">Product Name</label>
+                    <input type="text" id="product_name" class="form-input" placeholder="pulse" value="pulse">
+                    <p class="form-help">Product identifier (e.g., pulse, adoc, odp)</p>
+                </div>
+            </div>
+
+            <!-- Options -->
+            <div>
+                <label class="form-label" style="margin-bottom: 0.5rem;">Options</label>
+                <div style="display: flex; gap: 1.5rem; flex-wrap: wrap;">
+                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                        <input type="checkbox" id="use_playwright" onchange="togglePlaywrightWarning()">
+                        <span>Use Playwright (full hierarchy)</span>
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                        <input type="checkbox" id="create_drive_docs">
+                        <span>Create Google Drive docs</span>
+                    </label>
+                </div>
+                <p id="playwright_warning" class="form-help" style="color: #f59e0b; display: none; margin-top: 0.5rem;">
+                    ⚠️ Playwright is slower but provides the full 3-level hierarchy (sections → pages → sub-pages)
+                </p>
+            </div>
+
+            <!-- Actions -->
+            <div style="display: flex; gap: 0.75rem; padding-top: 0.5rem; border-top: 1px solid #eee;">
+                <button onclick="discoverSource()" class="btn" style="background: #e5e7eb; color: #374151;">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 0.5rem;">
+                        <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                    </svg>
+                    Discover Structure
+                </button>
+                <button onclick="startMigration()" id="startBtn" class="btn btn-primary" disabled>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 0.5rem;">
+                        <polygon points="5 3 19 12 5 21 5 3"/>
+                    </svg>
+                    Start Migration
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Discovery Results -->
+<div id="discoveryResults" class="card mb-4" style="display: none;">
+    <div style="padding: 1.5rem; border-bottom: 1px solid #eee;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Discovery Results</h2>
+            <span id="discoveryStats" style="color: #666; font-size: 14px;"></span>
+        </div>
+    </div>
+    <div style="padding: 1.5rem;">
+        <div id="hierarchyTree" style="font-family: monospace; font-size: 13px; line-height: 1.8;"></div>
+    </div>
+</div>
+
+<!-- Progress Card -->
+<div id="progressCard" class="card mb-4" style="display: none;">
+    <div style="padding: 1.5rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+            <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Migration Progress</h2>
+            <button onclick="cancelMigration()" id="cancelBtn" class="btn" style="background: #fee2e2; color: #991b1b;">
+                Cancel
+            </button>
+        </div>
+        
+        <!-- Progress Bar -->
+        <div style="margin-bottom: 1rem;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                <span id="progressPhase" style="font-weight: 500;">Discovering...</span>
+                <span id="progressPercent" style="color: #666;">0%</span>
+            </div>
+            <div style="height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden;">
+                <div id="progressBar" style="height: 100%; background: #3b82f6; width: 0%; transition: width 0.3s;"></div>
+            </div>
+        </div>
+
+        <!-- Status Messages -->
+        <div id="statusMessages" style="background: #f8fafc; padding: 1rem; border-radius: 6px; font-family: monospace; font-size: 13px; max-height: 200px; overflow-y: auto;"></div>
+    </div>
+</div>
+
+<!-- Migration History -->
+<div class="card">
+    <div style="padding: 1.5rem; border-bottom: 1px solid #eee;">
+        <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Migration History</h2>
+    </div>
+    <div style="padding: 1.5rem;">
+        <div id="migrationHistory">
+            <p style="color: #666; text-align: center; padding: 2rem;">No migrations yet</p>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentMigrationId = null;
+let pollInterval = null;
+
+// Load migration history on page load
+document.addEventListener('DOMContentLoaded', loadMigrationHistory);
+
+function togglePlaywrightWarning() {
+    const checked = document.getElementById('use_playwright').checked;
+    document.getElementById('playwright_warning').style.display = checked ? 'block' : 'none';
+}
+
+async function discoverSource() {
+    const sourceUrl = document.getElementById('source_url').value;
+    const productName = document.getElementById('product_name').value || 'pulse';
+    const usePlaywright = document.getElementById('use_playwright').checked;
+
+    if (!sourceUrl) {
+        alert('Please enter a source URL');
+        return;
+    }
+
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = 'Discovering...';
+
+    try {
+        const response = await fetch('/api/migration/discover', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            'X-Org-Id': getOrgId(),
+            'Authorization': 'Bearer ' + getToken()
+            },
+            body: JSON.stringify({
+                source_url: sourceUrl,
+                product: productName,
+                use_playwright: usePlaywright
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Discovery failed');
+        }
+
+        const data = await response.json();
+        showDiscoveryResults(data);
+        
+        // Enable start button
+        document.getElementById('startBtn').disabled = false;
+    } catch (error) {
+        alert('Discovery failed: ' + error.message);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 0.5rem;">
+                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            Discover Structure
+        `;
+    }
+}
+
+function showDiscoveryResults(data) {
+    const resultsDiv = document.getElementById('discoveryResults');
+    const statsSpan = document.getElementById('discoveryStats');
+    const treeDiv = document.getElementById('hierarchyTree');
+
+    statsSpan.textContent = `${data.total_pages} pages across ${data.products.length} product(s)`;
+
+    // Build tree view
+    let treeHtml = '';
+    function renderNode(node, indent = '') {
+        const hasChildren = node.children && node.children.length > 0;
+        const icon = hasChildren ? '📁' : '📄';
+        treeHtml += `${indent}${icon} ${node.name || node.title || 'Unnamed'}\n`;
+        if (hasChildren) {
+            node.children.forEach(child => renderNode(child, indent + '  '));
+        }
+    }
+    
+    data.hierarchy.forEach(node => renderNode(node));
+    treeDiv.textContent = treeHtml;
+
+    resultsDiv.style.display = 'block';
+}
+
+async function startMigration() {
+    const sourceUrl = document.getElementById('source_url').value;
+    const productName = document.getElementById('product_name').value || 'pulse';
+    const backendUrl = document.getElementById('backend_url').value;
+    const apiToken = document.getElementById('api_token').value;
+    const orgId = parseInt(document.getElementById('org_id').value);
+    const productId = parseInt(document.getElementById('product_id').value);
+    const usePlaywright = document.getElementById('use_playwright').checked;
+    const createDriveDocs = document.getElementById('create_drive_docs').checked;
+
+    if (!sourceUrl || !backendUrl || !apiToken || !orgId || !productId) {
+        alert('Please fill in all required fields');
+        return;
+    }
+
+    const btn = document.getElementById('startBtn');
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+
+    try {
+        const response = await fetch('/api/migration/start', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Org-Id': getOrgId(),
+                'Authorization': 'Bearer ' + getToken()
+            },
+            body: JSON.stringify({
+                source_url: sourceUrl,
+                product: productName,
+                backend_url: backendUrl,
+                api_token: apiToken,
+                org_id: orgId,
+                product_id: productId,
+                use_playwright: usePlaywright,
+                create_drive_docs: createDriveDocs
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to start migration');
+        }
+
+        const data = await response.json();
+        currentMigrationId = data.migration_id;
+        
+        showProgressCard();
+        startPolling();
+
+    } catch (error) {
+        alert('Failed to start migration: ' + error.message);
+        btn.disabled = false;
+        btn.textContent = 'Start Migration';
+    }
+}
+
+function showProgressCard() {
+    const card = document.getElementById('progressCard');
+    card.style.display = 'block';
+    document.getElementById('statusMessages').innerHTML = '<span style="color: #3b82f6;">Starting migration...</span>';
+}
+
+function startPolling() {
+    if (pollInterval) clearInterval(pollInterval);
+    
+    pollInterval = setInterval(async () => {
+        if (!currentMigrationId) return;
+
+        try {
+            const response = await fetch(`/api/migration/status/${currentMigrationId}`, {
+                headers: {
+                    'X-Org-Id': getOrgId(),
+                    'Authorization': 'Bearer ' + getToken()
+                }
+            });
+
+            if (!response.ok) return;
+
+            const data = await response.json();
+            updateProgress(data);
+
+            if (['completed', 'failed', 'cancelled'].includes(data.status)) {
+                clearInterval(pollInterval);
+                loadMigrationHistory();
+                
+                if (data.status === 'completed') {
+                    document.getElementById('statusMessages').innerHTML += 
+                        `<span style="color: #059669;">\n✓ Migration completed!</span>`;
+                } else if (data.status === 'failed') {
+                    document.getElementById('statusMessages').innerHTML += 
+                        `<span style="color: #dc2626;">\n✗ Migration failed: ${data.error || 'Unknown error'}</span>`;
+                }
+            }
+        } catch (error) {
+            console.error('Poll error:', error);
+        }
+    }, 2000);
+}
+
+function updateProgress(data) {
+    const progress = data.progress || {};
+    const phase = progress.phase || 'unknown';
+    const message = progress.message || '';
+    
+    document.getElementById('progressPhase').textContent = phase.charAt(0).toUpperCase() + phase.slice(1);
+    
+    // Calculate percentage based on phase
+    let percent = 0;
+    if (phase === 'discovering') percent = 10;
+    else if (phase === 'fetching') percent = 30;
+    else if (phase === 'rewriting_links') percent = 50;
+    else if (phase === 'importing') percent = 70;
+    else if (phase === 'completed') percent = 100;
+    
+    document.getElementById('progressPercent').textContent = percent + '%';
+    document.getElementById('progressBar').style.width = percent + '%';
+    
+    const messages = document.getElementById('statusMessages');
+    messages.innerHTML += `<div style="color: #666;">→ ${message}</div>`;
+    messages.scrollTop = messages.scrollHeight;
+}
+
+async function cancelMigration() {
+    if (!currentMigrationId) return;
+
+    if (!confirm('Are you sure you want to cancel this migration?')) return;
+
+    try {
+        await fetch(`/api/migration/cancel/${currentMigrationId}`, {
+            method: 'POST',
+            headers: {
+                'X-Org-Id': getOrgId(),
+                'Authorization': 'Bearer ' + getToken()
+            }
+        });
+        
+        clearInterval(pollInterval);
+        document.getElementById('statusMessages').innerHTML += 
+            '<span style="color: #f59e0b;">Migration cancelled by user</span>';
+        document.getElementById('cancelBtn').disabled = true;
+    } catch (error) {
+        alert('Failed to cancel migration: ' + error.message);
+    }
+}
+
+async function loadMigrationHistory() {
+    try {
+        const response = await fetch('/api/migration/history', {
+            headers: {
+                'X-Org-Id': getOrgId(),
+                'Authorization': 'Bearer ' + getToken()
+            }
+        });
+
+        if (!response.ok) return;
+
+        const migrations = await response.json();
+        const historyDiv = document.getElementById('migrationHistory');
+
+        if (migrations.length === 0) {
+            historyDiv.innerHTML = '<p style="color: #666; text-align: center; padding: 2rem;">No migrations yet</p>';
+            return;
+        }
+
+        let html = `
+            <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                    <tr style="border-bottom: 1px solid #eee; text-align: left;">
+                        <th style="padding: 0.75rem;">Source</th>
+                        <th style="padding: 0.75rem;">Product</th>
+                        <th style="padding: 0.75rem;">Status</th>
+                        <th style="padding: 0.75rem;">Progress</th>
+                        <th style="padding: 0.75rem;">Started</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        migrations.forEach(m => {
+            const statusColor = {
+                'completed': '#059669',
+                'failed': '#dc2626',
+                'cancelled': '#f59e0b',
+                'running': '#3b82f6',
+                'pending': '#666'
+            }[m.status] || '#666';
+
+            const progressText = m.result ? `${m.result.pages_imported} pages` : (m.progress?.message || '-');
+
+            html += `
+                <tr style="border-bottom: 1px solid #f1f5f9;">
+                    <td style="padding: 0.75rem;">${m.source_url || '-'}</td>
+                    <td style="padding: 0.75rem;">${m.product || '-'}</td>
+                    <td style="padding: 0.75rem;">
+                        <span style="color: ${statusColor}; font-weight: 500;">${m.status || '-'}</span>
+                    </td>
+                    <td style="padding: 0.75rem;">${progressText}</td>
+                    <td style="padding: 0.75rem; color: #666;">${formatDate(m.started_at)}</td>
+                </tr>
+            `;
+        });
+
+        html += '</tbody></table>';
+        historyDiv.innerHTML = html;
+    } catch (error) {
+        console.error('Failed to load history:', error);
+    }
+}
+
+function formatDate(dateStr) {
+    if (!dateStr) return '-';
+    const date = new Date(dateStr);
+    return date.toLocaleString();
+}
+
+// Helper functions - these should match your auth setup
+function getToken() {
+    return localStorage.getItem('token') || '';
+}
+
+function getOrgId() {
+    return localStorage.getItem('org_id') || '1';
+}
+</script>
+{% endblock %}

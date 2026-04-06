@@ -2,6 +2,7 @@
 
 import logging
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -12,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from app.api.drive import _create_drive_doc, _trash_drive_item, _move_drive_item, get_drive_credentials as _get_drive_creds_drive
+from app.api.drive import _create_drive_doc, _create_drive_doc_with_content, _trash_drive_item, _move_drive_item, get_drive_credentials as _get_drive_creds_drive
 from app.auth.routes import get_current_user
 from app.database import get_db
 from app.models import (
@@ -26,6 +27,7 @@ from app.models import (
     Section,
     User,
 )
+from app.lib.markdown_import import normalize_imported_markdown
 from app.services.pages import (
     apply_publish,
     apply_sync_result,
@@ -58,12 +60,23 @@ class PageUpdate(BaseModel):
     section_id: int | None = None
     title: str | None = None
     slug: str | None = None
+    html_content: str | None = None  # Update page HTML content (for link rewriting after import)
     visibility_override: Literal["public", "internal", "external"] | None = None
     display_order: int | None = None
     hide_toc: bool | None = None
     full_width: bool | None = None
     page_custom_css: str | None = None
     featured_image_url: str | None = None
+
+
+class PageImport(BaseModel):
+    title: str
+    markdown_content: str = ""
+    html_content: str = ""  # If provided, stored directly — bypasses Markdown conversion
+    drive_html_content: str = ""  # Google Docs-compatible HTML for Drive (admonitions as blockquotes)
+    section_id: int | None = None
+    display_order: int = 0
+    create_drive_doc: bool = False  # If True, also create a Google Doc in the section's Drive folder
 
 
 def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
@@ -514,6 +527,133 @@ def list_pages(
     return {"pages": [_page_dict(p) for p in pages]}
 
 
+@router.post("/import", status_code=201)
+async def import_page(
+    body: PageImport,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a page directly from Markdown content.
+
+    Intended for bulk migration tooling. Converts ``markdown_content`` to HTML
+    using the same normalization pipeline used by the Drive import flow.
+
+    By default stores a synthetic ``imported-<uuid>`` in ``google_doc_id`` so
+    the unique constraint is satisfied without Drive access.
+
+    If ``create_drive_doc=True``, also creates a real Google Doc in the
+    section's Drive folder so the page can be edited in Google Docs later.
+    Drive must be connected to the org for this to work.
+    """
+    org_id = _require_editor(user, db, x_org_id)
+
+    title = (body.title or "Untitled").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    section: Section | None = None
+    if body.section_id is not None:
+        section = db.query(Section).filter(
+            Section.id == body.section_id,
+            Section.organization_id == org_id,
+        ).first()
+        if not section:
+            raise HTTPException(status_code=404, detail="Section not found")
+
+    # If html_content is provided directly, use it (skip Markdown conversion).
+    # This is the preferred path for migration — avoids lossy HTML→MD→HTML round-trip.
+    if body.html_content:
+        html_content = body.html_content
+    else:
+        # Convert markdown → HTML using the shared normalization pipeline.
+        try:
+            import markdown as _md
+            normalized = normalize_imported_markdown(body.markdown_content or "")
+            html_content = _md.markdown(
+                normalized,
+                extensions=[
+                    "tables",
+                    "fenced_code",
+                    "codehilite",
+                    "toc",
+                    "nl2br",
+                    "sane_lists",
+                    "admonition",
+                    "attr_list",
+                ],
+            )
+        except Exception as exc:
+            logger.warning("Markdown conversion failed for import page '%s': %s", title, exc)
+            html_content = f"<p>{body.markdown_content or ''}</p>"
+
+    # Optionally create a real Google Drive doc so the page can be edited later.
+    google_doc_id: str
+    if body.create_drive_doc:
+        try:
+            creds = await _get_drive_creds_drive(user, org_id, db)
+            service = build("drive", "v3", credentials=creds, cache_discovery=False)
+            # Use the section's Drive folder if available, else fall back to org folder
+            parent_folder_id: str | None = None
+            if section and section.drive_folder_id:
+                parent_folder_id = section.drive_folder_id
+            else:
+                from app.models import Organization
+                org = db.query(Organization).filter_by(id=org_id).first()
+                parent_folder_id = org.drive_folder_id if org else None
+
+            # Upload HTML content into the Google Doc (not blank).
+            # Use drive_html_content if provided (Google Docs-compatible HTML),
+            # otherwise fall back to the standard html_content.
+            drive_html = body.drive_html_content or html_content
+            if drive_html:
+                google_doc_id = _create_drive_doc_with_content(
+                    service, title, drive_html, parent_folder_id,
+                )
+            else:
+                google_doc_id = _create_drive_doc(service, title, parent_folder_id)
+
+            logger.info(
+                "Created Drive doc '%s' → %s (section folder: %s)",
+                title,
+                google_doc_id,
+                parent_folder_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Drive doc creation failed for '%s': %s — falling back to synthetic ID",
+                title,
+                exc,
+            )
+            google_doc_id = f"imported-{uuid.uuid4().hex}"
+    else:
+        # Synthetic google_doc_id: satisfies NOT NULL + unique constraint without Drive.
+        google_doc_id = f"imported-{uuid.uuid4().hex}"
+
+    page = create_page_record(
+        db,
+        org_id=org_id,
+        section_id=body.section_id,
+        google_doc_id=google_doc_id,
+        title=title,
+        html_content=html_content,
+        modified_at=None,
+        display_order=body.display_order,
+        owner_id=user.id,
+    )
+    db.commit()
+    db.refresh(page)
+    drive_note = "with Drive doc" if body.create_drive_doc else "no Drive"
+    logger.info(
+        "Imported page %d '%s' (%s) for org %d",
+        page.id,
+        page.title,
+        drive_note,
+        org_id,
+    )
+    return _page_dict(page, include_html=True)
+
+
 @router.post("", status_code=201)
 async def create_page(
     body: PageCreate,
@@ -677,6 +817,8 @@ async def update_page(
         page.page_custom_css = body.page_custom_css
     if "featured_image_url" in body.model_fields_set:
         page.featured_image_url = body.featured_image_url
+    if body.html_content is not None:
+        page.html_content = body.html_content
 
     db.commit()
     db.refresh(page)
