@@ -57,12 +57,40 @@ except ImportError:
 # Logging setup
 # ---------------------------------------------------------------------------
 
-LOG_FILE = Path("migration.log")
+def _resolve_log_file() -> Path:
+    """Return a writable log file path across local and serverless runtimes."""
+    env_path = os.getenv("MIGRATION_LOG_FILE")
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.extend(
+        [
+            Path("/tmp/migration.log"),
+            Path.cwd() / "migration.log",
+        ]
+    )
+
+    for candidate in candidates:
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            with open(candidate, "a", encoding="utf-8"):
+                pass
+            return candidate
+        except OSError:
+            continue
+
+    return Path("/tmp/migration.log")
+
+
+LOG_FILE = _resolve_log_file()
 
 
 def _setup_logging() -> logging.Logger:
     logger = logging.getLogger("migrate_developerhub")
     logger.setLevel(logging.DEBUG)
+    if logger.handlers:
+        return logger
+
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
 
     fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
