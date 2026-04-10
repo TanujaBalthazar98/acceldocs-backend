@@ -1,0 +1,59 @@
+name: Migrate documentation
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: "Source docs URL"
+        required: true
+        default: "https://docs.acceldata.io/pulse/user-guide"
+      product_id:
+        description: "AccelDocs product/section ID"
+        required: true
+        default: "414"
+      org_id:
+        description: "AccelDocs org ID"
+        required: true
+        default: "3"
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install playwright pypandoc html2text
+      
+      - name: Install Playwright browsers
+        run: |
+          playwright install --with-deps chromium
+      
+      - name: Run migration
+        env:
+          ACCELDOCS_TOKEN: ${{ secrets.ACCELDOCS_TOKEN }}
+          ACCELDOCS_BACKEND: ${{ secrets.ACCELDOCS_BACKEND_URL }}
+        run: |
+          python scripts/migrate_developerhub.py \
+            --source "${{ github.event.inputs.source_url }}" \
+            --backend "$ACCELDOCS_BACKEND" \
+            --token "$ACCELDOCS_TOKEN" \
+            --org-id "${{ github.event.inputs.org_id }}" \
+            --product-id "${{ github.event.inputs.product_id }}" \
+            --playwright \
+            --one-version \
+            --create-drive-docs
+      
+      - name: Upload state file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-state
+          path: migration_states/*.json
