@@ -46,7 +46,7 @@ jobs:
             --backend "https://acceldocs-backend.vercel.app" \
             --token "${{ secrets.ACCELDOCS_TOKEN }}" \
             --org-id "${{ github.event.inputs.org_id }}" \
-            --product-id "${{ github.event.inputs.product_id }}" \
+            --product-id "505" \
             --playwright \
             --all-versions \
             --max-versions 1 \
