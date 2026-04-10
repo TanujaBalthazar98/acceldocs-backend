@@ -6,7 +6,7 @@ on:
       source_url:
         description: "Source docs URL"
         required: true
-        default: "https://docs.acceldata.io/pulse/user-guide"
+        default: "https://docs.acceldata.io"
       product_id:
         description: "AccelDocs product/section ID"
         required: true
@@ -46,10 +46,8 @@ jobs:
             --backend "https://acceldocs-backend.vercel.app" \
             --token "${{ secrets.ACCELDOCS_TOKEN }}" \
             --org-id "${{ github.event.inputs.org_id }}" \
-            --product-id "505" \
+            --product-id "760" \
             --playwright \
-            --all-versions \
-            --max-versions 1 \
             --create-drive-docs \
             --resume
       
