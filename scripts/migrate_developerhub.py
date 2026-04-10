@@ -79,6 +79,7 @@ def _resolve_log_file() -> Path:
         except OSError:
             continue
 
+    # Last-resort fallback (should still be writable on serverless)
     return Path("/tmp/migration.log")
 
 
@@ -109,24 +110,42 @@ def _setup_logging() -> logging.Logger:
 log = _setup_logging()
 
 # ---------------------------------------------------------------------------
-# State persistence
+# State persistence (per-product)
 # ---------------------------------------------------------------------------
 
-STATE_FILE = Path("migration_state.json")
+STATE_DIR = Path("migration_states")
 
 
-def load_state() -> dict:
-    if STATE_FILE.exists():
+def _get_state_file(product_slug: str) -> Path:
+    """Get the state file path for a specific product."""
+    STATE_DIR.mkdir(exist_ok=True)
+    return STATE_DIR / f"migration_state_{product_slug}.json"
+
+
+def load_state(product_slug: str = "") -> dict:
+    """Load state for a specific product."""
+    if product_slug:
+        state_file = _get_state_file(product_slug)
+    else:
+        state_file = Path("migration_state.json")
+    
+    if state_file.exists():
         try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            return json.loads(state_file.read_text(encoding="utf-8"))
         except Exception as exc:
-            log.warning("Could not load %s: %s — starting fresh", STATE_FILE, exc)
+            log.warning("Could not load %s: %s — starting fresh", state_file, exc)
     return {}
 
 
-def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-    log.debug("State saved to %s", STATE_FILE)
+def save_state(state: dict, product_slug: str = "") -> None:
+    """Save state for a specific product."""
+    if product_slug:
+        state_file = _get_state_file(product_slug)
+    else:
+        state_file = Path("migration_state.json")
+    
+    state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    log.debug("State saved to %s", state_file)
 
 
 # ---------------------------------------------------------------------------
@@ -303,15 +322,32 @@ def get_products_to_migrate(
 def get_versions_to_migrate(
     product: ProductConfig,
     all_versions: bool = False,
+    max_versions: int = 0,
+    version_idx: int | None = None,
 ) -> list[ProductVersion]:
-    """Return the versions to migrate for a product."""
+    """Return the versions to migrate for a product.
+    
+    Args:
+        all_versions: If True, process all versions
+        max_versions: If > 0, limit to first N versions (for chunked processing)
+        version_idx: If set, process specific version by index (0=first, 1=second, etc.)
+    """
     if not product.versions:
         return [ProductVersion(label="latest", is_latest=True)]
-    if all_versions:
-        return list(product.versions)
+    
+    all_vers = list(product.versions)
+    
+    if version_idx is not None and 0 <= version_idx < len(all_vers):
+        # Single version by index
+        return [all_vers[version_idx]]
+    elif all_versions and max_versions > 0:
+        # Chunked: process N versions at a time
+        return all_vers[:max_versions]
+    elif all_versions:
+        return all_vers
     # Default: latest only
-    latest = [v for v in product.versions if v.is_latest]
-    return latest if latest else [product.versions[0]]
+    latest = [v for v in all_vers if v.is_latest]
+    return latest if latest else [all_vers[0]]
 
 
 # ---------------------------------------------------------------------------
@@ -498,39 +534,99 @@ def _categorize_url(slug: str) -> str | None:
 
 def _apply_category_hierarchy(flat_tree: list[dict]) -> list[dict]:
     """
-    Reorganize a flat sitemap tree into a proper section hierarchy using the
-    ACCELDATA_CATEGORY_MAP. Uncategorized pages are placed under "Other".
+    Reorganize a flat sitemap tree into a proper section hierarchy.
+
+    Uses URL path structure first (multi-level), then falls back to ACCELDATA_CATEGORY_MAP
+    for pages without path structure. Uncategorized pages go under "Other".
 
     Returns a new tree with section nodes containing page children.
     """
-    # Group pages by category
-    sections: dict[str, list[dict]] = {}
+    root_nodes: list[dict] = []
+
     for node in flat_tree:
         url = node.get("url") or ""
-        slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
-        category = _categorize_url(slug) or "Other"
-        if category not in sections:
-            sections[category] = []
-        sections[category].append({**node, "depth": 1})
-
-    # Build tree: ordered by category map first, then "Other" last
-    ordered_cats = list(ACCELDATA_CATEGORY_MAP.keys()) + ["Other"]
-    tree: list[dict] = []
-    for cat in ordered_cats:
-        pages = sections.get(cat)
-        if not pages:
+        if not url:
             continue
-        tree.append({
-            "title": cat,
-            "url": None,
-            "depth": 0,
-            "children": pages,
-        })
 
+        parsed = urlparse(url)
+        full_path = parsed.path.rstrip("/")
+        path_parts = [p for p in full_path.split("/") if p]
+
+        section_parts: list[str]
+        page_slug = path_parts[-1] if path_parts else ""
+
+        # Use full path structure - each segment becomes a section level
+        if len(path_parts) >= 2:
+            section_parts = path_parts[:-1]
+        elif page_slug:
+            # Single level - try category map first
+            category = _categorize_url(page_slug)
+            if category:
+                section_parts = [category]
+            else:
+                category = _categorize_url(full_path)
+                section_parts = [category] if category else ["Other"]
+        else:
+            section_parts = ["Other"]
+
+        # Build or find section nodes
+        current = root_nodes
+        depth = 0
+        for idx, part in enumerate(section_parts):
+            section_title = part if " " in part else _humanize_path_part(part)
+            section_slug = _slugify(section_title)
+
+            existing = None
+            for n in current:
+                if n.get("title") and _slugify(n["title"]) == section_slug and not n.get("url"):
+                    existing = n
+                    break
+
+            if existing:
+                if not isinstance(existing.get("children"), list):
+                    existing["children"] = []
+                current = existing["children"]
+            else:
+                new_section = {
+                    "title": section_title,
+                    "url": None,
+                    "depth": idx,
+                    "children": [],
+                }
+                current.append(new_section)
+                current = new_section["children"]
+
+            depth = idx + 1
+
+        current.append({**node, "depth": depth})
+
+    # Build ordered tree: category map order first, then "Other", then any remaining roots
+    ordered_cats = list(ACCELDATA_CATEGORY_MAP.keys())
+    tree: list[dict] = []
+
+    root_by_slug = {_slugify(n.get("title") or ""): n for n in root_nodes}
+
+    for cat in ordered_cats:
+        if cat in root_by_slug:
+            tree.append(root_by_slug.pop(cat))
+
+    for n in root_nodes:
+        title = n.get("title") or ""
+        if _slugify(title) not in [slug for slug, node in root_by_slug.items() if node in tree]:
+            if n not in tree:
+                tree.append(n)
+
+    for slug, n in root_by_slug.items():
+        if n not in tree:
+            tree.append(n)
+
+    page_count = len(tree)
+    for n in tree:
+        page_count += _count_descendant_pages(n)
     log.info(
-        "Category hierarchy built: %d sections, %d total pages",
+        "Category hierarchy built: %d top-level sections, %d total pages",
         len(tree),
-        sum(len(n["children"]) for n in tree),
+        page_count - len(tree),
     )
     return tree
 
@@ -785,6 +881,113 @@ def _print_tree(tree: list[dict], indent: int = 0) -> None:
         _print_tree(node["children"], indent + 1)
 
 
+def _build_hierarchy_from_sidebar_crawl(
+    base_url: str,
+    page_urls: list[str],
+    max_pages: int = 0,
+) -> list[dict]:
+    """
+    Build proper hierarchy by crawling each page's sidebar.
+    
+    This is slow (one browser visit per page) but gives accurate
+    sidebar hierarchy that can't be derived from flat sitemap URLs.
+    
+    For each page, navigates to it and extracts what section
+    it's under in the sidebar - this reveals parent-child
+    relationships that sitemap doesn't contain.
+    """
+    from playwright.sync_api import sync_playwright
+    
+    tree: list[dict] = []
+    url_to_node: dict[str, dict] = {}
+    
+    log.info("Crawling sidebar for %d pages (this may take a while...)", len(page_urls))
+    
+    if max_pages and len(page_urls) > max_pages:
+        log.warning(f"Limiting crawl to {max_pages} pages")
+        page_urls = page_urls[:max_pages]
+    
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        ctx = browser.new_context()
+        page = ctx.new_page()
+        
+        processed_sections: set[str] = set()
+        
+        for idx, url in enumerate(page_urls):
+            if idx % 20 == 0:
+                log.info(f"Crawl progress: {idx}/{len(page_urls)}")
+            
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(1500)
+                
+                # Extract sidebar tree from this page
+                nav_tree = _pw_extract_nav_tree(page, base_url)
+                
+                # Process this page's sidebar context
+                current_path = []
+                
+                # Find which section(s) this page belongs to by walking the tree
+                def find_path_to_url(nodes, path: list):
+                    for node in nodes:
+                        title = node.get("title", "")
+                        url = node.get("url", "")
+                        children = node.get("children", [])
+                        
+                        if url and url in page.url:
+                            return path + [title]
+                        
+                        if children:
+                            result = find_path_to_url(children, path + [title])
+                            if result:
+                                return result
+                    return None
+                
+                if nav_tree:
+                    path = find_path_to_url(nav_tree, [])
+                    if path:
+                        # Add this page under its sidebar section
+                        # Build tree from path
+                        current = tree
+                        for section_title in path:
+                            # Find or create section
+                            found = None
+                            for n in current:
+                                if n.get("title") == section_title and not n.get("url"):
+                                    found = n
+                                    break
+                            
+                            if not found:
+                                found = {
+                                    "title": section_title,
+                                    "url": None,
+                                    "depth": len(current) + 1,
+                                    "children": [],
+                                }
+                                current.append(found)
+                            
+                            current = found.get("children", [])
+                        
+                        # Now add the page itself
+                        slug = page.url.split("/")[-1] if "/" in page.url else page.url
+                        current.append({
+                            "title": _humanize_path_part(slug),
+                            "url": url,
+                            "depth": len(current) + 1,
+                            "children": [],
+                        })
+                        
+            except Exception as e:
+                log.warning(f"Failed to crawl {url}: {e}")
+                continue
+        
+        browser.close()
+    
+    log.info("Sidebar crawl complete: %d top-level sections", len(tree))
+    return tree
+
+
 def _fetch_sitemap_urls(base_url: str, source_path_prefix: str) -> list[str]:
     """
     Try to fetch sitemap.xml and return URLs matching the source path prefix.
@@ -900,51 +1103,323 @@ def _sitemap_urls_to_tree(urls: list[str], apply_category_map: bool = True) -> l
     return tree
 
 
+def _normalize_url_key(url: str) -> str:
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/") or "/"
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+
+def _humanize_path_part(part: str) -> str:
+    text = part.replace("-", " ").replace("_", " ").strip()
+    if not text:
+        return "Untitled"
+    return " ".join(word.capitalize() for word in text.split())
+
+
+def _count_descendant_pages(node: dict) -> int:
+    count = 0
+    children = node.get("children", [])
+    if not isinstance(children, list):
+        return 0
+    for child in children:
+        if child.get("url"):
+            count += 1
+        count += _count_descendant_pages(child)
+    return count
+
+
+def _collect_tree_url_set(tree: list[dict]) -> set[str]:
+    out: set[str] = set()
+
+    def _walk(nodes: list[dict]) -> None:
+        for node in nodes:
+            url = node.get("url")
+            if isinstance(url, str) and url:
+                out.add(_normalize_url_key(url))
+            children = node.get("children")
+            if isinstance(children, list) and children:
+                _walk(children)
+
+    _walk(tree)
+    return out
+
+
+def _tokenize_for_match(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for raw in re.split(r"[^a-z0-9]+", text.lower()):
+        if len(raw) < 3:
+            continue
+        tokens.add(raw)
+
+        # Lightweight stemming so "users" ↔ "user" and
+        # "management" ↔ "manage" can match in heuristic placement.
+        stem = raw
+        if stem.endswith("ies") and len(stem) > 4:
+            stem = stem[:-3] + "y"
+        elif stem.endswith("s") and len(stem) > 4:
+            stem = stem[:-1]
+        if stem.endswith("ing") and len(stem) > 5:
+            stem = stem[:-3]
+        elif stem.endswith("ment") and len(stem) > 6:
+            stem = stem[:-4]
+        elif stem.endswith("ed") and len(stem) > 4:
+            stem = stem[:-2]
+
+        if len(stem) >= 3:
+            tokens.add(stem)
+    return tokens
+
+
+def _iter_section_candidates(nodes: list[dict], depth: int = 0) -> list[tuple[dict, int]]:
+    out: list[tuple[dict, int]] = []
+    for node in nodes:
+        children = node.get("children")
+        is_section_node = not node.get("url")
+        is_landing_with_children = bool(node.get("url")) and isinstance(children, list) and bool(children)
+        if is_section_node or is_landing_with_children:
+            out.append((node, depth))
+        if isinstance(children, list) and children:
+            out.extend(_iter_section_candidates(children, depth + 1))
+    return out
+
+
+def _infer_section_for_flat_page(tab_tree: list[dict], page_slug: str) -> str | None:
+    """
+    Infer best section title for flat URL pages using simple lexical matching
+    against existing sidebar section and child page titles.
+    """
+    page_tokens = _tokenize_for_match(page_slug.replace("-", " ").replace("_", " "))
+    if not page_tokens:
+        return None
+
+    best_title: str | None = None
+    best_score = 0
+
+    for section, section_depth in _iter_section_candidates(tab_tree):
+        # Treat node as a section candidate if it is a pure section node OR
+        # a "section landing page" (has url + children).
+        has_children = bool(section.get("children"))
+        if section.get("url") and not has_children:
+            continue
+        section_title = str(section.get("title") or "").strip()
+        if not section_title:
+            continue
+
+        # Score based on direct match with section title only (not child pages)
+        score = len(page_tokens & _tokenize_for_match(section_title)) * 10
+
+        # Prefer shallower candidates when scores tie.
+        score -= section_depth
+
+        if score > best_score:
+            best_score = score
+            best_title = section_title
+
+    return best_title if best_score >= 4 else None
+
+
+def _find_or_create_section_node(
+    nodes: list[dict],
+    title: str,
+    depth: int,
+) -> dict:
+    title_slug = _slugify(title)
+    for node in nodes:
+        # Reuse both pure section nodes and section-landing pages that already
+        # exist in the sidebar (url + children).
+        has_children = bool(node.get("children"))
+        if node.get("url") and not has_children:
+            continue
+        if _slugify(str(node.get("title") or "")) == title_slug:
+            if not isinstance(node.get("children"), list):
+                node["children"] = []
+            return node
+
+    created = {
+        "title": title,
+        "url": None,
+        "depth": depth,
+        "children": [],
+    }
+    nodes.append(created)
+    return created
+
+
+def _merge_sitemap_urls_into_tab_tree(
+    *,
+    tab_tree: list[dict],
+    tab_url: str,
+    sitemap_urls: list[str],
+    skip_words: set[str] | None = None,
+) -> int:
+    """
+    Merge sitemap pages missing from sidebar tree into the same tab hierarchy.
+
+    Uses URL path segments under the tab path to create section/subsection nodes
+    deterministically, preserving existing sidebar order while appending only
+    missing pages.
+    """
+    if not sitemap_urls:
+        return 0
+
+    tab_path = urlparse(tab_url).path.rstrip("/")
+    existing = _collect_tree_url_set(tab_tree)
+    added = 0
+    if skip_words is None:
+        skip_words = set()
+
+    for raw_url in sitemap_urls:
+        normalized = _normalize_url_key(raw_url)
+        if normalized in existing:
+            continue
+
+        parsed = urlparse(raw_url)
+        full_path = parsed.path.rstrip("/")
+        # Ensure we only merge URLs that belong to this tab path.
+        if tab_path and not (full_path == tab_path or full_path.startswith(tab_path + "/")):
+            continue
+
+        relative = full_path[len(tab_path):].strip("/") if tab_path else full_path.strip("/")
+        parts = [p for p in relative.split("/") if p]
+        if not parts:
+            continue
+
+        section_parts = parts[:-1] if len(parts) > 1 else []
+        page_slug = parts[-1]
+
+        COMMON_PREFIXES = {
+            "monitor": "Monitor",
+            "visualize": "Visualize", 
+            "configure": "Configure",
+            "create": "Create",
+            "deploy": "Deploy",
+            "manage": "Manage",
+            "analyze": "Analyze",
+            "search": "Search",
+            "troubleshoot": "Troubleshoot",
+            "enable": "Enable",
+            "perform": "Perform",
+            "track": "Track",
+            "check": "Check",
+            "understand": "Understand",
+            "set": "Set Up",
+            "install": "Install",
+            "upgrade": "Upgrade",
+            "standalone": "Standalone",
+            "multi": "Multi",
+            "change": "Change",
+            "limit": "Limit",
+            "modify": "Modify",
+            "update": "Update",
+            "understand": "Understand",
+            "release": "Release",
+            "upgradefrom": "Upgrade From",
+            "installand": "Install And",
+            "deployingle": "Deploying",
+            "single": "Single",
+            "multiple": "Multiple",
+            "cluster": "Cluster",
+            "node": "Node",
+            "service": "Service",
+        }
+
+        def _extract_all_prefixes(slug: str, max_depth: int = 4, skip_words: set[str] | None = None) -> list[str]:
+            """Extract hyphenated parts as potential section names, skipping duplicates and common words.
+            
+            Each hyphen-separated part becomes a potential section level.
+            Limits to max_depth to avoid excessively deep nesting.
+            skip_words: words to filter out (like parent tab/version names to avoid duplicates)
+            """
+            if skip_words is None:
+                skip_words = set()
+            parts_list = slug.split("-")
+            prefixes = []
+            seen_lower: set[str] = set()
+            for p in parts_list[:-1]:  # Skip the last part (page name itself)
+                if len(prefixes) >= max_depth:
+                    break
+                p_lower = p.lower()
+                if p_lower in seen_lower or p_lower in skip_words:
+                    continue
+                seen_lower.add(p_lower)
+                if p_lower in COMMON_PREFIXES:
+                    prefixes.append(COMMON_PREFIXES[p_lower])
+                elif len(p) >= 3 and any(c.isupper() for c in p):
+                    prefixes.append(_humanize_path_part(p))
+                elif p_lower in ("to", "from", "and", "or", "on", "in", "of", "the", "for"):
+                    continue
+                elif len(p) > 2:
+                    prefixes.append(_humanize_path_part(p))
+            return prefixes
+
+        # For flat URLs with no path structure, extract slug prefixes for sub-sections
+        if not section_parts:
+            # First try to match existing sidebar sections
+            inferred_section = _infer_section_for_flat_page(tab_tree, page_slug)
+            if inferred_section:
+                # Page goes directly under inferred section - no extra sub-sections
+                section_parts = [inferred_section]
+            else:
+                # Try category map
+                mapped_category = _categorize_url(page_slug)
+                if mapped_category:
+                    section_parts = [mapped_category]
+                else:
+                    # Extract all slug prefixes for sub-sections
+                    prefixes = _extract_all_prefixes(page_slug, skip_words=skip_words)
+                    if prefixes:
+                        section_parts = prefixes
+                    else:
+                        # Fallback: first prefix only
+                        prefix = page_slug.split("-")[0] if page_slug else ""
+                        if prefix and prefix.lower() in COMMON_PREFIXES:
+                            section_parts = [COMMON_PREFIXES[prefix.lower()]]
+                        elif prefix and len(prefix) > 3:
+                            section_parts = [_humanize_path_part(prefix)]
+
+        current_children = tab_tree
+        current_depth = 1
+
+        for part in section_parts:
+            section_title = part if " " in part else _humanize_path_part(part)
+            section_node = _find_or_create_section_node(current_children, section_title, current_depth)
+            current_children = section_node["children"]
+            current_depth += 1
+
+        page_title = _humanize_path_part(page_slug)
+        current_children.append({
+            "title": page_title,
+            "url": raw_url,
+            "depth": current_depth,
+            "children": [],
+        })
+        existing.add(normalized)
+        added += 1
+
+    return added
+
+
+def _iter_tab_nodes(nodes: list[dict]) -> list[dict]:
+    """Return every node marked as a tab anywhere in the tree."""
+    out: list[dict] = []
+
+    def _walk(items: list[dict]) -> None:
+        for node in items:
+            if node.get("_section_type") == "tab":
+                out.append(node)
+            children = node.get("children")
+            if isinstance(children, list) and children:
+                _walk(children)
+
+    _walk(nodes)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Playwright-based discovery — for JavaScript SPAs
 # ---------------------------------------------------------------------------
 
 _PLAYWRIGHT_AVAILABLE: bool | None = None
-
-
-def _pw_discover_versions(page_obj: Any) -> list[dict]:
-    """Use Playwright to discover available versions from the version picker dropdown.
-
-    Uses force-click since the dropdown toggle may appear hidden to Playwright.
-    Returns list of dicts: [{"label": "Pulse 4.1.x", "is_latest": True}, ...]
-    The first item in the dropdown is assumed to be the latest.
-    """
-    locator = page_obj.locator(".version-picker-container").first
-    try:
-        if not locator.count():
-            log.info("No version picker found on page")
-            return []
-    except Exception:
-        return []
-
-    try:
-        locator.click(force=True)
-        page_obj.wait_for_timeout(1500)
-    except Exception as exc:
-        log.warning("Could not click version picker: %s", exc)
-        return []
-
-    items = page_obj.locator(".version-picker-container .dropdown-item").all()
-    versions: list[dict] = []
-    for idx, item in enumerate(items):
-        txt = item.inner_text().strip()
-        if txt:
-            versions.append({"label": txt, "is_latest": idx == 0})
-
-    # Close the dropdown
-    try:
-        page_obj.locator("body").click(position={"x": 10, "y": 10}, force=True)
-        page_obj.wait_for_timeout(300)
-    except Exception:
-        pass
-
-    log.info("Discovered %d versions: %s", len(versions), ", ".join(v["label"] for v in versions))
-    return versions
 
 
 def _pw_switch_version(page_obj: Any, version_label: str) -> bool:
@@ -995,35 +1470,57 @@ def _pw_switch_version(page_obj: Any, version_label: str) -> bool:
 
 
 def _pw_discover_versions(page_obj: Any) -> list[dict]:
-    """Discover all available versions from the version picker dropdown.
-
-    Opens the dropdown, reads version names, returns list. Does NOT close the dropdown.
-    Returns list of dicts: [{"name": "Pulse 4.1.x", "href": ""}, ...]
-    """
-    try:
-        page_obj.click("app-version-picker .top-picker", timeout=5000)
-        page_obj.wait_for_timeout(1500)
-    except Exception:
-        return []
-
+    """Discover versions from either modern or legacy DeveloperHub picker DOM."""
     versions: list[dict] = []
+
+    # Modern picker
     try:
-        html = page_obj.content()
-        soup = BeautifulSoup(html, "html.parser")
-        picker = soup.find("app-version-picker")
-        if picker:
-            menu = picker.find("ul", class_="dropdown-menu")
-            if menu:
-                for li in menu.find_all("li", role="menuitem"):
-                    text = li.get_text(separator=" ", strip=True)
-                    if text:
-                        versions.append({"name": text})
+        locator = page_obj.locator(".version-picker-container").first
+        if locator.count():
+            locator.click(force=True)
+            page_obj.wait_for_timeout(1000)
+            items = page_obj.locator(".version-picker-container .dropdown-item").all()
+            for idx, item in enumerate(items):
+                text = item.inner_text().strip()
+                if text:
+                    versions.append({"label": text, "is_latest": idx == 0})
     except Exception:
         pass
 
-    if versions:
-        log.info("Discovered %d versions: %s", len(versions), ", ".join(v["name"] for v in versions))
-    return versions
+    # Legacy picker fallback
+    if not versions:
+        try:
+            page_obj.click("app-version-picker .top-picker", timeout=5000)
+            page_obj.wait_for_timeout(1000)
+            html = page_obj.content()
+            soup = BeautifulSoup(html, "html.parser")
+            picker = soup.find("app-version-picker")
+            if picker:
+                menu = picker.find("ul", class_="dropdown-menu")
+                if menu:
+                    for idx, li in enumerate(menu.find_all("li", role="menuitem")):
+                        text = li.get_text(separator=" ", strip=True)
+                        if text:
+                            versions.append({"label": text, "is_latest": idx == 0})
+        except Exception:
+            pass
+
+    # Deduplicate while preserving order
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for ver in versions:
+        label = str(ver.get("label") or "").strip()
+        if not label:
+            continue
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ver)
+
+    if deduped:
+        log.info("Discovered %d versions: %s", len(deduped), ", ".join(v["label"] for v in deduped))
+    return deduped
 
 
 def _pw_close_dropdown(page_obj: Any) -> None:
@@ -1084,7 +1581,7 @@ def _check_playwright() -> bool:
     return _PLAYWRIGHT_AVAILABLE
 
 
-def _pw_extract_nav_tree(page_obj: Any, base_url: str, max_depth: int = 0) -> list[dict]:
+def _pw_extract_nav_tree(page_obj: Any, base_url: str, max_depth: int = 3) -> list[dict]:
     """
     Extract the full navigation tree from a Playwright page object.
 
@@ -1170,7 +1667,12 @@ def _pw_extract_nav_tree(page_obj: Any, base_url: str, max_depth: int = 0) -> li
     return _depth_list_to_tree(flat_nodes)
 
 
-def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: int = 0) -> list[dict]:
+def _normalize_text(text: str) -> str:
+    """Normalize text for comparison: lowercase and collapse whitespace."""
+    import re
+    return re.sub(r'\s+', ' ', text.strip().lower())
+
+def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: int = 3) -> list[dict]:
     """
     Extract a deep (3+ level) navigation tree from a DeveloperHub Angular tree.
 
@@ -1248,12 +1750,9 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
         container = tnc.find("div")
         if not container:
             return []
-        all_tree = container.find_all(
-            "div",
-            class_=lambda x: (
-                x and "tree-node-level-" in (" ".join(x) if isinstance(x, list) else (x or ""))
-            ),
-        )
+        # Use list comprehension for class_ attribute to avoid lambda issues
+        all_divs = container.find_all("div", class_=True)
+        all_tree = [d for d in all_divs if any("tree-node-level-" in c for c in d.get("class", []))]
         section_positions: dict[str, int] = {}
         for idx, node in enumerate(all_tree):
             classes = node.get("class", [])
@@ -1271,21 +1770,39 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
         sorted_positions = sorted(section_positions.items(), key=lambda x: x[1])
         return all_tree, sorted_positions
 
-    prev_expanded_idx = 0
-
     for sec_idx, sec_name in enumerate(section_names):
         if not sec_name:
             continue
 
-        if sec_idx != prev_expanded_idx:
-            try:
-                sec_el = section_elements[sec_idx]
-                sec_el.click(timeout=2000)
-                page_obj.wait_for_timeout(1000)
-                prev_expanded_idx = sec_idx
-            except Exception as exc:
-                log.warning("Could not expand section %d '%s': %s", sec_idx, sec_name, exc)
-                continue
+        norm_sec_name = _normalize_text(sec_name)
+
+        # Try to click the section to expand it
+        try:
+            # Find the section element by text and click it
+            # Use JavaScript click to avoid stale element issues
+            # Use case-insensitive normalized comparison
+            clicked = page_obj.evaluate(f'''
+                () => {{
+                    const items = document.querySelectorAll(".category-container span");
+                    for (const item of items) {{
+                        if (item.innerText) {{
+                            const itemNorm = item.innerText.replace(/\\s+/g, ' ').trim().toLowerCase();
+                            if (itemNorm === "{norm_sec_name}") {{
+                                item.click();
+                                return true;
+                            }}
+                        }}
+                    }}
+                    return false;
+                }}
+            ''')
+            if clicked:
+                page_obj.wait_for_timeout(2000)  # Wait for Angular accordion animation
+                log.info("  Expanded section '%s'", sec_name)
+            else:
+                log.warning("  Could not find section '%s' to click", sec_name)
+        except Exception as exc:
+            log.warning("  Could not expand section '%s': %s", sec_name, exc)
 
         try:
             soup = BeautifulSoup(page_obj.content(), "html.parser")
@@ -1297,13 +1814,22 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
         container = tnc.find("div")
         if not container:
             continue
-        all_tree = container.find_all(
-            "div",
-            class_=lambda x: (
-                x and "tree-node-level-" in (" ".join(x) if isinstance(x, list) else (x or ""))
-            ),
-        )
-        section_positions: dict[str, int] = {}
+        # Use list comprehension for class_ attribute to avoid lambda issues
+        all_divs = container.find_all("div", class_=True)
+        all_tree = [d for d in all_divs if any("tree-node-level-" in c for c in d.get("class", []))]
+        
+        # Find the section by name and extract its L2 children
+        section_node: dict[str, Any] = {
+            "title": sec_name,
+            "url": None,
+            "depth": 0,
+            "_section_type": "section",
+            "children": [],
+        }
+        l2_count = 0
+        
+        # Find section position using normalized comparison
+        sec_start = None
         for idx, node in enumerate(all_tree):
             classes = node.get("class", [])
             classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
@@ -1315,87 +1841,95 @@ def _pw_extract_angular_deep(page_obj: Any, nav: Tag, base_url: str, max_depth: 
                         "span",
                         class_=lambda x: x and "category" in (" ".join(x) if isinstance(x, list) else (x or "")),
                     )
+                    if span_cat and _normalize_text(span_cat.get_text(strip=True)) == norm_sec_name:
+                        sec_start = idx
+                        break
+        
+        if sec_start is None:
+            log.warning("  Could not find section '%s' in tree", sec_name)
+            continue
+            
+        # Find the next section or end of tree
+        sec_end = len(all_tree)
+        for idx in range(sec_start + 1, len(all_tree)):
+            node = all_tree[idx]
+            classes = node.get("class", [])
+            classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
+            node_func = node.find("span", class_="node-function")
+            if node_func:
+                node_text = node_func.find("div", class_="node-text")
+                if node_text:
+                    span_cat = node_text.find(
+                        "span",
+                        class_=lambda x: x and "category" in (" ".join(x) if isinstance(x, list) else (x or "")),
+                    )
                     if span_cat:
-                        section_positions[span_cat.get_text(strip=True)] = idx
-        sorted_positions = sorted(section_positions.items(), key=lambda x: x[1])
-
-        for s_idx, (s_name, s_pos) in enumerate(sorted_positions):
-            if s_name != sec_name:
+                        sec_end = idx
+                        break
+        
+        # Extract L2 children (tree-node-level-2) between section start and end
+        for node in all_tree[sec_start + 1 : sec_end]:
+            classes = node.get("class", [])
+            classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
+            if "tree-node-level-2" not in classes_str:
                 continue
-            next_pos = sorted_positions[s_idx + 1][1] if s_idx + 1 < len(sorted_positions) else len(all_tree)
 
-            section_node: dict[str, Any] = {
-                "title": sec_name,
-                "url": None,
-                "depth": 0,
-                "_section_type": "section",
+            anchor = node.find("a", href=True)
+            if not anchor:
+                continue
+
+            href = anchor.get("href", "")
+            if href.startswith("#") or href.startswith("javascript"):
+                continue
+
+            l2_url = urljoin(base_url, href)
+            l2_title = anchor.get_text(separator=" ", strip=True)
+            
+            # If no title from sidebar, try URL slug
+            if not l2_title:
+                from urllib.parse import urlparse, unquote
+                parsed = urlparse(l2_url)
+                slug = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+                slug = unquote(slug)
+                l2_title = slug.replace("-", " ").replace("_", " ").strip()
+                l2_title = " ".join(word.capitalize() for word in l2_title.split() if word) or "Untitled"
+
+            has_l3 = "tree-node-collapsed" in classes_str
+            l2_node: dict[str, Any] = {
+                "title": l2_title,
+                "url": l2_url,
+                "depth": 1,
                 "children": [],
             }
-            l2_count = 0
 
-            for node in all_tree[s_pos + 1 : next_pos]:
-                classes = node.get("class", [])
-                classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
-                if "tree-node-level-2" not in classes_str:
-                    continue
+            if has_l3:
+                if max_depth and max_depth <= 2:
+                    pass  # Limited depth, skip L3
+                else:
+                    log.info("    L3: extracting from %s", l2_url)
+                    l3_nodes = _pw_extract_l3_from_page(page_obj, l2_url)
+                    log.info("    L3: got %d nodes for %s", len(l3_nodes), l2_title[:30])
+                    if l3_nodes:
+                        l2_node["children"] = l3_nodes
 
-                anchor = node.find("a", href=True)
-                if not anchor:
-                    continue
+            section_node["children"].append(l2_node)
+            l2_count += 1
 
-                href = anchor.get("href", "")
-                if href.startswith("#") or href.startswith("javascript"):
-                    continue
-
-                l2_url = urljoin(base_url, href)
-                l2_title = anchor.get_text(separator=" ", strip=True)
-                
-                # If no title from sidebar, try URL slug
-                if not l2_title:
-                    from urllib.parse import urlparse, unquote
-                    parsed = urlparse(l2_url)
-                    slug = parsed.path.rstrip("/").rsplit("/", 1)[-1]
-                    slug = unquote(slug)
-                    l2_title = slug.replace("-", " ").replace("_", " ").strip()
-                    l2_title = " ".join(word.capitalize() for word in l2_title.split() if word) or "Untitled"
-
-                has_l3 = "tree-node-collapsed" in classes_str
-                l2_node: dict[str, Any] = {
-                    "title": l2_title,
-                    "url": l2_url,
-                    "depth": 1,
-                    "children": [],
-                }
-
-                if has_l3:
-                    if max_depth <= 2:
-                        pass
-                    else:
-                        log.info("    L3: extracting from %s", l2_url)
-                        l3_nodes = _pw_extract_l3_from_page(page_obj, l2_url)
-                        log.info("    L3: got %d nodes for %s", len(l3_nodes), l2_title[:30])
-                        if l3_nodes:
-                            l2_node["children"] = l3_nodes
-
-                section_node["children"].append(l2_node)
-                l2_count += 1
-
-            if l2_count > 0:
-                log.info("  Angular accordion section '%s': %d L2 children", sec_name, l2_count)
-            tree.append(section_node)
-            break
+        if l2_count > 0:
+            log.info("  Angular accordion section '%s': %d L2 children", sec_name, l2_count)
+        tree.append(section_node)
 
     return tree
 
 
 def _pw_extract_l3_from_page(page_obj: Any, page_url: str) -> list[dict]:
     """
-    Extract level-3 sub-pages from the sidebar when viewing a page that has them.
+    Extract level-3+ sub-pages from the sidebar when viewing a page that has them.
 
     When navigating to a page like /pulse/user-guide/analyze-cluster-health-in-detail,
     the sidebar shows all section headers + the current page's section with its
     L2 and L3 children expanded. We find the current L2 page node and extract
-    all L3 siblings that follow it until the next section header.
+    all L3/L4 siblings that follow it until the next section header.
     """
     try:
         page_obj.goto(page_url, wait_until="networkidle", timeout=30000)
@@ -1417,12 +1951,9 @@ def _pw_extract_l3_from_page(page_obj: Any, page_url: str) -> list[dict]:
         if not container:
             return []
 
-        all_tree = container.find_all(
-            "div",
-            class_=lambda x: (
-                x and "tree-node-level-" in (" ".join(x) if isinstance(x, list) else (x or ""))
-            ),
-        )
+        # Use list comprehension for class_ attribute to avoid lambda issues
+        all_divs = container.find_all("div", class_=True)
+        all_tree = [d for d in all_divs if any("tree-node-level-" in c for c in d.get("class", []))]
 
         parsed_url = urlparse(page_url)
         page_path = parsed_url.path.rstrip("/")
@@ -1440,27 +1971,106 @@ def _pw_extract_l3_from_page(page_obj: Any, page_url: str) -> list[dict]:
         if current_idx is None:
             return []
 
-        l3_nodes: list[dict] = []
-        for node in all_tree[current_idx + 1 :]:
-            classes = node.get("class", [])
-            classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
+        def extract_children(start_idx: int, current_level: int = 2, max_level: int = 4) -> list[dict]:
+            """Extract children at the next level down from the current page.
+            
+            Only extracts nodes that are:
+            1. At a deeper level than the current page
+            2. Directly indented under the current page in the tree
+            """
+            children: list[dict] = []
+            i = start_idx
+            next_level_down = current_level + 1
+            
+            while i < len(all_tree):
+                node = all_tree[i]
+                classes = node.get("class", [])
+                classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
 
-            if "tree-node-level-1" in classes_str and "category-container" in classes_str:
-                break
+                # Stop at next section header (L1 category)
+                if "tree-node-level-1" in classes_str and "category-container" in classes_str:
+                    break
 
-            if "tree-node-level-3" in classes_str:
-                anchor = node.find("a", href=True)
-                if anchor:
-                    href = anchor.get("href", "")
-                    if not href.startswith("#") and not href.startswith("javascript"):
-                        l3_nodes.append({
-                            "title": anchor.get_text(separator=" ", strip=True),
-                            "url": urljoin("https://docs.acceldata.io", href),
-                            "depth": 2,
-                            "children": [],
-                        })
+                level = 0
+                for c in classes:
+                    if "tree-node-level-" in c:
+                        try:
+                            level = int(c.split("tree-node-level-")[1].split()[0])
+                        except (IndexError, ValueError):
+                            pass
 
-        return l3_nodes
+                # Only extract nodes at the next level down
+                if level == next_level_down:
+                    anchor = node.find("a", href=True)
+                    if anchor:
+                        href = anchor.get("href", "")
+                        if not href.startswith("#") and not href.startswith("javascript"):
+                            has_sub = "tree-node-collapsed" in classes_str
+                            node_dict = {
+                                "title": anchor.get_text(separator=" ", strip=True),
+                                "url": urljoin("https://docs.acceldata.io", href),
+                                "depth": level - 1,
+                                "children": [],
+                            }
+                            # Only recursively extract if this is a collapsed node with sub-nodes
+                            if has_sub and level < max_level:
+                                sub_url = urljoin("https://docs.acceldata.io", href)
+                                node_dict["children"] = _extract_sub_children(page_obj, sub_url, level + 1)
+                            children.append(node_dict)
+                elif level <= current_level:
+                    # Reached a sibling or parent - stop
+                    break
+                    
+                i += 1
+            return children
+
+        def _extract_sub_children(pg: Any, sub_url: str, sub_level: int) -> list[dict]:
+            """Extract children at sub_level from a sub-page."""
+            try:
+                pg.goto(sub_url, wait_until="networkidle", timeout=15000)
+                pg.wait_for_timeout(2000)
+            except Exception:
+                try:
+                    pg.goto(sub_url, wait_until="domcontentloaded", timeout=15000)
+                    pg.wait_for_timeout(2000)
+                except Exception:
+                    return []
+            
+            sub_soup = BeautifulSoup(pg.content(), "html.parser")
+            sub_tnc = sub_soup.find("tree-node-collection")
+            if not sub_tnc:
+                return []
+            
+            sub_container = sub_tnc.find("div")
+            if not sub_container:
+                return []
+            
+            # Use list comprehension for class_ attribute to avoid lambda issues
+            sub_divs = sub_container.find_all("div", class_=True)
+            sub_all = [d for d in sub_divs if any("tree-node-level-" in c for c in d.get("class", []))]
+            
+            sub_children = []
+            for node in sub_all:
+                classes = node.get("class", [])
+                classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
+                
+                if f"tree-node-level-{sub_level}" in classes_str:
+                    anchor = node.find("a", href=True)
+                    if anchor:
+                        href = anchor.get("href", "")
+                        if not href.startswith("#") and not href.startswith("javascript"):
+                            sub_children.append({
+                                "title": anchor.get_text(separator=" ", strip=True),
+                                "url": urljoin("https://docs.acceldata.io", href),
+                                "depth": sub_level - 1,
+                                "children": [],
+                            })
+                elif f"tree-node-level-{sub_level - 1}" in classes_str and "category-container" in classes_str:
+                    break
+            
+            return sub_children
+
+        return extract_children(current_idx + 1, current_level=2, max_level=4)
     except Exception:
         return []
 
@@ -1518,6 +2128,7 @@ def discover_structure(
     use_playwright: bool = False,
     apply_category_map: bool = True,
     max_depth: int = 0,
+    all_versions: bool = False,
 ) -> tuple[list[dict], list[str]]:
     """
     Discover the navigation hierarchy of the documentation site.
@@ -1545,6 +2156,7 @@ def discover_structure(
     # -----------------------------------------------------------------------
     if use_playwright and _check_playwright():
         log.info("Using Playwright for JS-rendered sidebar discovery…")
+        versions: list[dict] = []
         try:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as pw:
@@ -1563,27 +2175,28 @@ def discover_structure(
                 versions = _pw_discover_versions(page_obj)
                 _pw_close_dropdown(page_obj)
                 if versions:
-                    log.info("Discovered %d versions, extracting all tabs/sections for each", len(versions))
+                    # Process all versions if flag set, otherwise latest only
+                    versions_to_process = versions if all_versions else versions[:1]
+                    if all_versions:
+                        log.info(
+                            f"Discovered {len(versions)} versions, processing all",
+                        )
+                    else:
+                        log.info(
+                            "Discovered %d versions, extracting tabs/sections for latest only: %s",
+                            len(versions),
+                            versions_to_process[0].get("label"),
+                        )
                     all_urls: list[str] = []
-                    for ver_idx, ver in enumerate(versions):
-                        ver_name = ver.get("name") or f"Version {ver_idx + 1}"
+                    for ver_idx, ver in enumerate(versions_to_process):
+                        ver_name = str(ver.get("label") or f"Version {ver_idx + 1}")
                         try:
-                            page_obj.click("app-version-picker .top-picker", timeout=5000)
-                            page_obj.wait_for_timeout(1000)
-                            page_obj.evaluate(
-                                f"""() => {{
-                                    const items = document.querySelectorAll("app-version-picker li");
-                                    for (const li of items) {{
-                                        if (li.innerText?.trim() === "{ver["name"]}") {{
-                                            li.click();
-                                            break;
-                                        }}
-                                    }}
-                                }}"""
-                            )
-                            page_obj.wait_for_timeout(2000)
+                            if ver_idx > 0 and not _pw_switch_version(page_obj, ver_name):
+                                log.warning("  Failed to switch to version '%s' — skipping", ver_name)
+                                continue
+                            page_obj.wait_for_timeout(1200)
                             ver_url = page_obj.url
-                            log.info("  Version %d/%d: %s -> %s", ver_idx + 1, len(versions), ver_name, ver_url)
+                            log.info("  Version %d/%d: %s -> %s", ver_idx + 1, len(versions_to_process), ver_name, ver_url)
 
                             page_obj.wait_for_timeout(1000)
                             tabs = _pw_discover_tabs(page_obj)
@@ -1601,19 +2214,44 @@ def discover_structure(
 
                             for tab in tabs:
                                 tab_url = urljoin(base_url, tab["url_path"])
+                                skip_words = {ver_name.lower(), tab["name"].lower()}
                                 try:
                                     page_obj.goto(tab_url, wait_until="domcontentloaded", timeout=15000)
                                     page_obj.wait_for_timeout(1000)
-                                    tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth)
-                                    # Always add tab, even if sidebar is empty
-                                    tab_urls = _collect_all_urls(tab_tree) if tab_tree else []
-                                    
-                                    # Sitemap fallback if no sidebar found
-                                    if not tab_tree:
+                                    tab_tree = _pw_extract_nav_tree(page_obj, tab_url, max_depth=max_depth) or []
+                                    # Add sidebar section names to skip_words
+                                    for node in tab_tree:
+                                        if node.get("title") and not node.get("url"):
+                                            skip_words.add(node.get("title", "").lower())
+                                    tab_urls = _collect_all_urls(tab_tree)
+
+                                    tab_sitemap_urls = _fetch_sitemap_urls(base_url, tab["url_path"])
+                                    skip_words = {ver_name.lower(), tab["name"].lower()}
+                                    if tab_sitemap_urls:
+                                        merged_count = _merge_sitemap_urls_into_tab_tree(
+                                            tab_tree=tab_tree,
+                                            tab_url=tab_url,
+                                            sitemap_urls=tab_sitemap_urls,
+                                            skip_words=skip_words,
+                                        )
+                                        if merged_count > 0:
+                                            log.info(
+                                                "    %s: supplemented hierarchy with %d sitemap pages",
+                                                tab["name"],
+                                                merged_count,
+                                            )
+                                        tab_urls = _collect_all_urls(tab_tree)
+                                    elif not tab_tree:
                                         log.info("    No sidebar for %s — trying sitemap", tab["name"])
                                         sitemap_urls = _fetch_sitemap_urls(base_url, tab["url_path"])
                                         if sitemap_urls:
-                                            tab_tree = _sitemap_urls_to_tree(sitemap_urls, apply_category_map=True)
+                                            tab_tree = []
+                                            _merge_sitemap_urls_into_tab_tree(
+                                                tab_tree=tab_tree,
+                                                tab_url=tab_url,
+                                                sitemap_urls=sitemap_urls,
+                                                skip_words=skip_words,
+                                            )
                                             tab_urls = _collect_all_urls(tab_tree)
                                             log.info("    %s (sitemap): %d pages", tab["name"], len(tab_urls))
                                     
@@ -1675,65 +2313,62 @@ def discover_structure(
                 len(all_urls),
             )
 
-            if len(all_urls) < 200 and apply_category_map and max_depth > 2 and not versions:
+            if len(all_urls) < 500 and apply_category_map:
                 log.info(
                     "Playwright sidebar has only %d URLs (collapsed sections) — "
                     "supplementing with sitemap, preserving Playwright section hierarchy",
                     len(all_urls),
                 )
-                sitemap_urls = _fetch_sitemap_urls(base_url, source_path + "/")
-                if not sitemap_urls:
-                    sitemap_urls = _fetch_sitemap_urls(base_url, source_path)
-                if sitemap_urls:
-                    existing_urls: set[str] = set()
-                    for node in tree:
-                        if node.get("url"):
-                            existing_urls.add(node["url"])
-                        for child in _flatten_pages(node.get("children", [])):
-                            if child.get("url"):
-                                existing_urls.add(child["url"])
+                merged_total = 0
+                tab_nodes = _iter_tab_nodes(tree)
 
-                    for node in tree:
-                        if not node.get("children"):
-                            node["children"] = []
-
-                    uncategorized: list[dict] = []
-                    for url in sitemap_urls:
-                        if url in existing_urls:
+                if tab_nodes:
+                    for tab_node in tab_nodes:
+                        tab_url = str(tab_node.get("url") or "").strip()
+                        if not tab_url:
                             continue
-                        slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
-                        title = slug.replace("-", " ").replace("_", " ").title()
-                        category = _categorize_url(slug)
-                        page_node = {"title": title, "url": url, "depth": 1, "children": []}
-                        if category:
-                            matched = False
-                            for section in tree:
-                                if section["title"] == category:
-                                    section["children"].append(page_node)
-                                    matched = True
-                                    break
-                            if not matched:
-                                uncategorized.append(page_node)
-                        else:
-                            uncategorized.append(page_node)
+                        parsed_tab = urlparse(tab_url)
+                        tab_base = urlunparse((parsed_tab.scheme, parsed_tab.netloc, "", "", "", ""))
+                        tab_prefix = parsed_tab.path.rstrip("/") + "/"
+                        tab_sitemap_urls = _fetch_sitemap_urls(tab_base, tab_prefix)
+                        if not tab_sitemap_urls:
+                            tab_sitemap_urls = _fetch_sitemap_urls(tab_base, parsed_tab.path.rstrip("/"))
+                        if not tab_sitemap_urls:
+                            continue
+                        tab_title = tab_node.get("title", "").lower()
+                        ver_node = next((p for p in tree if any(c.get("title", "").lower() == tab_title for c in p.get("children", []))), None)
+                        ver_title = ver_node.get("title", "").lower() if ver_node else ""
+                        skip_words = {ver_title, tab_title}
+                        # Add sidebar section names to skip_words
+                        for node in tab_node.get("children", []):
+                            if node.get("title") and not node.get("url"):
+                                skip_words.add(node.get("title", "").lower())
+                        merged_total += _merge_sitemap_urls_into_tab_tree(
+                            tab_tree=tab_node.get("children", []),
+                            tab_url=tab_url,
+                            sitemap_urls=tab_sitemap_urls,
+                            skip_words=skip_words,
+                        )
+                else:
+                    sitemap_urls = _fetch_sitemap_urls(base_url, source_path + "/")
+                    if not sitemap_urls:
+                        sitemap_urls = _fetch_sitemap_urls(base_url, source_path)
+                    if sitemap_urls:
+                        merged_total += _merge_sitemap_urls_into_tab_tree(
+                            tab_tree=tree,
+                            tab_url=source_url,
+                            sitemap_urls=sitemap_urls,
+                        )
 
-                    if uncategorized:
-                        tree.append({
-                            "title": "Other",
-                            "url": None,
-                            "depth": 0,
-                            "children": uncategorized,
-                        })
-
+                if merged_total > 0:
                     merged_urls = _collect_all_urls(tree)
                     log.info(
-                        "Merged tree: %d sections, %d total pages",
+                        "Merged tree: %d top-level nodes, %d total pages (+%d)",
                         len(tree),
                         len(merged_urls),
+                        merged_total,
                     )
-                    fallback_links = sitemap_urls
-                else:
-                    fallback_links = all_urls
+                fallback_links = _collect_all_urls(tree) or all_urls
             else:
                 fallback_links = all_urls
 
@@ -1745,7 +2380,7 @@ def discover_structure(
         html = fetch_html(source_url)
         if not html:
             log.error("Could not load source URL: %s", source_url)
-            raise RuntimeError(f"Could not load source URL: {source_url}")
+            sys.exit(1)
 
         soup = BeautifulSoup(html, "html.parser")
         nav = _find_nav(soup)
@@ -1784,7 +2419,7 @@ def discover_structure(
                 tree.append({"title": title, "url": url, "depth": 0, "children": []})
         else:
             log.error("Could not discover any pages. Check the source URL.")
-            raise RuntimeError("Could not discover any pages from the source URL. Check that the URL is accessible and has a sitemap.xml.")
+            sys.exit(1)
 
     # If we got a static/sitemap tree that is suspiciously flat, apply category map
     if not use_playwright and apply_category_map:
@@ -2511,7 +3146,7 @@ def _convert_custom_html_components(soup_elem: Tag) -> None:
 
     DeveloperHub uses <app-custom-html> components to embed arbitrary HTML content
     (e.g., compatibility matrices, custom styled sections). The HTML is stored in
-    a pluginobject JSON attribute as URL-encoded data.
+    a pluginobject JSON attribute as URL-encoded/HTML-escaped data.
 
     Example:
         <app-custom-html pluginobject='{"data":{"contents":"<!DOCTYPE html>..."}}'>
@@ -2520,6 +3155,7 @@ def _convert_custom_html_components(soup_elem: Tag) -> None:
     and insert the body content directly.
     """
     import json as _json
+    import html as _html
     from urllib.parse import unquote as _unquote
 
     custom_html_components = list(soup_elem.find_all("app-custom-html"))
@@ -2542,8 +3178,8 @@ def _convert_custom_html_components(soup_elem: Tag) -> None:
                 comp.decompose()
                 continue
 
-            # Decode URL-encoded HTML
-            decoded_html = _unquote(contents)
+            # Decode HTML entities
+            decoded_html = _html.unescape(contents)
 
             # Find body content boundaries
             body_start = decoded_html.lower().find("<body")
@@ -3210,6 +3846,62 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Migrate all known versions for each product (default: latest only).",
     )
+    p.add_argument(
+        "--tab",
+        type=str,
+        default=None,
+        help=(
+            "Migrate a specific tab only (e.g. 'User Guide', 'Installation Guide'). "
+            "Use with --version-id to target an existing version. Use --resume to continue "
+            "from where you left off."
+        ),
+    )
+    p.add_argument(
+        "--version-id",
+        type=int,
+        default=None,
+        help=(
+            "The AccelDocs section ID of an existing version to import under. "
+            "If not provided, a new version section will be created. "
+            "Use this to import tabs into an already-created version."
+        ),
+    )
+    p.add_argument(
+        "--max-versions",
+        type=int,
+        default=0,
+        help=(
+            "Process N versions at a time. Use with --all-versions to process in chunks. "
+            "E.g., --max-versions 3 processes first 3 versions then stops. "
+            "Run again to process next 3."
+        ),
+    )
+    p.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "Extract full deep hierarchy (L3+ sub-pages). Without this, only L2 sections "
+            "are extracted for speed. Use this to get complete sidebar structure."
+        ),
+    )
+    p.add_argument(
+        "--version-idx",
+        type=int,
+        default=None,
+        help=(
+            "Process a specific version by index: 0=first, 1=second, etc. "
+            "E.g., --version-idx 0 for first version, --version-idx 1 for second. "
+            "Use with --all-versions."
+        ),
+    )
+    p.add_argument(
+        "--one-version",
+        action="store_true",
+        help=(
+            "Do only ONE version then stop. Use with --all-versions to process "
+            "versions one at a time (prevents crashes). Run again to do next version."
+        ),
+    )
     return p.parse_args()
 
 
@@ -3219,6 +3911,8 @@ def _discover_product_tree(
     use_playwright: bool,
     use_category_map: bool,
     all_versions: bool = False,
+    state: dict | None = None,
+    target_tab: str | None = None,
 ) -> list[dict]:
     """Discover the full tree for one product (all tabs x versions).
 
@@ -3229,6 +3923,8 @@ def _discover_product_tree(
     from the version picker dropdown and iterates each one with version switching.
     """
     product_children: list[dict] = []
+    if state is None:
+        state = {}
 
     # Playwright path: use a headless browser for sidebar discovery.
     # When all_versions=True, also auto-discover and switch between versions.
@@ -3236,10 +3932,10 @@ def _discover_product_tree(
     if use_playwright and _check_playwright():
         if all_versions:
             # Full version discovery + switching via dropdown
-            return _discover_product_tree_playwright(product, use_category_map)
+            return _discover_product_tree_playwright(product, use_category_map, state)
         else:
             # Playwright for sidebar only, latest version, no version switching
-            return _discover_product_tree_playwright_latest(product, use_category_map)
+            return _discover_product_tree_playwright_latest(product, use_category_map, state)
 
     # Non-Playwright (sitemap) path: iterate configured versions x tabs.
     # NOTE: DeveloperHub versions are JS-only (no URL change), so sitemap
@@ -3306,6 +4002,7 @@ def _discover_product_tree(
 def _discover_product_tree_playwright_latest(
     product: ProductConfig,
     use_category_map: bool,
+    state: dict | None = None,
 ) -> list[dict]:
     """Playwright-based product discovery for the LATEST version only.
 
@@ -3336,7 +4033,7 @@ def _discover_product_tree_playwright_latest(
         # Navigate to first tab and try to discover tabs dynamically
         first_tab_url = product.base_url + product.tabs[0].url_path if product.tabs else product.base_url
         log.info("Playwright (latest): navigating to %s", first_tab_url)
-        page_obj.goto(first_tab_url, wait_until="networkidle", timeout=30000)
+        page_obj.goto(first_tab_url, wait_until="networkidle", timeout=60000)
         page_obj.wait_for_timeout(2000)
 
         discovered_tabs = _pw_discover_tabs(page_obj)
@@ -3352,41 +4049,42 @@ def _discover_product_tree_playwright_latest(
 
             if tab_url != page_obj.url:
                 try:
-                    page_obj.goto(tab_url, wait_until="networkidle", timeout=30000)
+                    page_obj.goto(tab_url, wait_until="networkidle", timeout=60000)
                     page_obj.wait_for_timeout(2000)
                 except Exception as exc:
                     log.warning("  Could not navigate to tab %s: %s", tab_name, exc)
                     continue
 
-            tab_tree = _pw_extract_nav_tree(page_obj, tab_url)
+            tab_tree = _pw_extract_nav_tree(page_obj, tab_url) or []
 
-            if tab_tree:
-                total_pages = len(_collect_all_urls(tab_tree))
+            # Always supplement with sitemap to get ALL pages
+            parsed_tab = urlparse(tab_url)
+            base = urlunparse((parsed_tab.scheme, parsed_tab.netloc, "", "", "", ""))
+            tab_path = parsed_tab.path.rstrip("/") + "/"
+            sitemap_urls = _fetch_sitemap_urls(base, tab_path)
+
+            if sitemap_urls:
+                merged = _merge_sitemap_urls_into_tab_tree(
+                    tab_tree=tab_tree,
+                    tab_url=tab_url,
+                    sitemap_urls=sitemap_urls,
+                )
+                if merged > 0:
+                    log.info("  %s > %s: merged %d missing sitemap pages", product.name, tab_name, merged)
+
+            total_pages = len(_collect_all_urls(tab_tree))
+            if total_pages > 0:
                 log.info("  %s > %s: %d sections, %d pages", product.name, tab_name, len(tab_tree), total_pages)
                 product_children.append({
                     "title": tab_name,
                     "url": None,
-                    "depth": 1,
+                    "depth": 0,
                     "children": tab_tree,
                     "_section_type": "tab",
                 })
             else:
-                # Sitemap fallback for this tab
-                log.info("  Playwright sidebar empty for %s — trying sitemap", tab_name)
-                parsed_tab = urlparse(tab_url)
-                base = urlunparse((parsed_tab.scheme, parsed_tab.netloc, "", "", "", ""))
-                sitemap_urls = _fetch_sitemap_urls(base, parsed_tab.path.rstrip("/") + "/")
-                if sitemap_urls:
-                    tree_from_sitemap = _sitemap_urls_to_tree(sitemap_urls, apply_category_map=use_category_map)
-                    total_pages = len(_collect_all_urls(tree_from_sitemap))
-                    log.info("  %s > %s (sitemap): %d pages", product.name, tab_name, total_pages)
-                    product_children.append({
-                        "title": tab_name,
-                        "url": None,
-                        "depth": 1,
-                        "children": tree_from_sitemap,
-                        "_section_type": "tab",
-                    })
+                log.info("  %s > %s: no sidebar or sitemap pages found", product.name, tab_name)
+
 
         browser.close()
 
@@ -3396,6 +4094,7 @@ def _discover_product_tree_playwright_latest(
 def _discover_product_tree_playwright(
     product: ProductConfig,
     use_category_map: bool,
+    state: dict | None = None,
 ) -> list[dict]:
     """Playwright-based product discovery with live version/tab switching.
 
@@ -3481,17 +4180,29 @@ def _discover_product_tree_playwright(
 
                 if tab_url != page_obj.url:
                     try:
-                        page_obj.goto(tab_url, wait_until="networkidle", timeout=30000)
+                        page_obj.goto(tab_url, wait_until="networkidle", timeout=60000)
                         page_obj.wait_for_timeout(2000)
                     except Exception as exc:
                         log.warning("  Could not navigate to tab %s: %s", tab_name, exc)
                         continue
 
                 # Extract sidebar tree from current page
-                tab_tree = _pw_extract_nav_tree(page_obj, tab_url)
+                tab_tree = _pw_extract_nav_tree(page_obj, tab_url) or []
+                parsed_tab = urlparse(tab_url)
+                base = urlunparse((parsed_tab.scheme, parsed_tab.netloc, "", "", "", ""))
+                sitemap_urls = _fetch_sitemap_urls(base, parsed_tab.path.rstrip("/") + "/")
+                if sitemap_urls:
+                    merged = _merge_sitemap_urls_into_tab_tree(
+                        tab_tree=tab_tree,
+                        tab_url=tab_url,
+                        sitemap_urls=sitemap_urls,
+                    )
+                    if merged > 0:
+                        log.info("  %s > %s > %s: merged %d missing sitemap pages",
+                                 product.name, ver_label, tab_name, merged)
 
-                if tab_tree:
-                    total_tab_pages = len(_collect_all_urls(tab_tree))
+                total_tab_pages = len(_collect_all_urls(tab_tree))
+                if total_tab_pages:
                     log.info(
                         "  %s > %s > %s: %d sections, %d pages",
                         product.name, ver_label, tab_name,
@@ -3505,28 +4216,8 @@ def _discover_product_tree_playwright(
                         "_section_type": "tab",
                     })
                 else:
-                    # Fallback to sitemap for this tab
-                    log.info("  Playwright sidebar empty for %s — trying sitemap", tab_name)
-                    parsed_tab = urlparse(tab_url)
-                    base = urlunparse((parsed_tab.scheme, parsed_tab.netloc, "", "", "", ""))
-                    sitemap_urls = _fetch_sitemap_urls(base, parsed_tab.path.rstrip("/") + "/")
-                    if sitemap_urls:
-                        tree_from_sitemap = _sitemap_urls_to_tree(
-                            sitemap_urls, apply_category_map=use_category_map,
-                        )
-                        total_pages = len(_collect_all_urls(tree_from_sitemap))
-                        log.info(
-                            "  %s > %s > %s (sitemap): %d sections, %d pages",
-                            product.name, ver_label, tab_name,
-                            len(tree_from_sitemap), total_pages,
-                        )
-                        version_children.append({
-                            "title": tab_name,
-                            "url": None,
-                            "depth": 1,
-                            "children": tree_from_sitemap,
-                            "_section_type": "tab",
-                        })
+                    log.info("  %s > %s > %s: no sidebar or sitemap pages found",
+                             product.name, ver_label, tab_name)
 
             if version_children:
                 if len(discovered_versions) == 1:
@@ -3574,7 +4265,18 @@ def main() -> None:
     use_all_tabs = getattr(args, "all_tabs", False)
     use_all_products = getattr(args, "all_products", False)
     use_all_versions = getattr(args, "all_versions", False)
+    max_versions = getattr(args, "max_versions", 0) or 0
+    version_idx = getattr(args, "version_idx", None)
+    one_version = getattr(args, "one_version", False)
     selected_product = getattr(args, "product", None)
+    use_deep = getattr(args, "deep", False)
+    
+    # If --deep is set, use max_depth=3 to extract L3+ pages
+    max_depth = 3 if use_deep else 0
+    
+    # If --one-version, process exactly 1 version
+    if one_version and use_all_versions:
+        max_versions = 1
 
     # Determine which products to process
     products = get_products_to_migrate(selected_product, use_all_products)
@@ -3587,12 +4289,28 @@ def main() -> None:
     log.info("Playwright: %s", use_playwright)
     log.info("Create Drive docs: %s", getattr(args, "create_drive_docs", False))
 
-    # Load or start fresh state
+    # Per-tab migration support
+    selected_tab = getattr(args, "tab", None)
+    version_id = getattr(args, "version_id", None)
+    if selected_tab:
+        log.info("Tab: %s (version_id=%s)", selected_tab, version_id)
+
+    # Determine product slug for state management
+    # If migrating a specific tab, include tab name in state file for resume support
+    if selected_tab and selected_product:
+        product_slug = f"{selected_product}_{selected_tab.lower().replace(' ', '-')}"
+    else:
+        product_slug = selected_product if selected_product else (products[0].slug if products else "")
+
+    # Load or start fresh state (per-product)
     state: dict = {}
     if args.resume:
-        state = load_state()
+        state = load_state(product_slug)
         if state:
-            log.info("Loaded existing state from %s", STATE_FILE)
+            state_file = _get_state_file(product_slug)
+            log.info("Loaded existing state from %s", state_file)
+        else:
+            log.info("No existing state found for '%s' — starting fresh", product_slug)
 
     # -----------------------------------------------------------------------
     # Step 1: Discover structure — multi-product aware
@@ -3601,32 +4319,58 @@ def main() -> None:
     if use_all_products or selected_product:
         tree = []
         for product in products:
-            versions = get_versions_to_migrate(product, use_all_versions)
+            versions = get_versions_to_migrate(product, use_all_versions, max_versions, version_idx)
             log.info(
                 "Product '%s': %d tabs, %d versions to migrate",
                 product.name, len(product.tabs), len(versions),
             )
 
+            # Load per-product state for this product
+            prod_state = load_state(product.slug)
+            
             product_children = _discover_product_tree(
                 product, versions, use_playwright, use_category_map,
                 all_versions=use_all_versions,
+                state=prod_state,
+                target_tab=selected_tab,  # Filter to specific tab if specified
             )
 
+            # If --tab was specified, filter product_children to only that tab
+            if selected_tab:
+                product_children = [
+                    child for child in product_children
+                    if child.get("title", "").lower() == selected_tab.lower()
+                ]
+                log.info("Filtered to tab '%s': %d tab(s) found", selected_tab, len(product_children))
+
             if product_children:
-                # Wrap under a product root node
+                # Determine version name from the first discovered version or use "Latest"
+                version_name = product.name  # Default version name
+                if len(versions) == 1:
+                    ver = versions[0]
+                    version_name = ver.label if hasattr(ver, 'label') and ver.label else product.name
+                
                 tree.append({
-                    "title": product.name,
+                    "title": version_name,
                     "url": None,
                     "depth": 0,
+                    "_section_type": "version",
                     "children": product_children,
-                    "_section_type": "section",
                 })
+            
+            # Save per-product state
+            prod_state["tree"] = tree if product == products[0] else prod_state.get("tree", [])
+            prod_state["source"] = args.source
+            prod_state["product"] = product.slug
+            prod_state["discovered_at"] = datetime.now(timezone.utc).isoformat()
+            if version_id:
+                prod_state["version_id"] = version_id
+            save_state(prod_state, product.slug)
 
         state["tree"] = tree
         state["source"] = args.source
         state["products"] = [p.slug for p in products]
         state["discovered_at"] = datetime.now(timezone.utc).isoformat()
-        save_state(state)
 
     # Legacy single-product path: --all-tabs or plain --source
     elif state.get("tree") and not use_playwright and not use_all_tabs:
@@ -3666,6 +4410,7 @@ def main() -> None:
                 tab_url,
                 use_playwright=use_playwright,
                 apply_category_map=use_category_map,
+                all_versions=use_all_versions,
             )
 
             if use_all_tabs and tab_name and tab_tree:
@@ -3691,7 +4436,7 @@ def main() -> None:
         state["source"] = args.source
         state["all_tabs"] = use_all_tabs
         state["discovered_at"] = datetime.now(timezone.utc).isoformat()
-        save_state(state)
+        save_state(state, product_slug)
 
     all_page_urls = list(dict.fromkeys(_collect_all_urls(tree)))
     total_pages = len(all_page_urls)
@@ -3759,42 +4504,30 @@ def main() -> None:
     urls_to_fetch = [u for u in all_page_urls if u not in already_fetched]
     log.info("Pages to fetch: %d (already cached: %d)", len(urls_to_fetch), len(already_fetched))
 
-    if use_playwright and _check_playwright() and urls_to_fetch:
-        log.info("Using Playwright browser for page content fetching…")
-        try:
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True)
-                context = browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    )
+    # Use Playwright for content fetching if --playwright is set (Angular-rendered pages)
+    if use_playwright and urls_to_fetch:
+        log.info("Fetching page content using Playwright (JavaScript-rendered Angular SPA)…")
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
                 )
-                for idx, url in enumerate(urls_to_fetch, 1):
-                    log.info("[%d/%d] Fetching (Playwright): %s", idx, len(urls_to_fetch), url)
-                    result = fetch_and_convert_page(url, pw_browser=context)
-                    if result:
-                        page_data[url] = result
-                        state["page_data"] = page_data
-                        if idx % 10 == 0:
-                            save_state(state)
-                    time.sleep(_REQUEST_DELAY)
-                browser.close()
-        except Exception as exc:
-            log.warning("Playwright page fetch failed: %s — falling back to static HTTP", exc)
+            )
             for idx, url in enumerate(urls_to_fetch, 1):
-                if url in page_data:
-                    continue
-                log.info("[%d/%d] Fetching (static): %s", idx, len(urls_to_fetch), url)
-                result = fetch_and_convert_page(url)
+                log.info("[%d/%d] Fetching: %s", idx, len(urls_to_fetch), url)
+                result = fetch_and_convert_page(url, pw_browser=browser)
                 if result:
                     page_data[url] = result
                     state["page_data"] = page_data
                     if idx % 10 == 0:
-                        save_state(state)
+                        save_state(state, product_slug)
+            browser.close()
     else:
+        log.info("Fetching page content using static HTTP…")
         for idx, url in enumerate(urls_to_fetch, 1):
             log.info("[%d/%d] Fetching: %s", idx, len(urls_to_fetch), url)
             result = fetch_and_convert_page(url)
@@ -3802,9 +4535,9 @@ def main() -> None:
                 page_data[url] = result
                 state["page_data"] = page_data
                 if idx % 10 == 0:
-                    save_state(state)
+                    save_state(state, product_slug)
 
-    save_state(state)
+    save_state(state, product_slug)
     log.info("Fetched %d pages total", len(page_data))
 
     # -----------------------------------------------------------------------
@@ -3832,6 +4565,21 @@ def main() -> None:
     # -----------------------------------------------------------------------
     client = AccelDocsClient(backend_url=args.backend, token=token, org_id=org_id)
 
+    # If version_id was provided, add it to state so import_hierarchy uses it
+    # The version node_path follows the pattern: /{slugified_version_name}
+    if version_id:
+        if "section_map" not in state:
+            state["section_map"] = {}
+        # Determine version name from tree
+        version_name = "pulse-41x"  # Default
+        for node in tree:
+            if node.get("_section_type") == "version":
+                version_name = _slugify(node.get("title", ""))
+                break
+        version_node_path = f"/{version_name}"
+        state["section_map"][version_node_path] = version_id
+        log.info("Using existing version_id=%d (node_path=%s)", version_id, version_node_path)
+    
     log.info(
         "Starting import into AccelDocs (product_id=%d, create_drive_docs=%s)",
         product_id,
@@ -3859,6 +4607,7 @@ def main() -> None:
     imported = sum(1 for pid in old_url_to_page_id.values() if pid and pid > 0)
     skipped = total_pages - imported
 
+    state_file_path = _get_state_file(product_slug) if product_slug else STATE_DIR / "migration_state.json"
     print("\n" + "=" * 60)
     print("Migration Complete")
     print("=" * 60)
@@ -3867,7 +4616,7 @@ def main() -> None:
     print(f"  Pages imported:         {imported}")
     print(f"  Pages skipped/failed:   {skipped}")
     print(f"  Drive docs created:     {getattr(args, 'create_drive_docs', False)}")
-    print(f"  State saved to:         {STATE_FILE}")
+    print(f"  State saved to:         {state_file_path}")
     print(f"  Full log in:            {LOG_FILE}")
     print("=" * 60)
 
@@ -3879,7 +4628,7 @@ def main() -> None:
     )
 
     state["completed_at"] = datetime.now(timezone.utc).isoformat()
-    save_state(state)
+    save_state(state, product_slug)
 
 
 if __name__ == "__main__":

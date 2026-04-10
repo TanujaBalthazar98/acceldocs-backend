@@ -669,3 +669,65 @@ class AgentConversation(Base):
     __table_args__ = (
         Index("ix_agent_conv_user_org", "user_id", "organization_id"),
     )
+
+
+class Migration(Base):
+    """Represents an overall migration job."""
+    __tablename__ = "migrations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    source_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    # The AccelDocs section ID under which content is imported (product_id in old script)
+    target_section_id: Mapped[int] = mapped_column(ForeignKey("sections.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="PENDING")  # PENDING, IN_PROGRESS, COMPLETED, FAILED, CANCELLED
+    start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    total_pages: Mapped[int] = mapped_column(Integer, default=0)
+    completed_pages: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    tree_json: Mapped[str | None] = mapped_column(Text)  # The discovered hierarchy tree as JSON
+    page_id_map_json: Mapped[str | None] = mapped_column(Text) # Mapping of old URLs to new page IDs as JSON
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    organization: Mapped["Organization"] = relationship("Organization", foreign_keys=[organization_id])
+    target_section: Mapped["Section"] = relationship("Section", foreign_keys=[target_section_id])
+    pages: Mapped[list["MigrationPage"]] = relationship(back_populates="migration", cascade="all, delete-orphan")
+
+
+class MigrationPage(Base):
+    """Represents the state of a single page within a migration."""
+    __tablename__ = "migration_pages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    migration_id: Mapped[int] = mapped_column(ForeignKey("migrations.id", ondelete="CASCADE"), nullable=False)
+    source_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    # The ID of the created page in AccelDocs (nullable initially)
+    target_page_id: Mapped[int | None] = mapped_column(ForeignKey("pages.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(50), default="PENDING")  # PENDING, FETCHED, IMPORTED, LINK_RESOLVED, FAILED
+    error_message: Mapped[str | None] = mapped_column(Text)
+    # The content for import (store in DB for now, can switch to object storage later if too large)
+    html_content: Mapped[str | None] = mapped_column(Text)
+    markdown_content: Mapped[str | None] = mapped_column(Text)
+    drive_html_content: Mapped[str | None] = mapped_column(Text) # HTML for Google Docs
+    # The determined hierarchy of the page within the migration tree
+    section_node_path: Mapped[str] = mapped_column(String(1000), nullable=False) # e.g., /product/version/tab/section
+    display_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    migration: Mapped["Migration"] = relationship(back_populates="pages")
+    target_page: Mapped["Page | None"] = relationship("Page", foreign_keys=[target_page_id])
+
+    __table_args__ = (
+        UniqueConstraint("migration_id", "source_url", name="uq_migration_page_url"),
+        Index("ix_migration_pages_migration_id_status", "migration_id", "status"),
+    )
