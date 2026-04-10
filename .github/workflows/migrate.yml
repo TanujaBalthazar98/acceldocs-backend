@@ -50,7 +50,8 @@ jobs:
             --playwright \
             --all-versions \
             --max-versions 1 \
-            --create-drive-docs
+            --create-drive-docs \
+            --resume
       
       - name: Upload state file
         if: always()
