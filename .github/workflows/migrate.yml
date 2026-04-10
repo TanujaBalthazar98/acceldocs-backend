@@ -6,7 +6,7 @@ on:
       source_url:
         description: "Source docs URL"
         required: true
-        default: "https://docs.acceldata.io"
+        default: "https://docs.acceldata.io/documentation"
       product_id:
         description: "AccelDocs product/section ID"
         required: true
@@ -47,9 +47,7 @@ jobs:
             --token "${{ secrets.ACCELDOCS_TOKEN }}" \
             --org-id "${{ github.event.inputs.org_id }}" \
             --product-id "760" \
-            --playwright \
-            --create-drive-docs \
-            --resume
+            --deep \
       
       - name: Upload state file
         if: always()
