@@ -43,7 +43,7 @@ jobs:
         run: |
           python scripts/migrate_developerhub.py \
             --source "${{ github.event.inputs.source_url }}" \
-            --backend "${{ secrets.ACCELDOCS_BACKEND_URL }}" \
+            --backend "https://acceldocs-backend.vercel.app" \
             --token "${{ secrets.ACCELDOCS_TOKEN }}" \
             --org-id "${{ github.event.inputs.org_id }}" \
             --product-id "${{ github.event.inputs.product_id }}" \
