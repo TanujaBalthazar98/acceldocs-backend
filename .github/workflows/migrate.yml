@@ -40,14 +40,11 @@ jobs:
           playwright install --with-deps chromium
       
       - name: Run migration
-        env:
-          ACCELDOCS_TOKEN: ${{ secrets.ACCELDOCS_TOKEN }}
-          ACCELDOCS_BACKEND: ${{ secrets.ACCELDOCS_BACKEND_URL }}
         run: |
           python scripts/migrate_developerhub.py \
             --source "${{ github.event.inputs.source_url }}" \
-            --backend "$ACCELDOCS_BACKEND" \
-            --token "$ACCELDOCS_TOKEN" \
+            --backend "${{ secrets.ACCELDOCS_BACKEND_URL }}" \
+            --token "${{ secrets.ACCELDOCS_TOKEN }}" \
             --org-id "${{ github.event.inputs.org_id }}" \
             --product-id "${{ github.event.inputs.product_id }}" \
             --playwright \
