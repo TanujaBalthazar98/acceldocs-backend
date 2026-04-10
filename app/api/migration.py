@@ -16,17 +16,23 @@ import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Literal, Optional
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Header, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, HttpUrl
 from sqlalchemy.orm import Session
 
 from app.auth.routes import get_current_user
 from app.config import settings
 from app.database import get_db
-from app.models import User
+from app.models import Migration, MigrationPage, Section, User
+from app.services.migration import (
+    MigrationServiceError,
+    initialize_migration_sections_and_pages,
+    process_migration_page_task,
+    resolve_all_migration_links_task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -531,3 +537,250 @@ async def migration_history(
             continue
 
     return sorted(migrations, key=lambda x: x.get("started_at") or "", reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# DB-backed migration ingestion endpoints (used by external crawler)
+# ---------------------------------------------------------------------------
+
+
+class IngestPageContent(BaseModel):
+    url: HttpUrl
+    title: str
+    markdown: Optional[str] = None
+    raw_html: Optional[str] = None
+    drive_html: Optional[str] = None
+
+
+class IngestTreeNode(BaseModel):
+    title: str
+    url: Optional[HttpUrl] = None
+    depth: int
+    children: List["IngestTreeNode"] = Field(default_factory=list)
+    _section_type: Literal["section", "tab", "version", "page"] = "section"
+
+
+IngestTreeNode.model_rebuild()
+
+
+class IngestRequest(BaseModel):
+    source_url: HttpUrl
+    tree: List[IngestTreeNode]
+    page_data: Dict[HttpUrl, IngestPageContent]
+    create_drive_docs: bool = False
+
+
+class MigrationJobResponse(BaseModel):
+    id: int
+    organization_id: int
+    source_url: HttpUrl
+    target_section_id: int
+    status: str
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    total_pages: int
+    completed_pages: int
+    error_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class MigrationJobPageResponse(BaseModel):
+    id: int
+    migration_id: int
+    source_url: HttpUrl
+    title: str
+    target_page_id: Optional[int] = None
+    status: str
+    error_message: Optional[str] = None
+    section_node_path: str
+    display_order: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@router.post(
+    "/{target_section_id}/start",
+    response_model=MigrationJobResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def start_migration_ingest(
+    target_section_id: int,
+    request: IngestRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    target_section = db.query(Section).filter(
+        Section.id == target_section_id,
+        Section.organization_id == current_user.organization_id,
+    ).first()
+    if not target_section:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Target section not found or does not belong to your organization.",
+        )
+
+    existing = db.query(Migration).filter(
+        Migration.organization_id == current_user.organization_id,
+        Migration.source_url == str(request.source_url),
+        Migration.target_section_id == target_section_id,
+        Migration.status.in_(["PENDING", "IN_PROGRESS"]),
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"A migration from {request.source_url} to section {target_section_id} "
+                f"is already PENDING or IN_PROGRESS (ID: {existing.id})."
+            ),
+        )
+
+    migration = Migration(
+        organization_id=current_user.organization_id,
+        source_url=str(request.source_url),
+        target_section_id=target_section_id,
+        status="PENDING",
+        total_pages=len(request.page_data),
+        tree_json=json.dumps([node.model_dump() for node in request.tree]),
+    )
+    db.add(migration)
+    db.flush()
+
+    queued_pages: list[MigrationPage] = []
+    for page_url, page_content in request.page_data.items():
+        queued_pages.append(
+            MigrationPage(
+                migration_id=migration.id,
+                source_url=str(page_url),
+                title=page_content.title,
+                html_content=page_content.raw_html,
+                markdown_content=page_content.markdown,
+                drive_html_content=page_content.drive_html,
+                section_node_path="",
+                display_order=0,
+                status="PENDING",
+            )
+        )
+    db.add_all(queued_pages)
+    db.commit()
+    db.refresh(migration)
+
+    try:
+        initialize_migration_sections_and_pages(db, migration, current_user)
+    except MigrationServiceError as exc:
+        db.rollback()
+        migration.status = "FAILED"
+        migration.error_message = f"Failed to initialize migration sections: {exc}"
+        db.add(migration)
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    db.refresh(migration)
+    return migration
+
+
+@router.get("/jobs", response_model=List[MigrationJobResponse])
+def list_migration_jobs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return db.query(Migration).filter(
+        Migration.organization_id == current_user.organization_id
+    ).order_by(Migration.created_at.desc()).all()
+
+
+@router.get("/jobs/{migration_id}", response_model=MigrationJobResponse)
+def get_migration_job(
+    migration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    migration = db.query(Migration).filter(
+        Migration.id == migration_id,
+        Migration.organization_id == current_user.organization_id,
+    ).first()
+    if not migration:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Migration not found.")
+    return migration
+
+
+@router.post("/jobs/{migration_id}/process-next", response_model=Optional[MigrationJobPageResponse])
+def process_next_job_page(
+    migration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    migration = db.query(Migration).filter(
+        Migration.id == migration_id,
+        Migration.organization_id == current_user.organization_id,
+        Migration.status.in_(["PENDING", "IN_PROGRESS"]),
+    ).first()
+    if not migration:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Migration not found or not in PENDING/IN_PROGRESS status.",
+        )
+
+    next_page = db.query(MigrationPage).filter(
+        MigrationPage.migration_id == migration_id,
+        MigrationPage.status == "PENDING",
+    ).order_by(MigrationPage.display_order, MigrationPage.created_at).with_for_update().first()
+
+    if not next_page:
+        remaining = db.query(MigrationPage).filter(
+            MigrationPage.migration_id == migration_id,
+            MigrationPage.status.in_(["PENDING", "IN_PROGRESS"]),
+        ).count()
+        if remaining > 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="No pending pages found at this moment, but others might exist. Try again.",
+            )
+
+        migration.status = "COMPLETED"
+        migration.end_time = datetime.now(timezone.utc)
+        db.add(migration)
+        db.commit()
+        db.refresh(migration)
+
+        try:
+            resolve_all_migration_links_task(db, migration.id, current_user)
+        except Exception as exc:
+            db.rollback()
+            migration.status = "FAILED"
+            migration.error_message = f"Link resolution failed: {exc}"
+            db.add(migration)
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Migration completed but link resolution failed: {exc}",
+            )
+        return None
+
+    if migration.status == "PENDING":
+        migration.status = "IN_PROGRESS"
+        db.add(migration)
+        db.flush()
+
+    next_page.status = "IN_PROGRESS"
+    db.add(next_page)
+    db.flush()
+
+    try:
+        return process_migration_page_task(
+            db,
+            migration_page_id=next_page.id,
+            current_user=current_user,
+            create_drive_docs=False,
+        )
+    except MigrationServiceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )

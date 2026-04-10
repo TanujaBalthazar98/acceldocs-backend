@@ -10,8 +10,11 @@ Supports LLM providers:
 import dataclasses
 import json
 import logging
+import re
 from datetime import datetime, timezone
-from typing import AsyncGenerator
+from time import perf_counter
+from typing import Any, AsyncGenerator
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
@@ -26,13 +29,18 @@ except ImportError:
 from app.auth.routes import get_current_user
 from app.config import settings
 from app.database import get_db
-from app.models import Organization, OrgRole, Page, Section, User
+from app.models import JiraCredential, Organization, OrgRole, Page, Section, User
 from app.services.agent import _html_to_text, _unique_slug, jira_get_ticket
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
+AGENT_HISTORY_WINDOW = 40
+AGENT_HISTORY_PERSIST_LIMIT = 120
+AGENT_MEMORY_CATALOG_CHAR_BUDGET = 18000
+AGENT_MEMORY_EXCERPT_PAGE_LIMIT = 8
+AGENT_MEMORY_EXCERPT_CHAR_LIMIT = 900
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +146,246 @@ def _check_rate_limit(org_id: int) -> None:
     _rate_limit_cache[key] = (count + 1, date_str)
 
 
+NUMERIC_TOOL_FIELDS = (
+    "section_id",
+    "page_id",
+    "parent_id",
+    "display_order",
+    "limit",
+    "member_id",
+    "max_results",
+    "max_candidates",
+    "max_context_pages",
+    "max_confluence_pages",
+)
+
+
+def _coerce_tool_input(raw_input: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
+    """Normalize tool arguments so handlers receive stable types."""
+    input_data = dict(raw_input or {})
+    dropped_fields: list[str] = []
+
+    for key in NUMERIC_TOOL_FIELDS:
+        val = input_data.get(key)
+        if val is None:
+            input_data.pop(key, None)
+            continue
+        if isinstance(val, str):
+            try:
+                input_data[key] = int(val)
+            except (ValueError, TypeError):
+                input_data.pop(key, None)
+                dropped_fields.append(key)
+    return input_data, dropped_fields
+
+
+def _summarize_tool_input(tool_input: dict[str, Any], max_value_len: int = 200) -> dict[str, Any]:
+    """Log-safe representation of tool input."""
+    summarized: dict[str, Any] = {}
+    for key, value in tool_input.items():
+        if isinstance(value, str):
+            summarized[key] = value[:max_value_len] + ("..." if len(value) > max_value_len else "")
+        elif isinstance(value, (int, float, bool)) or value is None:
+            summarized[key] = value
+        else:
+            summarized[key] = str(type(value).__name__)
+    return summarized
+
+
+def _classify_tool_error(result: dict[str, Any]) -> str:
+    error = str(result.get("error") or "").lower()
+    if not error:
+        return "none"
+    if "unknown tool" in error:
+        return "unknown_tool"
+    if "required" in error or "invalid" in error:
+        return "validation"
+    if "not found" in error:
+        return "not_found"
+    if "permission" in error or "forbidden" in error or "role required" in error:
+        return "permission"
+    if "timeout" in error or "network" in error:
+        return "network"
+    if "drive" in error or "google" in error:
+        return "integration_drive"
+    if "confluence" in error:
+        return "integration_confluence"
+    if "jira" in error:
+        return "integration_jira"
+    return "tool_error"
+
+
+def _log_agent_event(event_name: str, **payload: Any) -> None:
+    """Emit one structured log line per major agent runtime event."""
+    envelope = {
+        "event": event_name,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        **payload,
+    }
+    logger.info("agent_event %s", json.dumps(envelope, default=str, sort_keys=True))
+
+
+def _normalize_history_items(raw_history: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_history, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for row in raw_history:
+        if not isinstance(row, dict):
+            continue
+        role = row.get("role")
+        content = row.get("content")
+        if role not in ("user", "assistant", "system"):
+            continue
+        if not isinstance(content, str) or not content.strip():
+            continue
+        normalized.append({"role": role, "content": content})
+    return normalized
+
+
+def _hydrate_history(
+    *,
+    db: Session,
+    user: User,
+    conversation_id: int | None,
+    request_history: list[dict],
+) -> list[dict[str, str]]:
+    merged = _normalize_history_items(request_history)
+    if conversation_id is None:
+        return merged[-AGENT_HISTORY_PERSIST_LIMIT:]
+
+    from app.models import AgentConversation
+
+    conv = db.query(AgentConversation).filter(
+        AgentConversation.id == conversation_id,
+        AgentConversation.user_id == user.id,
+    ).first()
+    if not conv:
+        return merged[-AGENT_HISTORY_PERSIST_LIMIT:]
+
+    try:
+        stored = json.loads(conv.history or "[]")
+    except Exception:
+        stored = []
+    stored_history = _normalize_history_items(stored)
+
+    if not stored_history:
+        return merged[-AGENT_HISTORY_PERSIST_LIMIT:]
+
+    if not merged:
+        return stored_history[-AGENT_HISTORY_PERSIST_LIMIT:]
+
+    # Keep persisted context first, then append any newer client history.
+    combined = stored_history + merged
+    deduped: list[dict[str, str]] = []
+    for item in combined:
+        if deduped and deduped[-1]["role"] == item["role"] and deduped[-1]["content"] == item["content"]:
+            continue
+        deduped.append(item)
+    return deduped[-AGENT_HISTORY_PERSIST_LIMIT:]
+
+
+def _build_workspace_memory_context(
+    *,
+    org_id: int,
+    db: Session,
+    user_message: str,
+    history: list[dict[str, str]],
+) -> tuple[str, dict[str, Any]]:
+    sections = db.query(Section).filter(
+        Section.organization_id == org_id,
+    ).order_by(Section.display_order, Section.id).all()
+    section_paths = _build_section_paths(sections)
+
+    pages = db.query(Page).filter(
+        Page.organization_id == org_id,
+    ).order_by(Page.updated_at.desc(), Page.id.desc()).all()
+
+    catalog_lines: list[str] = []
+    used_chars = 0
+    for page in pages:
+        section_path = section_paths.get(page.section_id) or f"Section {page.section_id}"
+        status = "published" if page.is_published else (page.status or "draft")
+        line = (
+            f"- [{status}] page_id={page.id} | section={section_path} | "
+            f"title={page.title} | slug={page.slug}"
+        )
+        line_len = len(line) + 1
+        if used_chars + line_len > AGENT_MEMORY_CATALOG_CHAR_BUDGET:
+            break
+        catalog_lines.append(line)
+        used_chars += line_len
+
+    included_catalog_count = len(catalog_lines)
+    omitted_catalog_count = max(0, len(pages) - included_catalog_count)
+
+    history_tail = history[-6:] if history else []
+    query_fragments = [user_message[:1200]]
+    for msg in history_tail:
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        query_fragments.append(content[:500])
+    memory_query = "\n".join([frag for frag in query_fragments if frag]).strip()
+
+    relevant_pages: list[Page] = []
+    relevant_page_ids: set[int] = set()
+    if memory_query:
+        try:
+            from app.services.search import search_pages_bm25
+            ranked = search_pages_bm25(org_id, memory_query, db, limit=AGENT_MEMORY_EXCERPT_PAGE_LIMIT)
+            for row in ranked:
+                pid = row.get("id")
+                if not isinstance(pid, int):
+                    continue
+                page = db.get(Page, pid)
+                if not page or page.id in relevant_page_ids:
+                    continue
+                relevant_pages.append(page)
+                relevant_page_ids.add(page.id)
+        except Exception as exc:
+            logger.warning("workspace memory BM25 fallback: %s", exc)
+
+    if not relevant_pages:
+        for page in pages:
+            if page.id in relevant_page_ids:
+                continue
+            relevant_pages.append(page)
+            relevant_page_ids.add(page.id)
+            if len(relevant_pages) >= AGENT_MEMORY_EXCERPT_PAGE_LIMIT:
+                break
+
+    excerpt_blocks: list[str] = []
+    for idx, page in enumerate(relevant_pages[:AGENT_MEMORY_EXCERPT_PAGE_LIMIT], start=1):
+        section_path = section_paths.get(page.section_id) or f"Section {page.section_id}"
+        text = _html_to_text(page.published_html or page.html_content or "")
+        excerpt = text[:AGENT_MEMORY_EXCERPT_CHAR_LIMIT]
+        excerpt_blocks.append(
+            f"[{idx}] page_id={page.id} | title={page.title} | section={section_path}\n"
+            f"{excerpt if excerpt else '(no content available)'}"
+        )
+
+    memory_lines = [
+        (
+            f"Catalog coverage: {included_catalog_count}/{len(pages)} pages listed"
+            + (f" ({omitted_catalog_count} omitted due to prompt budget)." if omitted_catalog_count else ".")
+        ),
+        "Page catalog:",
+        *(catalog_lines if catalog_lines else ["- (no pages found)"]),
+        "",
+        f"Relevant content excerpts (top {len(excerpt_blocks)} by query match):",
+        *(excerpt_blocks if excerpt_blocks else ["(no relevant pages found)"]),
+    ]
+    memory_text = "\n".join(memory_lines)
+    stats = {
+        "total_pages": len(pages),
+        "catalog_pages_included": included_catalog_count,
+        "catalog_pages_omitted": omitted_catalog_count,
+        "excerpt_pages_included": len(excerpt_blocks),
+        "memory_chars": len(memory_text),
+    }
+    return memory_text, stats
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions (provider-agnostic — converted per provider)
 # ---------------------------------------------------------------------------
@@ -200,8 +448,53 @@ TOOL_DEFS = [
         "parameters": {"type": "object", "properties": {}},
     },
     {
+        "name": "recommend_draft_location",
+        "description": "Recommend the best section for new documentation based on title/topic/content. Use this before creating drafts when the correct hierarchy location is unclear.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Proposed page title."},
+                "topic": {"type": "string", "description": "What the new documentation is about."},
+                "content_preview": {"type": "string", "description": "Optional content excerpt or outline."},
+                "max_candidates": {"type": ["integer", "string"], "description": "Max section candidates to return (default 5, max 10)."},
+            },
+        },
+    },
+    {
+        "name": "collect_source_context",
+        "description": "Collect source context for technical writing from internal docs, Jira, Confluence, and video-linked pages. Use this before drafting when the user provides tickets or broad objectives.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Proposed document title."},
+                "objective": {"type": "string", "description": "What this draft should cover."},
+                "ticket_key": {"type": "string", "description": "Optional Jira ticket key (e.g. PROJ-123)."},
+                "max_context_pages": {"type": ["integer", "string"], "description": "Max internal pages to retrieve (default 5, max 10)."},
+                "confluence_query": {"type": "string", "description": "Optional specific query to use for Confluence search."},
+                "max_confluence_pages": {"type": ["integer", "string"], "description": "Max Confluence pages to retrieve (default 3, max 10)."},
+            },
+        },
+    },
+    {
+        "name": "compose_draft_from_sources",
+        "description": "Generate and create a draft from source context. It selects section placement, gathers internal docs/Jira/Confluence/video references, drafts markdown, and creates a Google Doc-backed draft page.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Draft title."},
+                "objective": {"type": "string", "description": "Detailed writing objective and scope."},
+                "ticket_key": {"type": "string", "description": "Optional Jira ticket key for product context."},
+                "section_id": {"type": ["integer", "string"], "description": "Optional explicit destination section ID."},
+                "max_context_pages": {"type": ["integer", "string"], "description": "Max internal pages to retrieve (default 5, max 10)."},
+                "confluence_query": {"type": "string", "description": "Optional specific query to use for Confluence search."},
+                "max_confluence_pages": {"type": ["integer", "string"], "description": "Max Confluence pages to retrieve (default 3, max 10)."},
+            },
+            "required": ["title", "objective"],
+        },
+    },
+    {
         "name": "create_from_template",
-        "description": "Create a new documentation page from a template. The template structure is filled with content based on the user's description and existing knowledge base context.",
+        "description": "Create a new documentation page from a template. The template structure is filled with content based on the user's description and existing knowledge base context. If section_id is omitted, the agent attempts hierarchy-aware auto-placement.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -221,7 +514,7 @@ TOOL_DEFS = [
     # --- Create / Write ---
     {
         "name": "create_draft",
-        "description": "Create a new documentation draft page. This creates a Google Doc and registers it as a draft page. The content should be well-structured markdown with headings (#, ##, ###).",
+        "description": "Create a new documentation draft page. This creates a Google Doc and registers it as a draft page. The content should be well-structured markdown with headings (#, ##, ###). If section_id is omitted, hierarchy-aware auto-placement is attempted.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -333,6 +626,7 @@ TOOL_DEFS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query for Confluence."},
+                "max_results": {"type": ["integer", "string"], "description": "Maximum number of results to return (default 5, max 10)."},
             },
             "required": ["query"],
         },
@@ -551,6 +845,605 @@ async def _tool_list_templates(
     return {"templates": list_template_summaries()}
 
 
+_PLACEMENT_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "in", "into", "is",
+    "it", "of", "on", "or", "that", "the", "this", "to", "using", "with", "your", "our",
+}
+
+
+def _placement_tokens(text: str) -> set[str]:
+    lowered = (text or "").lower()
+    raw: list[str] = []
+    current = []
+    for ch in lowered:
+        if ch.isalnum():
+            current.append(ch)
+            continue
+        if current:
+            raw.append("".join(current))
+            current = []
+    if current:
+        raw.append("".join(current))
+    return {
+        token for token in raw
+        if len(token) >= 2 and token not in _PLACEMENT_STOPWORDS
+    }
+
+
+def _build_section_paths(sections: list[Section]) -> dict[int, str]:
+    by_id = {s.id: s for s in sections}
+    paths: dict[int, str] = {}
+    for section in sections:
+        parts: list[str] = []
+        current: Section | None = section
+        seen: set[int] = set()
+        while current and current.id not in seen:
+            seen.add(current.id)
+            parts.insert(0, current.name)
+            current = by_id.get(current.parent_id) if current.parent_id else None
+        paths[section.id] = " > ".join([p for p in parts if p])
+    return paths
+
+
+def _placement_confidence(top_score: float, second_score: float) -> float:
+    margin = max(0.0, top_score - second_score)
+    confidence = top_score + (margin * 0.5)
+    return round(min(0.99, max(0.2, confidence)), 3)
+
+
+_VIDEO_LINK_RE = re.compile(
+    r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|vimeo\.com|loom\.com|vids\.google\.com)/[^\s\"'<>]+",
+    re.IGNORECASE,
+)
+
+
+def _extract_video_links_from_html(html: str | None) -> list[str]:
+    if not html:
+        return []
+    return list(dict.fromkeys(_VIDEO_LINK_RE.findall(html)))
+
+
+def _sanitize_atlassian_domain(domain: str | None) -> str:
+    cleaned = (domain or "").strip()
+    cleaned = re.sub(r"^https?://", "", cleaned, flags=re.IGNORECASE).rstrip("/")
+    return cleaned.split("/", 1)[0].strip().lower()
+
+
+def _escape_confluence_cql(query: str) -> str:
+    # Keep query safe for CQL text search.
+    return query.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _normalize_confluence_results(
+    payload: dict[str, Any],
+    *,
+    domain: str,
+    max_results: int,
+) -> list[dict[str, Any]]:
+    results = payload.get("results")
+    if not isinstance(results, list):
+        return []
+
+    root_links = payload.get("_links") if isinstance(payload.get("_links"), dict) else {}
+    base_url = str(root_links.get("base") or f"https://{domain}").rstrip("/")
+
+    normalized: list[dict[str, Any]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+
+        content = item.get("content")
+        content_obj = content if isinstance(content, dict) else item
+        if not isinstance(content_obj, dict):
+            continue
+
+        links = content_obj.get("_links")
+        links_obj = links if isinstance(links, dict) else {}
+        webui = links_obj.get("webui") or links_obj.get("tinyui")
+        if isinstance(webui, str) and webui:
+            if webui.startswith("http"):
+                url = webui
+            elif webui.startswith("/wiki/"):
+                url = f"https://{domain}{webui}"
+            elif "/wiki" not in base_url and webui.startswith(("/spaces/", "/display/", "/pages/")):
+                url = f"https://{domain}/wiki{webui}"
+            else:
+                url = f"{base_url}{webui}"
+        else:
+            content_id = content_obj.get("id")
+            url = f"https://{domain}/wiki/pages/viewpage.action?pageId={content_id}" if content_id else ""
+
+        excerpt_html = item.get("excerpt")
+        excerpt_text = _html_to_text(excerpt_html if isinstance(excerpt_html, str) else "")
+        if not excerpt_text:
+            body = content_obj.get("body")
+            body_obj = body if isinstance(body, dict) else {}
+            view_obj = body_obj.get("view") if isinstance(body_obj.get("view"), dict) else {}
+            view_html = view_obj.get("value") if isinstance(view_obj.get("value"), str) else ""
+            excerpt_text = _html_to_text(view_html)
+
+        space = content_obj.get("space")
+        space_obj = space if isinstance(space, dict) else {}
+        version = content_obj.get("version")
+        version_obj = version if isinstance(version, dict) else {}
+
+        normalized.append({
+            "id": content_obj.get("id"),
+            "title": content_obj.get("title"),
+            "url": url,
+            "space": space_obj.get("name"),
+            "updated_at": version_obj.get("when"),
+            "snippet": excerpt_text[:700],
+        })
+        if len(normalized) >= max_results:
+            break
+
+    return normalized
+
+
+def _rank_section_candidates(
+    *,
+    org_id: int,
+    db: Session,
+    query_text: str,
+    max_candidates: int = 5,
+) -> list[dict[str, Any]]:
+    sections = db.query(Section).filter(
+        Section.organization_id == org_id,
+    ).order_by(Section.display_order, Section.id).all()
+    if not sections:
+        return []
+
+    parent_ids = {s.parent_id for s in sections if s.parent_id is not None}
+    leaf_sections = [s for s in sections if s.id not in parent_ids]
+    candidates = leaf_sections or sections
+    candidate_ids = [s.id for s in candidates]
+    paths = _build_section_paths(sections)
+
+    pages_by_section: dict[int, list[str]] = {sid: [] for sid in candidate_ids}
+    if candidate_ids:
+        page_rows = db.query(Page.section_id, Page.title).filter(
+            Page.organization_id == org_id,
+            Page.section_id.in_(candidate_ids),
+        ).all()
+        for section_id, title in page_rows:
+            if section_id is not None and title:
+                pages_by_section.setdefault(section_id, []).append(title)
+
+    query_tokens = _placement_tokens(query_text)
+    ranked: list[dict[str, Any]] = []
+    for section in candidates:
+        full_path = paths.get(section.id, section.name)
+        section_tokens = _placement_tokens(full_path)
+        page_tokens: set[str] = set()
+        for page_title in pages_by_section.get(section.id, [])[:40]:
+            page_tokens |= _placement_tokens(page_title)
+
+        section_overlap = len(query_tokens & section_tokens) / max(1, len(query_tokens))
+        page_overlap = len(query_tokens & page_tokens) / max(1, len(query_tokens))
+        section_page_count = len(pages_by_section.get(section.id, []))
+        page_density = min(section_page_count / 20.0, 1.0)
+
+        if query_tokens:
+            score = (0.65 * section_overlap) + (0.25 * page_overlap) + (0.10 * page_density)
+        else:
+            score = 0.05 + (0.10 * page_density)
+
+        matched_terms = sorted(query_tokens & (section_tokens | page_tokens))
+        ranked.append({
+            "id": section.id,
+            "name": section.name,
+            "full_path": full_path,
+            "section_type": getattr(section, "section_type", "section"),
+            "score": round(score, 4),
+            "matched_terms": matched_terms[:10],
+            "page_count": section_page_count,
+        })
+
+    ranked.sort(
+        key=lambda item: (
+            item.get("score", 0.0),
+            len(item.get("matched_terms", [])),
+            item.get("page_count", 0),
+        ),
+        reverse=True,
+    )
+    return ranked[: max(1, min(max_candidates, 10))]
+
+
+def _resolve_section_for_draft(
+    *,
+    input_data: dict,
+    org_id: int,
+    db: Session,
+) -> tuple[Section | None, dict[str, Any]]:
+    section_id = input_data.get("section_id")
+    if section_id not in (None, ""):
+        try:
+            section_id_int = int(section_id)
+        except (ValueError, TypeError):
+            return None, {"error": f"Invalid section_id '{section_id}'. Must be a numeric ID."}
+
+        section = db.query(Section).filter(
+            Section.id == section_id_int,
+            Section.organization_id == org_id,
+        ).first()
+        if not section:
+            return None, {"error": f"Section {section_id} not found. Use list_sections to see available sections."}
+
+        return section, {
+            "strategy": "explicit",
+            "confidence": 1.0,
+            "selected": {
+                "id": section.id,
+                "name": section.name,
+                "full_path": section.name,
+            },
+        }
+
+    title = (input_data.get("title") or "").strip()
+    topic = (input_data.get("topic") or "").strip()
+    description = (input_data.get("description") or "").strip()
+    content_preview = (input_data.get("content") or "").strip()[:2500]
+    query_text = "\n".join([part for part in [title, topic, description, content_preview] if part]).strip()
+    ranked = _rank_section_candidates(org_id=org_id, db=db, query_text=query_text, max_candidates=5)
+    if not ranked:
+        return None, {"error": "No sections exist. Create a section first using create_section."}
+
+    top = ranked[0]
+    second = ranked[1] if len(ranked) > 1 else None
+    second_score = float(second.get("score", 0.0)) if second else 0.0
+    confidence = _placement_confidence(float(top.get("score", 0.0)), second_score)
+    ambiguous = second is not None and abs(float(top.get("score", 0.0)) - second_score) < 0.04 and float(top.get("score", 0.0)) < 0.30
+
+    if float(top.get("score", 0.0)) < 0.12 or ambiguous:
+        return None, {
+            "error": "Could not confidently choose a section. Provide section_id or call recommend_draft_location first.",
+            "candidates": ranked,
+            "confidence": confidence,
+        }
+
+    selected = db.query(Section).filter(
+        Section.id == int(top["id"]),
+        Section.organization_id == org_id,
+    ).first()
+    if not selected:
+        return None, {"error": f"Section {top['id']} not found."}
+
+    return selected, {
+        "strategy": "auto_ranked",
+        "confidence": confidence,
+        "selected": top,
+        "candidates": ranked,
+        "query_excerpt": query_text[:240],
+    }
+
+
+async def _tool_recommend_draft_location(
+    input_data: dict, user: User, org_id: int, db: Session,
+) -> dict:
+    title = (input_data.get("title") or "").strip()
+    topic = (input_data.get("topic") or "").strip()
+    content_preview = (input_data.get("content_preview") or "").strip()
+    query_text = "\n".join([part for part in [title, topic, content_preview[:2500]] if part]).strip()
+    if not query_text:
+        return {"error": "Provide at least one of: title, topic, or content_preview."}
+
+    try:
+        max_candidates = int(input_data.get("max_candidates") or 5)
+    except (ValueError, TypeError):
+        max_candidates = 5
+    max_candidates = max(1, min(max_candidates, 10))
+
+    ranked = _rank_section_candidates(
+        org_id=org_id,
+        db=db,
+        query_text=query_text,
+        max_candidates=max_candidates,
+    )
+    if not ranked:
+        return {"error": "No sections exist. Create a section first using create_section."}
+
+    top = ranked[0]
+    second = ranked[1] if len(ranked) > 1 else None
+    second_score = float(second.get("score", 0.0)) if second else 0.0
+    confidence = _placement_confidence(float(top.get("score", 0.0)), second_score)
+    is_ambiguous = second is not None and abs(float(top.get("score", 0.0)) - second_score) < 0.04 and float(top.get("score", 0.0)) < 0.30
+
+    recommended_section_id = int(top["id"]) if float(top.get("score", 0.0)) >= 0.12 and not is_ambiguous else None
+    return {
+        "recommended_section_id": recommended_section_id,
+        "recommended_section_name": top.get("name") if recommended_section_id else None,
+        "confidence": confidence,
+        "is_ambiguous": is_ambiguous or recommended_section_id is None,
+        "candidates": ranked,
+        "hint": "Use create_draft or create_from_template with section_id once placement is confirmed.",
+    }
+
+
+async def _collect_source_context_packet(
+    *,
+    input_data: dict,
+    user: User,
+    org_id: int,
+    db: Session,
+) -> dict[str, Any]:
+    title = (input_data.get("title") or "").strip()
+    objective = (input_data.get("objective") or input_data.get("description") or "").strip()
+    ticket_key = (input_data.get("ticket_key") or "").strip()
+
+    try:
+        max_context_pages = int(input_data.get("max_context_pages") or 5)
+    except (ValueError, TypeError):
+        max_context_pages = 5
+    max_context_pages = max(1, min(max_context_pages, 10))
+
+    query_text = "\n".join([part for part in [title, objective] if part]).strip()
+    confluence_query = (input_data.get("confluence_query") or query_text).strip()
+
+    try:
+        max_confluence_pages = int(input_data.get("max_confluence_pages") or 3)
+    except (ValueError, TypeError):
+        max_confluence_pages = 3
+    max_confluence_pages = max(1, min(max_confluence_pages, 10))
+
+    internal_pages: list[dict[str, Any]] = []
+    if query_text:
+        try:
+            from app.services.search import search_pages_bm25
+            ranked = search_pages_bm25(org_id, query_text, db, limit=max_context_pages)
+            for row in ranked:
+                page = db.get(Page, row.get("id"))
+                if not page:
+                    continue
+                excerpt = _html_to_text(page.published_html or page.html_content or "")[:900]
+                internal_pages.append({
+                    "id": page.id,
+                    "title": page.title,
+                    "slug": page.slug,
+                    "section_id": page.section_id,
+                    "score": row.get("score"),
+                    "excerpt": excerpt,
+                })
+        except Exception as exc:
+            logger.warning("collect_source_context BM25 fallback: %s", exc)
+
+    if not internal_pages:
+        fallback_pages = db.query(Page).filter(
+            Page.organization_id == org_id,
+            Page.is_published == True,  # noqa: E712
+        ).order_by(Page.updated_at.desc()).limit(max_context_pages).all()
+        for page in fallback_pages:
+            internal_pages.append({
+                "id": page.id,
+                "title": page.title,
+                "slug": page.slug,
+                "section_id": page.section_id,
+                "score": None,
+                "excerpt": _html_to_text(page.published_html or page.html_content or "")[:900],
+            })
+
+    video_refs: list[dict[str, Any]] = []
+    video_candidates = db.query(Page).filter(
+        Page.organization_id == org_id,
+    ).order_by(Page.updated_at.desc()).limit(40).all()
+    query_tokens = _placement_tokens(query_text)
+    for page in video_candidates:
+        links = _extract_video_links_from_html(page.published_html or page.html_content)
+        if not links:
+            continue
+        relevance = 0
+        if query_tokens:
+            page_tokens = _placement_tokens(
+                f"{page.title} {page.slug} {_html_to_text(page.published_html or page.html_content or '')[:400]}"
+            )
+            relevance = len(query_tokens & page_tokens)
+        if query_tokens and relevance == 0:
+            continue
+        video_refs.append({
+            "page_id": page.id,
+            "title": page.title,
+            "video_links": links[:3],
+        })
+        if len(video_refs) >= 3:
+            break
+
+    jira_context: dict[str, Any] | None = None
+    if ticket_key:
+        jira_context = await _tool_fetch_jira_ticket(
+            {"ticket_key": ticket_key},
+            user,
+            org_id,
+            db,
+        )
+
+    confluence_context: dict[str, Any]
+    if confluence_query:
+        confluence_context = await _tool_search_confluence(
+            {"query": confluence_query, "max_results": max_confluence_pages},
+            user,
+            org_id,
+            db,
+        )
+    else:
+        confluence_context = {
+            "status": "skipped",
+            "reason": "No objective/title context to generate query.",
+        }
+
+    return {
+        "query": query_text,
+        "internal_pages": internal_pages,
+        "video_references": video_refs,
+        "jira_ticket": jira_context,
+        "confluence": confluence_context,
+    }
+
+
+async def _tool_collect_source_context(
+    input_data: dict, user: User, org_id: int, db: Session,
+) -> dict:
+    objective = (input_data.get("objective") or input_data.get("description") or "").strip()
+    title = (input_data.get("title") or "").strip()
+    if not title and not objective:
+        return {"error": "Provide at least one of title or objective."}
+
+    context_packet = await _collect_source_context_packet(
+        input_data=input_data,
+        user=user,
+        org_id=org_id,
+        db=db,
+    )
+    confluence_results = (
+        context_packet.get("confluence", {}).get("results")
+        if isinstance(context_packet.get("confluence"), dict)
+        else None
+    )
+    return {
+        "ok": True,
+        "context": context_packet,
+        "counts": {
+            "internal_pages": len(context_packet.get("internal_pages", [])),
+            "video_references": len(context_packet.get("video_references", [])),
+            "has_jira": bool(context_packet.get("jira_ticket")),
+            "confluence_pages": len(confluence_results) if isinstance(confluence_results, list) else 0,
+        },
+    }
+
+
+async def _tool_compose_draft_from_sources(
+    input_data: dict, user: User, org_id: int, db: Session,
+) -> dict:
+    title = (input_data.get("title") or "").strip()
+    objective = (input_data.get("objective") or "").strip()
+    if not title or not objective:
+        return {"error": "title and objective are required"}
+
+    section, placement = _resolve_section_for_draft(
+        input_data={
+            "title": title,
+            "description": objective,
+            "section_id": input_data.get("section_id"),
+        },
+        org_id=org_id,
+        db=db,
+    )
+    if not section:
+        return placement
+
+    context_packet = await _collect_source_context_packet(
+        input_data=input_data,
+        user=user,
+        org_id=org_id,
+        db=db,
+    )
+
+    context_pages = context_packet.get("internal_pages", [])
+    context_snippets = []
+    for idx, page in enumerate(context_pages[:6], start=1):
+        context_snippets.append(
+            f"[{idx}] {page.get('title')} (slug: {page.get('slug')})\n{(page.get('excerpt') or '')[:800]}"
+        )
+    source_context = "\n\n".join(context_snippets)
+
+    jira_ticket = context_packet.get("jira_ticket")
+    jira_context = ""
+    if isinstance(jira_ticket, dict) and jira_ticket:
+        if jira_ticket.get("error"):
+            jira_context = f"Jira context unavailable: {jira_ticket.get('error')}"
+        else:
+            jira_context = (
+                f"Ticket: {jira_ticket.get('key')} - {jira_ticket.get('summary')}\n"
+                f"Status: {jira_ticket.get('status')}\n"
+                f"Type: {jira_ticket.get('issue_type')}\n"
+                f"Description: {(jira_ticket.get('description_text') or '')[:1600]}"
+            )
+
+    video_context = ""
+    video_refs = context_packet.get("video_references", [])
+    if video_refs:
+        lines = [
+            f"- {ref.get('title')}: {(ref.get('video_links') or [''])[0]}".rstrip(": ")
+            for ref in video_refs[:3]
+        ]
+        video_context = "Related video references:\n" + "\n".join(lines)
+
+    confluence_payload = context_packet.get("confluence")
+    confluence_context = ""
+    confluence_results: list[dict[str, Any]] = []
+    if isinstance(confluence_payload, dict):
+        if confluence_payload.get("error"):
+            confluence_context = f"Confluence context unavailable: {confluence_payload.get('error')}"
+        else:
+            raw_results = confluence_payload.get("results")
+            if isinstance(raw_results, list):
+                confluence_results = [r for r in raw_results if isinstance(r, dict)]
+    if confluence_results:
+        lines = []
+        for idx, row in enumerate(confluence_results[:5], start=1):
+            lines.append(
+                f"[{idx}] {row.get('title') or '(untitled)'}"
+                f"\nSpace: {row.get('space') or '(unknown)'}"
+                f"\nURL: {row.get('url') or '(no link)'}"
+                f"\nSnippet: {(row.get('snippet') or '')[:700]}"
+            )
+        confluence_context = "\n\n".join(lines)
+
+    org = db.get(Organization, org_id)
+    org_name = org.name if org else "the organization"
+
+    llm_config = _resolve_llm_config(org_id, db)
+    if not llm_config.api_key:
+        return {"error": "AI provider is not configured for this workspace"}
+
+    draft_prompt = (
+        f"You are a technical documentation writer for {org_name}.\n"
+        f"Write a complete markdown draft for the following objective.\n"
+        f"Title: {title}\n"
+        f"Objective: {objective}\n\n"
+        f"Target section path: {placement.get('selected', {}).get('full_path', section.name)}\n\n"
+        f"Use this structure:\n"
+        f"- H1 title\n"
+        f"- Short overview\n"
+        f"- Prerequisites (if applicable)\n"
+        f"- Step-by-step details\n"
+        f"- Validation / expected outcomes\n"
+        f"- Troubleshooting or notes\n\n"
+        f"Use existing workspace style from source pages below when relevant.\n"
+        f"Avoid hallucinating product details not present in provided context.\n\n"
+        f"Workspace source context:\n{source_context or '(none)'}\n\n"
+        f"Jira context:\n{jira_context or '(none)'}\n\n"
+        f"Confluence context:\n{confluence_context or '(none)'}\n\n"
+        f"{video_context}\n"
+    )
+
+    generated_markdown = await _llm_single_turn(draft_prompt, llm_config)
+    if not generated_markdown.strip():
+        return {"error": "Model returned empty draft content"}
+
+    draft_result = await _tool_create_draft(
+        {
+            "title": title,
+            "content": generated_markdown,
+            "section_id": section.id,
+        },
+        user,
+        org_id,
+        db,
+    )
+    if "error" in draft_result:
+        return draft_result
+
+    draft_result["planning_placement"] = placement
+    draft_result["context_summary"] = {
+        "internal_pages_used": len(context_pages),
+        "video_references_used": len(video_refs),
+        "jira_used": bool(jira_ticket),
+        "confluence_pages_used": len(confluence_results),
+    }
+    return draft_result
+
+
 async def _tool_create_from_template(
     input_data: dict, user: User, org_id: int, db: Session,
 ) -> dict:
@@ -561,31 +1454,17 @@ async def _tool_create_from_template(
     template_slug = (input_data.get("template_slug") or "").strip()
     title = (input_data.get("title") or "").strip()
     description = (input_data.get("description") or "").strip()
-    section_id = input_data.get("section_id")
 
     if not template_slug or not title:
         return {"error": "template_slug and title are required"}
 
-    # Resolve section — same logic as create_draft
-    if not section_id:
-        all_sections = db.query(Section).filter(
-            Section.organization_id == org_id,
-        ).order_by(Section.display_order).all()
-        if not all_sections:
-            return {"error": "No sections exist. Create a section first using create_section."}
-        parent_ids = {s.parent_id for s in all_sections if s.parent_id}
-        leaves = [s for s in all_sections if s.id not in parent_ids]
-        if len(leaves) == 1:
-            section_id = leaves[0].id
-        elif len(all_sections) == 1:
-            section_id = all_sections[0].id
-        else:
-            section_names = [f"  - id={s.id}: {s.name}" for s in leaves[:10]]
-            return {
-                "error": "section_id is required when multiple sections exist. "
-                "Call list_sections first to find the right section. "
-                "Available sections:\n" + "\n".join(section_names),
-            }
+    section, placement = _resolve_section_for_draft(
+        input_data=input_data,
+        org_id=org_id,
+        db=db,
+    )
+    if not section:
+        return placement
 
     template = get_template_by_slug(template_slug)
     if not template:
@@ -628,10 +1507,13 @@ async def _tool_create_from_template(
     generated_content = await _llm_single_turn(fill_prompt, llm_config)
 
     # Create the draft using existing tool
-    return await _tool_create_draft(
-        {"title": title, "content": generated_content, "section_id": section_id},
+    draft_result = await _tool_create_draft(
+        {"title": title, "content": generated_content, "section_id": section.id},
         user, org_id, db,
     )
+    if "error" not in draft_result:
+        draft_result["placement"] = placement
+    return draft_result
 
 
 async def _llm_single_turn(prompt: str, llm_config: LLMConfig | None = None) -> str:
@@ -758,45 +1640,17 @@ async def _tool_create_draft(
 ) -> dict:
     title = (input_data.get("title") or "").strip()
     content = (input_data.get("content") or "").strip()
-    section_id = input_data.get("section_id")
-
     if not title or not content:
         return {"error": "title and content are required"}
 
-    # Resolve section
-    if not section_id:
-        # Only auto-pick if there's exactly one leaf section
-        all_sections = db.query(Section).filter(
-            Section.organization_id == org_id,
-        ).order_by(Section.display_order).all()
-        if not all_sections:
-            return {"error": "No sections exist. Create a section first using create_section."}
-        # Find leaf sections (no children)
-        parent_ids = {s.parent_id for s in all_sections if s.parent_id}
-        leaves = [s for s in all_sections if s.id not in parent_ids]
-        if len(leaves) == 1:
-            section_id = leaves[0].id
-        elif len(all_sections) == 1:
-            section_id = all_sections[0].id
-        else:
-            section_names = [f"  - id={s.id}: {s.name}" for s in leaves[:10]]
-            return {
-                "error": "section_id is required when multiple sections exist. "
-                "Call list_sections first to find the right section. "
-                "Available sections:\n" + "\n".join(section_names),
-            }
-
-    try:
-        section_id_int = int(section_id)
-    except (ValueError, TypeError):
-        return {"error": f"Invalid section_id '{section_id}'. Must be a numeric ID. Use list_sections to find section IDs."}
-
-    section = db.query(Section).filter(
-        Section.id == section_id_int,
-        Section.organization_id == org_id,
-    ).first()
+    section, placement = _resolve_section_for_draft(
+        input_data=input_data,
+        org_id=org_id,
+        db=db,
+    )
     if not section:
-        return {"error": f"Section {section_id} not found. Use list_sections to see available sections."}
+        return placement
+    section_id_int = section.id
 
     try:
         from app.api.drive import get_drive_credentials, _create_drive_doc
@@ -873,6 +1727,7 @@ async def _tool_create_draft(
         "google_doc_id": doc_id,
         "section_id": section.id,
         "section_name": section.name,
+        "placement": placement,
     }
 
 
@@ -890,7 +1745,96 @@ async def _tool_fetch_jira_ticket(
 async def _tool_search_confluence(
     input_data: dict, user: User, org_id: int, db: Session,
 ) -> dict:
-    return {"error": "Confluence integration is not configured yet. This feature is coming soon."}
+    query = (input_data.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    try:
+        max_results = int(input_data.get("max_results") or 5)
+    except (TypeError, ValueError):
+        max_results = 5
+    max_results = max(1, min(max_results, 10))
+
+    cred = db.query(JiraCredential).filter(
+        JiraCredential.user_id == user.id,
+        JiraCredential.organization_id == org_id,
+    ).first()
+    if not cred:
+        return {"error": "Confluence not connected. Connect Jira/Atlassian credentials first."}
+
+    domain = _sanitize_atlassian_domain(cred.jira_domain)
+    if not domain:
+        return {"error": "Invalid Atlassian domain in saved Jira credentials."}
+
+    try:
+        from app.services.encryption import get_encryption_service
+        token = get_encryption_service().decrypt(cred.encrypted_api_token)
+    except Exception as exc:
+        logger.warning("Confluence token decrypt failed for org %s: %s", org_id, exc)
+        return {"error": "Could not decrypt Atlassian token for Confluence search."}
+
+    cql = f'type=page AND text~"{_escape_confluence_cql(query)}"'
+    endpoints = [
+        (
+            f"https://{domain}/wiki/rest/api/search",
+            {
+                "cql": cql,
+                "limit": max_results,
+                "expand": "content.space,content.version,content.body.view",
+            },
+        ),
+        (
+            f"https://{domain}/rest/api/content/search",
+            {
+                "cql": cql,
+                "limit": max_results,
+                "expand": "space,version,body.view",
+            },
+        ),
+    ]
+
+    import httpx
+
+    last_error = "Confluence search failed."
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        for url, params in endpoints:
+            try:
+                resp = await client.get(
+                    url,
+                    auth=(cred.jira_email, token),
+                    params=params,
+                )
+            except Exception as exc:
+                last_error = f"Confluence network error: {exc}"
+                continue
+
+            if resp.status_code in (401, 403):
+                return {"error": "Confluence authentication failed. Reconnect Jira/Atlassian credentials."}
+            if resp.status_code == 404:
+                # Try alternate endpoint below.
+                continue
+            if resp.status_code >= 400:
+                last_error = f"Confluence API error (HTTP {resp.status_code})"
+                continue
+
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = {}
+
+            results = _normalize_confluence_results(
+                payload,
+                domain=domain,
+                max_results=max_results,
+            )
+            return {
+                "query": query,
+                "count": len(results),
+                "results": results,
+                "source": "confluence",
+                "domain": domain,
+            }
+
+    return {"error": last_error}
 
 
 async def _tool_web_search(
@@ -1215,6 +2159,9 @@ TOOL_HANDLERS = {
     "search_docs": _tool_search_docs,
     "search_knowledge_base": _tool_search_knowledge_base,
     "list_templates": _tool_list_templates,
+    "recommend_draft_location": _tool_recommend_draft_location,
+    "collect_source_context": _tool_collect_source_context,
+    "compose_draft_from_sources": _tool_compose_draft_from_sources,
     "create_from_template": _tool_create_from_template,
     "list_members": _tool_list_members,
     "create_draft": _tool_create_draft,
@@ -1237,6 +2184,9 @@ TOOL_FRIENDLY_NAMES = {
     "search_docs": "Searching documentation",
     "search_knowledge_base": "Searching knowledge base",
     "list_templates": "Listing templates",
+    "recommend_draft_location": "Recommending location",
+    "collect_source_context": "Collecting context",
+    "compose_draft_from_sources": "Composing draft",
     "create_from_template": "Creating from template",
     "list_members": "Listing team members",
     "create_draft": "Creating draft",
@@ -1284,6 +2234,8 @@ def _build_system_prompt(org_id: int, db: Session) -> str:
         f"({published_count} published, {draft_count} drafts).\n\n"
         f"Your capabilities:\n"
         f"- EXPLORE: Browse sections and pages, read page content, search across all docs, search knowledge base for semantic matches, list team members\n"
+        f"- PLAN: Recommend the best hierarchy location for new docs based on title/topic/content\n"
+        f"- CONTEXT: Collect source context from internal docs, Jira tickets, and video-linked pages\n"
         f"- CREATE: Write new draft pages (backed by Google Docs), create new sections, generate from templates\n"
         f"- MANAGE: Move pages between sections, rename pages, reorder pages, duplicate pages as templates\n"
         f"- PUBLISH: Publish drafts to the public docs site, unpublish pages, sync content from Google Drive\n"
@@ -1291,11 +2243,14 @@ def _build_system_prompt(org_id: int, db: Session) -> str:
         f"- INTEGRATE: Fetch Jira tickets for context when writing docs\n"
         f"- WEB SEARCH: Search the internet for up-to-date information, release notes, external references, and anything not in the internal docs\n\n"
         f"CRITICAL RULES:\n"
-        f"- BEFORE creating any page or draft, you MUST call list_sections first to see all available sections and their IDs.\n"
-        f"- ALWAYS pass the correct numeric section_id when calling create_draft or create_from_template. NEVER omit it.\n"
+        f"- BEFORE creating any page or draft, you MUST inspect hierarchy using list_sections or recommend_draft_location.\n"
+        f"- When section placement is unclear, call recommend_draft_location first and use the recommended section_id.\n"
+        f"- If the user explicitly names a destination section, honor that exact section_id.\n"
         f"- Section IDs are numbers (e.g. 5, 12), NOT names or slugs. Get them from list_sections.\n"
         f"- Place pages in the most specific/relevant leaf section. If the user says 'in Getting Started', find the section named 'Getting Started' and use its ID.\n"
-        f"- If the user specifies where to place content, use that exact section. If unclear, ask which section they want.\n"
+        f"- If placement confidence is low or ambiguous, present the top section candidates and ask the user to choose.\n"
+        f"- For technical writing requests with Jira tickets or broad objectives, call collect_source_context before drafting.\n"
+        f"- Use compose_draft_from_sources when the user asks for a complete draft using available source context.\n"
         f"- After creating a draft, tell the user the title AND which section it was placed in.\n\n"
         f"Guidelines:\n"
         f"- ALWAYS use your tools to answer questions. Never say you don't have access — you DO have tools to read pages, search content, list sections, etc.\n"
@@ -1320,19 +2275,54 @@ def _build_system_prompt(org_id: int, db: Session) -> str:
 # ---------------------------------------------------------------------------
 
 async def _execute_tool(
-    tool_name: str, tool_input: dict, user: User, org_id: int, db: Session,
+    tool_name: str,
+    tool_input: dict,
+    user: User,
+    org_id: int,
+    db: Session,
+    *,
+    trace_id: str | None = None,
+    provider: str | None = None,
+    iteration: int | None = None,
 ) -> tuple[dict, bool]:
     """Execute a tool and return (result_dict, success)."""
+    started_at = perf_counter()
     handler = TOOL_HANDLERS.get(tool_name)
+    raised_exc: Exception | None = None
+
     if handler:
         try:
             result = await handler(tool_input, user, org_id, db)
         except Exception as exc:
+            raised_exc = exc
             result = {"error": str(exc)}
     else:
         result = {"error": f"Unknown tool: {tool_name}"}
 
+    if not isinstance(result, dict):
+        result = {"error": "Tool returned non-dict response"}
+
     success = "error" not in result
+    duration_ms = round((perf_counter() - started_at) * 1000, 2)
+    error_class = _classify_tool_error(result)
+
+    _log_agent_event(
+        "tool_execution",
+        trace_id=trace_id,
+        provider=provider,
+        iteration=iteration,
+        org_id=org_id,
+        user_id=user.id,
+        tool_name=tool_name,
+        success=success,
+        duration_ms=duration_ms,
+        error_class=error_class if not success else None,
+        error_message=(str(result.get("error"))[:300] if not success else None),
+        input=_summarize_tool_input(tool_input),
+    )
+    if raised_exc is not None:
+        logger.warning("Tool '%s' raised exception (trace_id=%s): %s", tool_name, trace_id, raised_exc)
+
     return result, success
 
 
@@ -1347,6 +2337,7 @@ async def _run_gemini_loop(
     org_id: int,
     db: Session,
     *,
+    trace_id: str | None = None,
     llm_config: LLMConfig | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Run agent loop using Google Gemini."""
@@ -1363,14 +2354,14 @@ async def _run_gemini_loop(
 
     # Build Gemini message history
     contents = []
-    for h in history[-20:]:
+    for h in history[-AGENT_HISTORY_WINDOW:]:
         role = "model" if h["role"] == "assistant" else "user"
         contents.append(types.Content(role=role, parts=[types.Part.from_text(text=h["content"])]))
     contents.append(types.Content(role="user", parts=[types.Part.from_text(text=message)]))
 
     max_iterations = 10
 
-    for _ in range(max_iterations):
+    for iteration_index in range(max_iterations):
         # Call Gemini (non-streaming for tool use reliability, stream text chunks)
         response = client.models.generate_content(
             model=cfg.model or "gemini-2.0-flash",
@@ -1419,18 +2410,7 @@ async def _run_gemini_loop(
         function_responses = []
         for fc in function_calls:
             tool_name = fc.name
-            tool_input = dict(fc.args) if fc.args else {}
-
-            # Coerce string IDs to integers (Gemini sometimes sends "16" instead of 16)
-            for key in ("section_id", "page_id", "parent_id", "display_order", "limit", "member_id", "max_results"):
-                val = tool_input.get(key)
-                if val is None:
-                    tool_input.pop(key, None)
-                elif isinstance(val, str):
-                    try:
-                        tool_input[key] = int(val)
-                    except (ValueError, TypeError):
-                        tool_input.pop(key, None)
+            tool_input, dropped_fields = _coerce_tool_input(dict(fc.args) if fc.args else {})
 
             yield {
                 "type": "tool_start",
@@ -1438,7 +2418,25 @@ async def _run_gemini_loop(
                 "tool_input": tool_input,
             }
 
-            result, success = await _execute_tool(tool_name, tool_input, user, org_id, db)
+            result, success = await _execute_tool(
+                tool_name,
+                tool_input,
+                user,
+                org_id,
+                db,
+                trace_id=trace_id,
+                provider="gemini",
+                iteration=iteration_index + 1,
+            )
+
+            if dropped_fields:
+                _log_agent_event(
+                    "tool_input_coercion",
+                    trace_id=trace_id,
+                    provider="gemini",
+                    tool_name=tool_name,
+                    dropped_fields=dropped_fields,
+                )
 
             yield {
                 "type": "tool_result",
@@ -1503,6 +2501,7 @@ async def _run_openai_compat_loop(
     org_id: int,
     db: Session,
     *,
+    trace_id: str | None = None,
     base_url: str,
     model: str,
     api_key: str = "",
@@ -1521,14 +2520,14 @@ async def _run_openai_compat_loop(
 
     # Build OpenAI-format messages
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
-    for h in history[-20:]:
+    for h in history[-AGENT_HISTORY_WINDOW:]:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": message})
 
     max_iterations = 10
 
     async with httpx.AsyncClient(timeout=120.0) as client:
-        for _ in range(max_iterations):
+        for iteration_index in range(max_iterations):
             try:
                 resp = await client.post(
                     f"{base_url}/v1/chat/completions",
@@ -1578,21 +2577,10 @@ async def _run_openai_compat_loop(
                 func = tc.get("function", {})
                 tool_name = func.get("name", "")
                 try:
-                    tool_input = json.loads(func.get("arguments", "{}"))
+                    raw_tool_input = json.loads(func.get("arguments", "{}"))
                 except json.JSONDecodeError:
-                    tool_input = {}
-
-                # Coerce string IDs to integers (some models send "16" instead of 16)
-                # and strip null values for optional params
-                for key in ("section_id", "page_id", "parent_id", "display_order", "limit", "member_id", "max_results"):
-                    val = tool_input.get(key)
-                    if val is None:
-                        tool_input.pop(key, None)
-                    elif isinstance(val, str):
-                        try:
-                            tool_input[key] = int(val)
-                        except (ValueError, TypeError):
-                            tool_input.pop(key, None)
+                    raw_tool_input = {}
+                tool_input, dropped_fields = _coerce_tool_input(raw_tool_input)
                 # Also fix the arguments in the tool call so Groq doesn't reject them on the next turn
                 tc["function"]["arguments"] = json.dumps(tool_input)
 
@@ -1602,7 +2590,25 @@ async def _run_openai_compat_loop(
                     "tool_input": tool_input,
                 }
 
-                result, success = await _execute_tool(tool_name, tool_input, user, org_id, db)
+                result, success = await _execute_tool(
+                    tool_name,
+                    tool_input,
+                    user,
+                    org_id,
+                    db,
+                    trace_id=trace_id,
+                    provider=provider_name.lower(),
+                    iteration=iteration_index + 1,
+                )
+
+                if dropped_fields:
+                    _log_agent_event(
+                        "tool_input_coercion",
+                        trace_id=trace_id,
+                        provider=provider_name.lower(),
+                        tool_name=tool_name,
+                        dropped_fields=dropped_fields,
+                    )
 
                 yield {
                     "type": "tool_result",
@@ -1640,12 +2646,14 @@ async def _run_groq_loop(
     org_id: int,
     db: Session,
     *,
+    trace_id: str | None = None,
     llm_config: LLMConfig | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Run agent loop using Groq (free tier, OpenAI-compatible)."""
     cfg = llm_config or _resolve_llm_config(org_id, db)
     async for event in _run_openai_compat_loop(
         message, history, user, org_id, db,
+        trace_id=trace_id,
         base_url="https://api.groq.com/openai",
         model=cfg.model or "meta-llama/llama-4-scout-17b-16e-instruct",
         api_key=cfg.api_key,
@@ -1665,6 +2673,7 @@ async def _run_anthropic_loop(
     org_id: int,
     db: Session,
     *,
+    trace_id: str | None = None,
     llm_config: LLMConfig | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Run agent loop using Anthropic Claude."""
@@ -1679,13 +2688,13 @@ async def _run_anthropic_loop(
     tools = _tools_for_anthropic()
 
     messages = []
-    for h in history[-20:]:
+    for h in history[-AGENT_HISTORY_WINDOW:]:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": message})
 
     max_iterations = 10
 
-    for _ in range(max_iterations):
+    for iteration_index in range(max_iterations):
         collected_text = ""
 
         async with client.messages.stream(
@@ -1715,18 +2724,7 @@ async def _run_anthropic_loop(
                 continue
 
             tool_name = block.name
-            tool_input = dict(block.input) if block.input else {}
-
-            # Coerce string IDs to integers
-            for key in ("section_id", "page_id", "parent_id", "display_order", "limit", "member_id", "max_results"):
-                val = tool_input.get(key)
-                if val is None:
-                    tool_input.pop(key, None)
-                elif isinstance(val, str):
-                    try:
-                        tool_input[key] = int(val)
-                    except (ValueError, TypeError):
-                        tool_input.pop(key, None)
+            tool_input, dropped_fields = _coerce_tool_input(dict(block.input) if block.input else {})
 
             yield {
                 "type": "tool_start",
@@ -1734,7 +2732,25 @@ async def _run_anthropic_loop(
                 "tool_input": tool_input,
             }
 
-            result, success = await _execute_tool(tool_name, tool_input, user, org_id, db)
+            result, success = await _execute_tool(
+                tool_name,
+                tool_input,
+                user,
+                org_id,
+                db,
+                trace_id=trace_id,
+                provider="anthropic",
+                iteration=iteration_index + 1,
+            )
+
+            if dropped_fields:
+                _log_agent_event(
+                    "tool_input_coercion",
+                    trace_id=trace_id,
+                    provider="anthropic",
+                    tool_name=tool_name,
+                    dropped_fields=dropped_fields,
+                )
 
             yield {
                 "type": "tool_result",
@@ -1798,14 +2814,34 @@ async def agent_chat(
     if provider not in valid_providers:
         raise HTTPException(status_code=503, detail=f"Unknown agent provider: {provider}. Valid: {', '.join(valid_providers)}")
 
+    trace_id = uuid4().hex
+    turn_started_at = perf_counter()
+    hydrated_history = _hydrate_history(
+        db=db,
+        user=user,
+        conversation_id=body.conversation_id,
+        request_history=body.history or [],
+    )
+    _log_agent_event(
+        "turn_started",
+        trace_id=trace_id,
+        provider=provider,
+        org_id=org_id,
+        user_id=user.id,
+        conversation_id=body.conversation_id,
+        prompt_len=len(body.message or ""),
+        history_len=len(hydrated_history),
+    )
+
     # Rate limit check
     _check_rate_limit(org_id)
 
     # Select the right agent loop, passing resolved config
     if provider == "openai_compat":
-        async def run_loop(msg, hist, usr, oid, d):
+        async def run_loop(msg, hist, usr, oid, d, trace):
             async for ev in _run_openai_compat_loop(
                 msg, hist, usr, oid, d,
+                trace_id=trace,
                 base_url=llm_cfg.base_url or settings.openai_compat_base_url,
                 model=llm_cfg.model or settings.openai_compat_model,
                 api_key=llm_cfg.api_key,
@@ -1819,22 +2855,39 @@ async def agent_chat(
             "anthropic": _run_anthropic_loop,
         }[provider]
 
-        async def run_loop(msg, hist, usr, oid, d):
-            async for ev in _loop_fn(msg, hist, usr, oid, d, llm_config=llm_cfg):
+        async def run_loop(msg, hist, usr, oid, d, trace):
+            async for ev in _loop_fn(msg, hist, usr, oid, d, trace_id=trace, llm_config=llm_cfg):
                 yield ev
 
     async def event_generator():
         assistant_text = ""
         all_events: list[dict] = []
+        tool_starts = 0
+        tool_failures = 0
+        text_delta_chars = 0
+        event_count = 0
+        had_runtime_error = False
+        runtime_error_message: str | None = None
+        final_conversation_id = body.conversation_id
         try:
             async for event in run_loop(
-                body.message, body.history, user, org_id, db,
+                body.message, hydrated_history, user, org_id, db, trace_id,
             ):
                 all_events.append(event)
-                if event.get("type") == "text_delta":
-                    assistant_text += event.get("text", "")
+                event_count += 1
+                event_type = event.get("type")
+                if event_type == "text_delta":
+                    delta_text = event.get("text", "")
+                    assistant_text += delta_text
+                    text_delta_chars += len(delta_text)
+                elif event_type == "tool_start":
+                    tool_starts += 1
+                elif event_type == "tool_result" and not event.get("success", False):
+                    tool_failures += 1
                 yield {"event": "message", "data": json.dumps(event)}
         except Exception as exc:
+            had_runtime_error = True
+            runtime_error_message = str(exc)
             logger.error("Agent chat error: %s", exc, exc_info=True)
             yield {
                 "event": "message",
@@ -1847,13 +2900,13 @@ async def agent_chat(
             conv_id = body.conversation_id
 
             # Build updated history for LLM context
-            updated_history = list(body.history) + [
+            updated_history = list(hydrated_history) + [
                 {"role": "user", "content": body.message},
             ]
             if assistant_text:
                 updated_history.append({"role": "assistant", "content": assistant_text})
-            # Keep last 40 for LLM context
-            updated_history = updated_history[-40:]
+            # Keep bounded but deeper memory for future turns.
+            updated_history = updated_history[-AGENT_HISTORY_PERSIST_LIMIT:]
 
             # Build UI items from events
             ui_items: list[dict] = [{"role": "user", "content": body.message}]
@@ -1914,11 +2967,28 @@ async def agent_chat(
                 db.refresh(conv)
                 conv_id = conv.id
 
+            final_conversation_id = conv_id
             yield {
                 "event": "message",
                 "data": json.dumps({"type": "conversation_saved", "conversation_id": conv_id}),
             }
         except Exception as exc:
             logger.warning("Failed to save conversation: %s", exc)
+
+        _log_agent_event(
+            "turn_finished",
+            trace_id=trace_id,
+            provider=provider,
+            org_id=org_id,
+            user_id=user.id,
+            conversation_id=final_conversation_id,
+            duration_ms=round((perf_counter() - turn_started_at) * 1000, 2),
+            had_runtime_error=had_runtime_error,
+            runtime_error=(runtime_error_message[:300] if runtime_error_message else None),
+            event_count=event_count,
+            tool_calls=tool_starts,
+            tool_failures=tool_failures,
+            response_chars=text_delta_chars,
+        )
 
     return EventSourceResponse(event_generator())

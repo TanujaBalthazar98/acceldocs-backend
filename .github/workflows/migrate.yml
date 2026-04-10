@@ -48,7 +48,8 @@ jobs:
             --org-id "${{ github.event.inputs.org_id }}" \
             --product-id "${{ github.event.inputs.product_id }}" \
             --playwright \
-            --one-version \
+            --all-versions \
+            --max-versions 1 \
             --create-drive-docs
       
       - name: Upload state file
