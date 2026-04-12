@@ -147,78 +147,50 @@ async def _get_drive_credentials_compat(user: User, db: Session, org_id: int, *,
 
 
 async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str | None, str | None]:
-    """Return (html_content, modified_at) for a Google Doc.
-    
-    Uses Google Docs native format which includes embedded images,
-    then extracts them from the zip and embeds as base64 data URLs.
-    """
+    """Return (html_content, modified_at) for a Google Doc using Google Docs API directly."""
     import logging
     import re
+    import base64
     logger = logging.getLogger(__name__)
     
-    # Try Google Docs native format first (preserves embedded images)
     try:
         from googleapiclient.http import MediaIoBaseDownload
         from io import BytesIO
         import zipfile
-        import base64
         
         docs_service = build("docs", "v1", credentials=creds)
         doc = docs_service.documents().get(documentId=google_doc_id).execute()
         title = doc.get("title", "")
         modifiedTime = doc.get("lastEditTime", "")
         
-        drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        request = drive_service.files().export_media(
-            fileId=google_doc_id,
-            mimeType="application/vnd.google-apps.document"
-        )
+        response = docs_service.documents().export_media(documentId=google_doc_id, mimeType="application/vnd.google-apps.document").execute()
         
-        fh = BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        
-        zip_data = fh.getvalue()
-        
-        with zipfile.ZipFile(BytesIO(zip_data)) as z:
+        with zipfile.ZipFile(BytesIO(response)) as z:
             html = z.read("index.html").decode("utf-8")
-            logger.info(f"Native export: {len(z.namelist())} files in zip, images: {[n for n in z.namelist() if n.startswith('images/')]}")
+            images_in_zip = [n for n in z.namelist() if n.startswith("images/")]
+            logger.info(f"Zip has {len(images_in_zip)} images: {images_in_zip}")
             
-            # Extract and embed images as base64 data URLs
-            for name in z.namelist():
-                if name.startswith("images/"):
-                    img_data = z.read(name)
-                    ext = name.split(".")[-1] if "." in name else "png"
-                    b64 = base64.b64encode(img_data).decode()
-                    src = f"data:image/{ext};base64,{b64}"
-                    img_name = name.replace("images/", "")
-                    html = html.replace(f'images/{img_name}', src)
-                    html = html.replace(f'"images/{img_name}"', f'"{src}"')
-                    logger.info(f"Extracted image: {name}, size: {len(img_data)}")
+            # Embed images as base64 data URLs
+            for name in images_in_zip:
+                img_data = z.read(name)
+                ext = name.rsplit(".", 1)[-1] if "." in name else "png"
+                b64 = base64.b64encode(img_data).decode()
+                src = f"data:image/{ext};base64,{b64}"
+                img_name = name.replace("images/", "")
+                html = html.replace(f'images/{img_name}', src)
+                html = html.replace(f'"images/{img_name}"', f'"{src}"')
         
-        logger.info(f"Export complete for {title}")
+        logger.info(f"Export complete for {title} with {len(images_in_zip)} images")
         return html, modifiedTime, title
         
     except Exception as e:
-        logger.warning(f"Native format failed: {e}, trying fallback")
+        logger.warning(f"Docs API export failed: {e}, trying Drive export")
     
-    # Fallback: standard HTML export may have googleusercontent.com URLs
     try:
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        meta = service.files().get(
-            fileId=google_doc_id,
-            fields="name,modifiedTime",
-            supportsAllDrives=True,
-        ).execute()
+        meta = service.files().get(fileId=google_doc_id, fields="name,modifiedTime", supportsAllDrives=True).execute()
         raw = service.files().export(fileId=google_doc_id, mimeType="text/html").execute()
         html = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-        
-        gdocs_images = re.findall(r'src="(https://lh3\.googleusercontent\.com/[^"]+)"', html)
-        if gdocs_images:
-            logger.info(f"Fallback export: {len(gdocs_images)} googleusercontent images found")
-        
         return html, meta.get("modifiedTime"), meta.get("name")
     except Exception as e:
         logger.error(f"All exports failed: {e}")
