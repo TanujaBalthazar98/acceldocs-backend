@@ -475,9 +475,12 @@ def clean_google_docs_html(content_html: str) -> str:
         if not span.attrs:
             span.unwrap()
 
-    # Clean up empty paragraphs (Google inserts <p><span></span></p> as spacers)
+    # Clean up empty paragraphs (Google inserts <p><span></span></p> as spacers).
+    # Keep paragraphs that contain media nodes (e.g. <img>) even if text is empty.
+    media_tags = {"img", "picture", "svg", "video", "iframe", "object", "embed", "canvas", "audio"}
     for p in soup.find_all("p"):
-        if not p.get_text(strip=True):
+        has_media = p.find(media_tags) is not None
+        if not has_media and not p.get_text(strip=True):
             p.decompose()
 
     result = str(soup)

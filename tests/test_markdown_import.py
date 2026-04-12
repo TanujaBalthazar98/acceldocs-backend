@@ -1,6 +1,6 @@
 import markdown
 
-from app.lib.markdown_import import normalize_imported_markdown, normalize_synced_html
+from app.lib.markdown_import import clean_google_docs_html, normalize_imported_markdown, normalize_synced_html
 
 
 def test_normalize_imported_markdown_strips_leaked_frontmatter_block():
@@ -134,3 +134,17 @@ def test_normalize_imported_markdown_converts_json_callout_block():
 
     html = markdown.markdown(normalized, extensions=["admonition"])
     assert "admonition" in html
+
+
+def test_clean_google_docs_html_keeps_image_only_paragraphs():
+    raw_html = """
+    <html><body>
+      <p><img src="data:image/png;base64,abc123" alt="diagram" /></p>
+      <p>Text below image.</p>
+    </body></html>
+    """
+
+    cleaned = clean_google_docs_html(raw_html)
+    assert "<img" in cleaned
+    assert "data:image/png;base64,abc123" in cleaned
+    assert "Text below image." in cleaned
