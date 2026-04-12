@@ -147,11 +147,16 @@ async def _get_drive_credentials_compat(user: User, db: Session, org_id: int, *,
 
 
 async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str | None, str | None]:
-    """Return (html_content, modified_at) for a Google Doc."""
+    """Return (html_content, modified_at) for a Google Doc.
+    
+    Uses Google Docs native format which includes embedded images,
+    then extracts them from the zip and embeds as base64 data URLs.
+    """
     import logging
+    import re
     logger = logging.getLogger(__name__)
     
-    # Try Google Docs native format first
+    # Try Google Docs native format first (preserves embedded images)
     try:
         from googleapiclient.http import MediaIoBaseDownload
         from io import BytesIO
@@ -179,9 +184,9 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
         
         with zipfile.ZipFile(BytesIO(zip_data)) as z:
             html = z.read("index.html").decode("utf-8")
-            logger.info(f"Google Doc export: {len(z.namelist())} files")
+            logger.info(f"Native export: {len(z.namelist())} files in zip")
             
-            # Extract and embed images as base64
+            # Extract and embed images as base64 data URLs
             for name in z.namelist():
                 if name.startswith("images/"):
                     img_data = z.read(name)
@@ -191,14 +196,15 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
                     img_name = name.replace("images/", "")
                     html = html.replace(f'images/{img_name}', src)
                     html = html.replace(f'"images/{img_name}"', f'"{src}"')
-                    logger.info(f"Embedded image from zip: {name}")
+                    logger.info(f"Extracted image: {name}")
         
+        logger.info(f"Export complete for {title}")
         return html, modifiedTime, title
         
     except Exception as e:
-        logger.error(f"Native export failed: {e}")
+        logger.warning(f"Native format failed: {e}, trying fallback")
     
-    # Fallback: standard HTML export (may include googleusercontent images)
+    # Fallback: standard HTML export may have googleusercontent.com URLs
     try:
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
         meta = service.files().get(
@@ -209,13 +215,13 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
         raw = service.files().export(fileId=google_doc_id, mimeType="text/html").execute()
         html = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
         
-        import re
         gdocs_images = re.findall(r'src="(https://lh3\.googleusercontent\.com/[^"]+)"', html)
-        logger.info(f"Fallback export: found {len(gdocs_images)} googleusercontent images")
+        if gdocs_images:
+            logger.info(f"Fallback export: {len(gdocs_images)} googleusercontent images found")
         
         return html, meta.get("modifiedTime"), meta.get("name")
     except Exception as e:
-        logger.error(f"Export also failed: {e}")
+        logger.error(f"All exports failed: {e}")
         return "", None, None
 
 
