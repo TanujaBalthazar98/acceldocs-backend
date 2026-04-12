@@ -2246,6 +2246,7 @@ def legacy_documentation_redirect(
     db = _get_db()
     try:
         all_orgs = db.query(Organization).all()
+        page_slug_lower = page_slug.lower()
         for org in all_orgs:
             page = (
                 db.query(Page)
@@ -2261,6 +2262,23 @@ def legacy_documentation_redirect(
                     url=f"/docs/{org.slug}/p/{page.id}/{page.slug}",
                     status_code=301,
                 )
+            pages = (
+                db.query(Page)
+                .filter(
+                    Page.organization_id == org.id,
+                    Page.is_published == True,
+                )
+                .all()
+            )
+            for page in pages:
+                if page.slug and (
+                    page_slug_lower in page.slug.lower()
+                    or page.slug.lower() in page_slug_lower
+                ):
+                    return RedirectResponse(
+                        url=f"/docs/{org.slug}/p/{page.id}/{page.slug}",
+                        status_code=301,
+                    )
         return RedirectResponse(url="/docs", status_code=302)
     finally:
         db.close()
