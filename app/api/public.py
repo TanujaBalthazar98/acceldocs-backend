@@ -2237,6 +2237,35 @@ def external_docs_page(
     )
 
 
+@router.get("/documentation/{page_slug}", response_class=RedirectResponse)
+def legacy_documentation_redirect(
+    page_slug: str,
+    request: Request,
+) -> RedirectResponse:
+    """Legacy /documentation/{slug} route - redirect to proper docs location."""
+    db = _get_db()
+    try:
+        all_orgs = db.query(Organization).all()
+        for org in all_orgs:
+            page = (
+                db.query(Page)
+                .filter(
+                    Page.organization_id == org.id,
+                    Page.slug == page_slug,
+                    Page.is_published == True,
+                )
+                .first()
+            )
+            if page:
+                return RedirectResponse(
+                    url=f"/docs/{org.slug}/p/{page.id}/{page.slug}",
+                    status_code=301,
+                )
+        return RedirectResponse(url="/docs", status_code=302)
+    finally:
+        db.close()
+
+
 @router.get("/internal-docs/{org_slug}/{page_slug}", response_class=HTMLResponse)
 def internal_docs_page(
     org_slug: str,
