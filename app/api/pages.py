@@ -150,6 +150,7 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
     """Return (html_content, modified_at) for a Google Doc using Google Docs API."""
     from googleapiclient.http import MediaIoBaseDownload
     from io import BytesIO
+    import re
 
     # Use Google Docs API - more reliable for embedded content
     try:
@@ -174,8 +175,21 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
         zip_data = fh.getvalue()
         
         import zipfile
+        import base64
         with zipfile.ZipFile(BytesIO(zip_data)) as z:
             html = z.read("index.html").decode("utf-8")
+            
+            # Fix image references - native format uses images/folder/image.ext
+            # Replace with the image data URLs from the zip
+            for name in z.namelist():
+                if name.startswith("images/"):
+                    img_data = z.read(name)
+                    ext = name.split(".")[-1] if "." in name else "png"
+                    b64 = base64.b64encode(img_data).decode()
+                    src = f"data:image/{ext};base64,{b64}"
+                    img_name = name.replace("images/", "")
+                    html = html.replace(f'images/{img_name}', src)
+                    html = html.replace(f'"images/{img_name}"', f'"{src}"')
         
         return html, modifiedTime, title
         
