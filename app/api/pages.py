@@ -1075,11 +1075,19 @@ async def sync_page(
     db: Session = Depends(get_db),
 ) -> dict:
     """Pull latest content from Google Drive for this page."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     org_id = _require_editor(user, db, x_org_id)
     page = db.query(Page).filter(Page.id == page_id, Page.organization_id == org_id).first()
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
-
+    
+    logger.info(f"Sync page {page_id}: google_doc_id={page.google_doc_id}")
+    
+    if not page.google_doc_id:
+        return {"ok": False, "error": "No Google Doc linked to this page"}
+    
     creds = await _get_drive_credentials_compat(user, db, org_id, require_write=False)
     html, modified_at, drive_title = await _export_html(page.google_doc_id, creds)
 
@@ -1087,7 +1095,14 @@ async def sync_page(
 
     db.commit()
     db.refresh(page)
-    logger.info("Synced page %d '%s'", page.id, page.title)
+    
+    # Check what's in the content
+    has_img_tags = "<img" in (page.html_content or "")
+    has_data_img = "data:image" in (page.html_content or "")
+    
+    logger.info(f"After sync: page has img tags={has_img_tags}, has data:image={has_data_img}")
+    logger.info(f"Content length: {len(page.html_content or '')}")
+    
     return {"ok": True, "page": _page_dict(page, include_html=True)}
 
 
