@@ -925,6 +925,7 @@ def _rewrite_page_links(
     Handles:
     - Google Docs links (docs.google.com/document/d/{id}/...)
     - Legacy docs slug links (/docs/{org}/{slug})
+    - /documentation/{slug} links (legacy format from DeveloperHub)
     - Canonical links in any docs root are normalized to current docs_root
     """
     org_slug = org.slug or str(org.id)
@@ -961,6 +962,7 @@ def _rewrite_page_links(
         href = (match.group(2) or "").strip()
         if not href:
             return match.group(0)
+
         lowered = href.lower()
         if lowered.startswith(("#", "mailto:", "tel:", "javascript:")):
             return match.group(0)
@@ -969,8 +971,27 @@ def _rewrite_page_links(
         target_page: Page | None = None
         fragment = parsed.fragment
 
+        # Handle /documentation/{slug} links (legacy DeveloperHub format)
+        # Also handle drive.google.com/documentation/{slug} - redirect from Google Docs
+        if "/documentation/" in lowered or "drive.google.com/documentation" in lowered:
+            # Extract slug - handle both /documentation/slug and drive.google.com/documentation/slug
+            if "drive.google.com" in lowered:
+                doc_path_match = re.search(r'drive\.google\.com/documentation/([^/?#]+)', href)
+            else:
+                doc_path_match = re.search(r'/documentation/([^/?#]+)', href)
+            
+            if doc_path_match:
+                legacy_slug = doc_path_match.group(1).lower()
+                target_page = by_slug.get(legacy_slug)
+                if not target_page:
+                    for slug, page in by_slug.items():
+                        if page and (legacy_slug in slug or slug in legacy_slug):
+                            target_page = page
+                            break
+
+        # Handle Google Docs links - redirect to our page
         gdoc_match = _GOOGLE_DOC_URL_RE.search(href)
-        if gdoc_match:
+        if gdoc_match and not target_page:
             target_page = by_doc_id.get(gdoc_match.group(1))
         else:
             path = parsed.path or ""

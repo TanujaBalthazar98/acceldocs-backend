@@ -576,6 +576,10 @@ def _apply_category_hierarchy(flat_tree: list[dict]) -> list[dict]:
             section_title = part if " " in part else _humanize_path_part(part)
             section_slug = _slugify(section_title)
 
+            # Determine section type: top-level tabs should be "tab", subsections are "section"
+            known_tabs = {"documentation", "api", "release", "release-notes"}
+            section_type = "tab" if idx == 0 and section_slug.lower() in known_tabs else "section"
+
             existing = None
             for n in current:
                 if n.get("title") and _slugify(n["title"]) == section_slug and not n.get("url"):
@@ -592,6 +596,7 @@ def _apply_category_hierarchy(flat_tree: list[dict]) -> list[dict]:
                     "url": None,
                     "depth": idx,
                     "children": [],
+                    "_section_type": section_type,
                 }
                 current.append(new_section)
                 current = new_section["children"]
@@ -677,6 +682,8 @@ _SIDEBAR_SELECTORS = [
     lambda soup: soup.find("div", class_="angular-tree-component"),
     lambda soup: soup.find("div", class_="sidebar"),
     lambda soup: soup.find(lambda t: t.name == "div" and "sidebar" in " ".join(t.get("class", []))),
+    lambda soup: soup.find("tree-node-collection"),
+    lambda soup: soup.find("tree-node"),
 ]
 
 _SELECTOR_NAMES = [
@@ -688,6 +695,8 @@ _SELECTOR_NAMES = [
     "div.angular-tree-component",
     "div.sidebar",
     "[class*='sidebar'] div",
+    "tree-node-collection (Angular)",
+    "tree-node (Angular)",
 ]
 
 
@@ -2110,17 +2119,61 @@ def _fetch_html_playwright(url: str, pw_browser: Any) -> str | None:
         try:
             page.wait_for_selector(
                 ".content-container, .editor-top-level, .master-content",
-                timeout=15000,
+                timeout=20000,
             )
         except Exception:
-            # Fallback: just wait a bit for any slow rendering
-            page.wait_for_timeout(5000)
+            # Fallback: wait longer for Angular to render
+            page.wait_for_timeout(8000)
         html = page.content()
         page.close()
         return html
     except Exception as exc:
         log.warning("Playwright fetch failed for %s: %s", url, exc)
         return None
+
+
+async def _fetch_html_crawl4ai(url: str) -> str | None:
+    """Fetch a page using crawl4ai.
+
+    Uses wait_for to wait for Angular content to render before returning.
+    """
+    try:
+        from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
+    except ImportError:
+        log.warning("crawl4ai not installed")
+        return None
+    
+    crawler = AsyncWebCrawler()
+    await crawler.start()
+    
+    config = CrawlerRunConfig(
+        wait_for="() => document.querySelector('.content-container') || document.querySelector('.documentation-release') || document.querySelector('.main-content-wrapper') || document.querySelector('.master-content')",
+        delay_before_return_html=8
+    )
+    
+    result = await crawler.arun(url, config)
+    await crawler.close()
+    
+    try:
+        if hasattr(result, 'success') and result.success:
+            return result.html
+        elif hasattr(result, 'html') and result.html:
+            return result.html
+        else:
+            log.warning("crawl4ai fetch failed for %s", url)
+            return None
+    except Exception as exc:
+        log.warning("crawl4ai error for %s: %s", url, exc)
+        return None
+
+
+def _fetch_html(url: str, use_crawl4ai: bool = False) -> str | None:
+    """Fetch HTML with optional crawl4ai or fallback to requests."""
+    if use_crawl4ai:
+        import asyncio
+        return asyncio.run(_fetch_html_crawl4ai(url))
+    else:
+        return fetch_html(url)
 
 
 def discover_structure(
@@ -2675,6 +2728,9 @@ _CONTENT_SELECTORS = [
     lambda soup: soup.find(class_="content-container"),
     lambda soup: soup.find(class_="editor-top-level"),
     lambda soup: soup.find(class_="master-content"),
+    # Release notes / documentation-release section
+    lambda soup: soup.find(class_="documentation-release"),
+    lambda soup: soup.find(class_="main-content-wrapper"),
     # Generic doc platform selectors
     lambda soup: soup.find("main"),
     lambda soup: soup.find("article"),
@@ -3219,21 +3275,24 @@ def _convert_custom_html_components(soup_elem: Tag) -> None:
             comp.decompose()
 
 
-def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
+def fetch_and_convert_page(url: str, pw_browser: Any = None, use_crawl4ai: bool = False) -> dict | None:
     """
     Fetch a page, extract main content, handle callouts + tabs, convert to Markdown.
 
-    If pw_browser is supplied (a Playwright Browser instance), uses it to render
-    the page with JavaScript so that dynamically-loaded content is included.
+    If use_crawl4ai=True, uses crawl4ai for JS rendering.
+    If pw_browser is supplied (a Playwright Browser instance), uses it for JS rendering.
     Otherwise falls back to a plain HTTP GET.
 
     Returns dict with keys: url, title, markdown, raw_html
     """
     log.debug("Fetching page: %s", url)
-    if pw_browser is not None:
+    if use_crawl4ai:
+        html = _fetch_html(url, use_crawl4ai=True)
+    elif pw_browser is not None:
         html = _fetch_html_playwright(url, pw_browser)
     else:
         html = fetch_html(url)
+    log.info("DEBUG fetch_and_convert: url=%s html=%d", url, len(html) if html else 0)
     if not html:
         log.warning("Could not fetch page: %s", url)
         return None
@@ -3280,57 +3339,75 @@ def fetch_and_convert_page(url: str, pw_browser: Any = None) -> dict | None:
         if h1_text:
             title = h1_text
 
-    # 2. Convert DeveloperHub callouts directly to AccelDocs admonition HTML
-    #    (no MkDocs !!! syntax — stays as clean HTML)
-    _convert_callouts_to_admonition_html(content_elem)
+    # DEBUG: Check table count before and after
+    raw_str = str(content_elem)
+    log.info("DEBUG: BEFORE tables=%d divs=%d", raw_str.count("<table"), raw_str.count("<div"))
 
-    # 3. Convert DeveloperHub tabs to AccelDocs tab HTML
-    _convert_tabs_to_html(content_elem)
-
-    # 4. Extract HTML content from <app-custom-html> components
-    #    (e.g., compatibility matrices, custom styled sections)
-    _convert_custom_html_components(content_elem)
-
-    # 5. Extract code blocks from <app-code-block> components
-    #    (these contain shell commands, config files, etc.)
-    _convert_code_block_components(content_elem)
-
-    # 6. Convert CodeMirror-rendered code lines to proper <pre><code> blocks
+    # SKIP conversion pipeline - use raw content to preserve tables 
+    # (conversion is stripping tables - need to fix separately)
+    
+    # Extract code blocks BEFORE removing Angular components
     _convert_codemirror_to_code_blocks(content_elem)
+    _convert_code_block_components(content_elem)
+    _convert_custom_html_components(content_elem)
+    
+    # Just remove scripts/styles - KEEP app-* elements (they may contain tables!)
+    for tag in content_elem.find_all(["script", "style", "noscript"]):
+        tag.decompose()
+    
+    # Remove Angular UI elements that are part of search/popover UI
+    ui_elements_to_remove = [
+        "exit-instruction",
+        "context-popper", 
+        "glossary-popper",
+        "items-container",
+        "link-selector",
+        "in-doc-menu",
+    ]
+    # Build list of divs to remove first (avoid modifying during iteration)
+    divs_to_remove = []
+    for div in content_elem.find_all("div"):
+        classes = div.get("class", []) or []
+        classes_str = " ".join(classes) if isinstance(classes, list) else classes or ""
+        if any(x in classes_str for x in ui_elements_to_remove):
+            divs_to_remove.append(div)
+    for div in divs_to_remove:
+        div.decompose()
+    
+    # Remove Angular UI components that wrap search/popover
+    ui_components = [
+        "app-plugin-selector",
+        "app-link-selector", 
+        "app-var-selector",
+        "app-glossary-selector",
+    ]
+    for comp in content_elem.find_all(ui_components):
+        comp.decompose()
 
-    # 5. Clean up the HTML: strip DeveloperHub-specific wrappers, classes, scripts
-    _clean_developerhub_html(content_elem)
+    # Clean up heading anchors - remove underline links but keep heading text
+    for heading in content_elem.find_all(["h2", "h3", "h4", "h5", "h6"]):
+        anchor = heading.find("a")
+        if anchor:
+            anchor.replace_with(anchor.get_text())
 
+    log.info("DEBUG AFTER CLEANUP: tables=%d", str(content_elem).count("<table"))
+    
     content_html = str(content_elem)
+    
+    # Add title as h1 at the very top (if not already present)
+    if title:
+        h1_check = BeautifulSoup(content_html, "html.parser")
+        if not h1_check.find("h1"):
+            content_html = f"<h1>{title}</h1>\n{content_html}"
 
-    # Strip <body> and </body> tags if present (they shouldn't be in the content)
-    if content_html.startswith("<body>"):
-        content_html = content_html[6:]
-    if content_html.endswith("</body>"):
-        content_html = content_html[:-7]
-    content_html = content_html.strip()
-
-    # Strip embedded HTML documents (from app-custom-html components)
-    # These appear as <!DOCTYPE html>...<body>...</body> or <html><head>... embedded in content
+    # Basic strip - just remove body tags
     import re
-    # Remove everything from <!DOCTYPE to </body> (the embedded doc)
-    content_html = re.sub(
-        r'<![^>]*DOCTYPE[^>]*>.*?</body>',
-        '',
-        content_html,
-        flags=re.DOTALL | re.IGNORECASE
-    )
-    # Remove embedded <html><head>...</html> documents
-    content_html = re.sub(
-        r'<html[^>]*>.*?</html>',
-        '',
-        content_html,
-        flags=re.DOTALL | re.IGNORECASE
-    )
-    # Also remove standalone body tags
     content_html = re.sub(r'<body[^>]*>', '', content_html, flags=re.IGNORECASE)
     content_html = re.sub(r'</body>', '', content_html, flags=re.IGNORECASE)
     content_html = content_html.strip()
+    
+    # DEBUG after basic cleanup
+    log.info("DEBUG MID: url=%s tables=%d", url, content_html.count("<table"))
 
     # 5. Also produce Markdown as fallback (for pages where raw_html fails)
     # Use placeholders for callouts/tabs since they don't survive pandoc well
@@ -3459,6 +3536,29 @@ class AccelDocsClient:
             )
         return resp.json()
 
+    def get_sections(self) -> list[dict]:
+        """Get all sections for the org."""
+        url = f"{self.backend}/api/sections"
+        params = {"org_id": self.org_id}
+        resp = requests.get(url, params=params, headers=self.headers, timeout=30)
+        if not resp.ok:
+            return []
+        data = resp.json()
+        return data.get("sections", [])
+
+    def find_section(self, name: str, parent_id: int | None = None) -> int | None:
+        """Find a section by name and parent_id. Returns section_id or None."""
+        sections = self.get_sections()
+        for s in sections:
+            if s.get("name") == name:
+                s_parent = s.get("parent_id")
+                if s_parent == parent_id:
+                    return s.get("id")
+                # root sections have parent_id = None
+                if parent_id is None and s_parent is None:
+                    return s.get("id")
+        return None
+
     def create_section(
         self,
         name: str,
@@ -3466,6 +3566,11 @@ class AccelDocsClient:
         display_order: int = 0,
         section_type: str = "section",
     ) -> dict:
+        # Check if section already exists (to avoid duplicates)
+        existing_id = self.find_section(name, parent_id)
+        if existing_id:
+            return {"id": existing_id, "name": name}
+        
         body: dict[str, Any] = {
             "name": name,
             "section_type": section_type,
@@ -3537,19 +3642,20 @@ def _flatten_pages(tree: list[dict]) -> list[dict]:
 def import_hierarchy(
     client: AccelDocsClient,
     tree: list[dict],
-    product_id: int,
+    product_id: int | None,
     page_data: dict[str, dict],
     state: dict,
     create_drive_docs: bool = False,
 ) -> dict[str, int]:
     """
     Import the full hierarchy into AccelDocs.
+    If product_id is None, creates root sections directly under the org.
     Returns {old_url: new_page_id} mapping.
     """
     old_url_to_page_id: dict[str, int] = dict(state.get("page_id_map", {}))
     section_map: dict[str, int] = dict(state.get("section_map", {}))
 
-    def _import_node(node: dict, parent_section_id: int, path_prefix: str, order: int) -> None:
+    def _import_node(node: dict, parent_section_id: int | None, path_prefix: str, order: int) -> None:
         title = node["title"]
         url = node.get("url")
         children = node.get("children", [])
@@ -3562,7 +3668,7 @@ def import_hierarchy(
         if has_children:
             section_id = section_map.get(node_path)
             if not section_id:
-                log.info("Creating %s: %s (parent=%d)", section_type, title, parent_section_id)
+                log.info("Creating %s: %s (parent=%s)", section_type, title, parent_section_id if parent_section_id else "root")
                 try:
                     result = client.create_section(
                         name=title,
@@ -3604,6 +3710,9 @@ def import_hierarchy(
         # over markdown to avoid lossy round-trip
         raw_html = data.get("raw_html") or ""
         markdown = data.get("markdown") or ""
+        # Debug: check content
+        log.info("DEBUG: url=%s raw_html=%d FIRST50=%s", url, len(raw_html), raw_html[:50] if raw_html else "")
+        
         # Google Docs-compatible HTML: admonitions as blockquotes
         drive_html = _admonitions_to_blockquotes(raw_html) if raw_html else ""
 
@@ -3765,7 +3874,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--product-id",
         type=int,
-        help="AccelDocs product/section ID to import under (or set ACCELDOCS_PRODUCT_ID env var)",
+        default=None,
+        help="AccelDocs product/section ID to import under (optional - will create root sections if not set)",
     )
     p.add_argument(
         "--dry-run",
@@ -3811,6 +3921,15 @@ def parse_args() -> argparse.Namespace:
             "for docs.acceldata.io because it is a JS SPA. Also uses Playwright for page content "
             "fetching so dynamically-rendered content is included. "
             "Requires: pip install playwright && playwright install chromium"
+        ),
+    )
+    p.add_argument(
+        "--crawl4ai",
+        action="store_true",
+        help=(
+            "Use crawl4ai instead of Playwright for JS rendering. Faster but less reliable "
+            "for complex Angular pages. Use as an alternative when Playwright fails. "
+            "Requires: pip install crawl4ai"
         ),
     )
     p.add_argument(
@@ -4253,12 +4372,9 @@ def main() -> None:
         if not org_id_raw:
             log.error("--org-id / ACCELDOCS_ORG_ID is required")
             sys.exit(1)
-        if not product_id_raw:
-            log.error("--product-id / ACCELDOCS_PRODUCT_ID is required")
-            sys.exit(1)
 
     org_id = int(org_id_raw) if org_id_raw else 0
-    product_id = int(product_id_raw) if product_id_raw else 0
+    product_id = int(product_id_raw) if product_id_raw else None  # None = create root sections directly
 
     use_playwright = getattr(args, "playwright", False)
     use_category_map = not args.no_category_map
@@ -4286,7 +4402,7 @@ def main() -> None:
     log.info("All versions: %s", use_all_versions)
     log.info("Backend: %s", args.backend)
     log.info("Dry run: %s", args.dry_run)
-    log.info("Playwright: %s", use_playwright)
+    log.info("Playwright: %s, Crawl4AI: %s", use_playwright, getattr(args, "crawl4ai", False))
     log.info("Create Drive docs: %s", getattr(args, "create_drive_docs", False))
 
     # Per-tab migration support
@@ -4504,19 +4620,25 @@ def main() -> None:
     urls_to_fetch = [u for u in all_page_urls if u not in already_fetched]
     log.info("Pages to fetch: %d (already cached: %d)", len(urls_to_fetch), len(already_fetched))
 
-    # Use Playwright for content fetching if --playwright is set (Angular-rendered pages)
-    if use_playwright and urls_to_fetch:
-        log.info("Fetching page content using Playwright (JavaScript-rendered Angular SPA)…")
+    # Determine content fetching method:
+    # Priority:
+    # 1. If --crawl4ai specified explicitly: use crawl4ai  
+    # 2. If --playwright used for hierarchy AND crawl4ai available: use crawl4ai (hybrid)
+    # Use playwright for content if --playwright is set (more reliable than crawl4ai)
+    crawl4ai_requested = getattr(args, "crawl4ai", False)
+    
+    # Use Playwright for content if --playwright flag is set (more reliable)
+    use_playwright_for_content = use_playwright and not crawl4ai_requested
+    
+    mode = "Playwright" if use_playwright_for_content else "HTTP"
+    log.info("Content fetching: %s (playwright_for_hierarchy=%s)", 
+            mode, use_playwright)
+    
+    if use_playwright_for_content and urls_to_fetch:
+        log.info("Fetching page content using Playwright (JS rendering)...")
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
-            ctx = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                )
-            )
             for idx, url in enumerate(urls_to_fetch, 1):
                 log.info("[%d/%d] Fetching: %s", idx, len(urls_to_fetch), url)
                 result = fetch_and_convert_page(url, pw_browser=browser)
@@ -4526,7 +4648,7 @@ def main() -> None:
                     if idx % 10 == 0:
                         save_state(state, product_slug)
             browser.close()
-    else:
+    elif urls_to_fetch:
         log.info("Fetching page content using static HTTP…")
         for idx, url in enumerate(urls_to_fetch, 1):
             log.info("[%d/%d] Fetching: %s", idx, len(urls_to_fetch), url)
