@@ -151,6 +151,8 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
     from googleapiclient.http import MediaIoBaseDownload
     from io import BytesIO
     import re
+    import logging
+    logger = logging.getLogger(__name__)
 
     # Use Google Docs API - more reliable for embedded content
     try:
@@ -178,6 +180,7 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
         import base64
         with zipfile.ZipFile(BytesIO(zip_data)) as z:
             html = z.read("index.html").decode("utf-8")
+            logger.info(f"Google Doc export: {len(z.namelist())} files in zip")
             
             # Fix image references - native format uses images/folder/image.ext
             # Replace with the image data URLs from the zip
@@ -190,10 +193,12 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
                     img_name = name.replace("images/", "")
                     html = html.replace(f'images/{img_name}', src)
                     html = html.replace(f'"images/{img_name}"', f'"{src}"')
+                    logger.info(f"Embedded image: {name}")
         
         return html, modifiedTime, title
         
     except Exception as e:
+        logger.error(f"Google Doc export failed: {e}")
         # Fallback to basic HTML export
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
         meta = service.files().get(
