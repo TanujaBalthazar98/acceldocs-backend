@@ -117,6 +117,27 @@ def _unique_page_slug(seed: str, org_id: int, db: Session) -> str:
     )
 
 
+def _ordered_sections_for_parent(
+    db: Session,
+    *,
+    org_id: int,
+    parent_id: int | None,
+    exclude_section_id: int | None = None,
+) -> list[Section]:
+    query = db.query(Section).filter(Section.organization_id == org_id)
+    if parent_id is None:
+        query = query.filter(Section.parent_id.is_(None))
+    else:
+        query = query.filter(Section.parent_id == parent_id)
+    if exclude_section_id is not None:
+        query = query.filter(Section.id != exclude_section_id)
+    return query.order_by(Section.display_order, Section.id).all()
+
+
+def _clamp_insert_index(index: int, size: int) -> int:
+    return max(0, min(index, size))
+
+
 def _copy_drive_doc(service, source_file_id: str, copy_title: str, parent_id: str | None) -> tuple[str, str | None]:
     body: dict[str, Any] = {"name": copy_title}
     if parent_id:
@@ -481,31 +502,93 @@ async def update_section(
     if not section:
         raise HTTPException(status_code=404, detail="Section not found")
 
-    parent_id_changed = (
-        "parent_id" in body.model_fields_set and body.parent_id != section.parent_id
-    )
-    new_parent_id_value = body.parent_id if parent_id_changed else None
+    old_parent_id = section.parent_id
+    parent_id_explicit = "parent_id" in body.model_fields_set
+    target_parent_id = body.parent_id if parent_id_explicit else old_parent_id
+    parent_id_changed = target_parent_id != old_parent_id
+    display_order_requested = body.display_order is not None
+    new_parent_id_value = target_parent_id if parent_id_changed else None
+
+    if target_parent_id == section.id:
+        raise HTTPException(status_code=400, detail="Section cannot be its own parent")
+
+    target_parent: Section | None = None
+    if target_parent_id is not None:
+        target_parent = db.query(Section).filter(
+            Section.id == target_parent_id,
+            Section.organization_id == org_id,
+        ).first()
+        if not target_parent:
+            raise HTTPException(status_code=404, detail="Parent section not found")
+
+        # Prevent moving a node under its own descendant.
+        cursor = target_parent
+        while cursor is not None:
+            if cursor.id == section.id:
+                raise HTTPException(status_code=400, detail="Cannot move section under its own descendant")
+            if cursor.parent_id is None:
+                break
+            cursor = db.query(Section).filter(
+                Section.id == cursor.parent_id,
+                Section.organization_id == org_id,
+            ).first()
 
     next_section_type = body.section_type if body.section_type is not None else section.section_type
-    next_parent_id = body.parent_id if "parent_id" in body.model_fields_set else section.parent_id
+    next_parent_id = target_parent_id
     if next_section_type == "version":
         _validate_version_parent(org_id=org_id, parent_id=next_parent_id, db=db)
 
     if body.name is not None:
-        section.name = body.name.strip()
-        section.slug = _unique_slug(body.name, org_id, section.parent_id, db, exclude_id=section_id)
-    if "parent_id" in body.model_fields_set:
-        section.parent_id = body.parent_id
+        cleaned_name = body.name.strip()
+        if not cleaned_name:
+            raise HTTPException(status_code=400, detail="Name cannot be empty")
+        section.name = cleaned_name
+
+    if parent_id_explicit:
+        section.parent_id = target_parent_id
+
+    if body.name is not None or parent_id_changed:
+        section.slug = _unique_slug(section.name, org_id, section.parent_id, db, exclude_id=section_id)
+
     if body.section_type is not None:
         section.section_type = body.section_type
     if body.visibility is not None:
         section.visibility = body.visibility
-    if body.drive_folder_id is not None:
+    if "drive_folder_id" in body.model_fields_set:
         section.drive_folder_id = body.drive_folder_id
-    if body.display_order is not None:
-        section.display_order = body.display_order
     if body.is_published is not None:
         section.is_published = body.is_published
+
+    if parent_id_changed or display_order_requested:
+        source_siblings = _ordered_sections_for_parent(
+            db,
+            org_id=org_id,
+            parent_id=old_parent_id,
+            exclude_section_id=section.id,
+        )
+        if parent_id_changed:
+            target_siblings = _ordered_sections_for_parent(
+                db,
+                org_id=org_id,
+                parent_id=section.parent_id,
+                exclude_section_id=section.id,
+            )
+        else:
+            target_siblings = source_siblings
+
+        requested_index = body.display_order if display_order_requested else None
+        if requested_index is None:
+            requested_index = len(target_siblings) if parent_id_changed else section.display_order
+        insert_index = _clamp_insert_index(requested_index, len(target_siblings))
+
+        if parent_id_changed:
+            for idx, sibling in enumerate(source_siblings):
+                sibling.display_order = idx
+
+        reordered_target = list(target_siblings)
+        reordered_target.insert(insert_index, section)
+        for idx, sibling in enumerate(reordered_target):
+            sibling.display_order = idx
 
     db.commit()
     db.refresh(section)

@@ -375,6 +375,181 @@ def test_update_page_visibility_override(client, db):
     assert payload["visibility_override"] == "internal"
 
 
+def test_update_page_reindexes_siblings_when_reordered_between_pages(client, db):
+    user, org = _seed_user_org(db)
+    section = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Docs",
+        slug="docs",
+        section_type="section",
+        is_published=True,
+        display_order=0,
+    )
+    db.add(section)
+    db.flush()
+
+    first = Page(
+        organization_id=org.id,
+        section_id=section.id,
+        google_doc_id="doc-reorder-1",
+        title="First",
+        slug="first",
+        html_content="<h1>First</h1>",
+        status="draft",
+        display_order=0,
+        owner_id=user.id,
+    )
+    second = Page(
+        organization_id=org.id,
+        section_id=section.id,
+        google_doc_id="doc-reorder-2",
+        title="Second",
+        slug="second",
+        html_content="<h1>Second</h1>",
+        status="draft",
+        display_order=1,
+        owner_id=user.id,
+    )
+    third = Page(
+        organization_id=org.id,
+        section_id=section.id,
+        google_doc_id="doc-reorder-3",
+        title="Third",
+        slug="third",
+        html_content="<h1>Third</h1>",
+        status="draft",
+        display_order=2,
+        owner_id=user.id,
+    )
+    db.add_all([first, second, third])
+    db.commit()
+
+    resp = client.patch(
+        f"/api/pages/{third.id}",
+        json={"display_order": 1},
+        headers=_auth_header(user.id, user.email),
+    )
+    assert resp.status_code == 200
+
+    db.expire_all()
+    ordered = (
+        db.query(Page)
+        .filter(Page.organization_id == org.id, Page.section_id == section.id)
+        .order_by(Page.display_order, Page.id)
+        .all()
+    )
+    assert [p.id for p in ordered] == [first.id, third.id, second.id]
+    assert [p.display_order for p in ordered] == [0, 1, 2]
+
+
+def test_update_page_reindexes_source_and_target_when_section_changes(client, db, monkeypatch):
+    user, org = _seed_user_org(db)
+    source_section = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Source",
+        slug="source",
+        section_type="section",
+        is_published=True,
+        display_order=0,
+    )
+    target_section = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Target",
+        slug="target",
+        section_type="section",
+        is_published=True,
+        display_order=1,
+    )
+    db.add_all([source_section, target_section])
+    db.flush()
+
+    source_first = Page(
+        organization_id=org.id,
+        section_id=source_section.id,
+        google_doc_id="doc-source-1",
+        title="Source First",
+        slug="source-first",
+        html_content="<h1>Source First</h1>",
+        status="draft",
+        display_order=0,
+        owner_id=user.id,
+    )
+    moving = Page(
+        organization_id=org.id,
+        section_id=source_section.id,
+        google_doc_id="doc-source-2",
+        title="Move Me",
+        slug="move-me",
+        html_content="<h1>Move Me</h1>",
+        status="draft",
+        display_order=1,
+        owner_id=user.id,
+    )
+    target_first = Page(
+        organization_id=org.id,
+        section_id=target_section.id,
+        google_doc_id="doc-target-1",
+        title="Target First",
+        slug="target-first",
+        html_content="<h1>Target First</h1>",
+        status="draft",
+        display_order=0,
+        owner_id=user.id,
+    )
+    target_second = Page(
+        organization_id=org.id,
+        section_id=target_section.id,
+        google_doc_id="doc-target-2",
+        title="Target Second",
+        slug="target-second",
+        html_content="<h1>Target Second</h1>",
+        status="draft",
+        display_order=1,
+        owner_id=user.id,
+    )
+    db.add_all([source_first, moving, target_first, target_second])
+    db.commit()
+
+    async def _fake_creds(_user, _db):
+        return object()
+
+    class _FakeDriveService:
+        pass
+
+    monkeypatch.setattr(pages_api, "_get_drive_credentials", _fake_creds)
+    monkeypatch.setattr(pages_api, "build", lambda *args, **kwargs: _FakeDriveService())
+    monkeypatch.setattr(pages_api, "_move_drive_item", lambda *args, **kwargs: None)
+
+    resp = client.patch(
+        f"/api/pages/{moving.id}",
+        json={"section_id": target_section.id, "display_order": 1},
+        headers=_auth_header(user.id, user.email),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["section_id"] == target_section.id
+
+    db.expire_all()
+    source_ordered = (
+        db.query(Page)
+        .filter(Page.organization_id == org.id, Page.section_id == source_section.id)
+        .order_by(Page.display_order, Page.id)
+        .all()
+    )
+    target_ordered = (
+        db.query(Page)
+        .filter(Page.organization_id == org.id, Page.section_id == target_section.id)
+        .order_by(Page.display_order, Page.id)
+        .all()
+    )
+    assert [p.id for p in source_ordered] == [source_first.id]
+    assert [p.display_order for p in source_ordered] == [0]
+    assert [p.id for p in target_ordered] == [target_first.id, moving.id, target_second.id]
+    assert [p.display_order for p in target_ordered] == [0, 1, 2]
+
+
 def test_engagement_overview_returns_feedback_and_comments(client, db):
     user, org = _seed_user_org(db)
     section = Section(

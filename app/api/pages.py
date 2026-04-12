@@ -108,6 +108,27 @@ def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
     return d
 
 
+def _ordered_pages_for_section(
+    db: Session,
+    *,
+    org_id: int,
+    section_id: int | None,
+    exclude_page_id: int | None = None,
+) -> list[Page]:
+    query = db.query(Page).filter(Page.organization_id == org_id)
+    if section_id is None:
+        query = query.filter(Page.section_id.is_(None))
+    else:
+        query = query.filter(Page.section_id == section_id)
+    if exclude_page_id is not None:
+        query = query.filter(Page.id != exclude_page_id)
+    return query.order_by(Page.display_order, Page.id).all()
+
+
+def _clamp_insert_index(index: int, size: int) -> int:
+    return max(0, min(index, size))
+
+
 # ---------------------------------------------------------------------------
 # Drive helpers
 # ---------------------------------------------------------------------------
@@ -760,7 +781,10 @@ async def update_page(
 
     old_section_id = page.section_id
     old_slug = page.slug
-    section_id_changed = False
+    section_id_explicit = "section_id" in body.model_fields_set
+    target_section_id = body.section_id if section_id_explicit else old_section_id
+    section_id_changed = target_section_id != old_section_id
+    display_order_requested = body.display_order is not None
     title_changed = body.title is not None and body.title.strip() != page.title
     slug_changed = body.slug is not None
     drive_service = None
@@ -768,13 +792,17 @@ async def update_page(
     if title_changed and not body.title.strip():
         raise HTTPException(status_code=400, detail="Title cannot be empty")
 
-    if page.google_doc_id and (title_changed or (body.section_id is not None and body.section_id != old_section_id)):
+    if section_id_explicit and target_section_id is not None:
+        section = db.query(Section).filter(
+            Section.id == target_section_id,
+            Section.organization_id == org_id,
+        ).first()
+        if not section:
+            raise HTTPException(status_code=404, detail="Section not found")
+
+    if page.google_doc_id and (title_changed or section_id_changed):
         creds = await _get_drive_credentials_compat(user, db, org_id)
         drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
-
-    if body.section_id is not None:
-        section_id_changed = body.section_id != old_section_id
-        page.section_id = body.section_id
 
     if title_changed:
         new_title = body.title.strip()
@@ -805,8 +833,38 @@ async def update_page(
                 status_code=307,
             )
 
-    if body.display_order is not None:
-        page.display_order = body.display_order
+    if section_id_changed or display_order_requested:
+        source_siblings = _ordered_pages_for_section(
+            db,
+            org_id=org_id,
+            section_id=old_section_id,
+            exclude_page_id=page.id,
+        )
+        if section_id_changed:
+            target_siblings = _ordered_pages_for_section(
+                db,
+                org_id=org_id,
+                section_id=target_section_id,
+                exclude_page_id=page.id,
+            )
+        else:
+            target_siblings = source_siblings
+
+        requested_index = body.display_order if display_order_requested else None
+        if requested_index is None:
+            requested_index = len(target_siblings) if section_id_changed else page.display_order
+        insert_index = _clamp_insert_index(requested_index, len(target_siblings))
+
+        if section_id_changed:
+            page.section_id = target_section_id
+            for idx, sibling in enumerate(source_siblings):
+                sibling.display_order = idx
+
+        reordered_target = list(target_siblings)
+        reordered_target.insert(insert_index, page)
+        for idx, sibling in enumerate(reordered_target):
+            sibling.display_order = idx
+
     if "visibility_override" in body.model_fields_set:
         page.visibility_override = body.visibility_override
     if body.hide_toc is not None:

@@ -329,6 +329,156 @@ def test_update_section_to_version_requires_top_level_parent(client, db):
     assert "top-level product" in resp.json()["detail"]
 
 
+def test_update_section_reindexes_siblings_when_reordered_between_sections(client, db):
+    user = User(google_id="u-sect-reorder", email="sect-reorder@example.com", name="Section Reorder", role="owner")
+    db.add(user)
+    db.flush()
+
+    org = Organization(name="Section Reorder Org", slug="section-reorder-org", domain="section-reorder.example.com")
+    db.add(org)
+    db.flush()
+    db.add(OrgRole(organization_id=org.id, user_id=user.id, role="owner"))
+    db.flush()
+
+    first = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="First",
+        slug="first",
+        section_type="section",
+        display_order=0,
+    )
+    second = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Second",
+        slug="second",
+        section_type="section",
+        display_order=1,
+    )
+    third = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Third",
+        slug="third",
+        section_type="section",
+        display_order=2,
+    )
+    db.add_all([first, second, third])
+    db.commit()
+
+    headers = _auth_header(user.id, user.email)
+    resp = client.patch(
+        f"/api/sections/{third.id}",
+        json={"display_order": 1},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    db.expire_all()
+    ordered = (
+        db.query(Section)
+        .filter(Section.organization_id == org.id, Section.parent_id.is_(None))
+        .order_by(Section.display_order, Section.id)
+        .all()
+    )
+    assert [section.id for section in ordered] == [first.id, third.id, second.id]
+    assert [section.display_order for section in ordered] == [0, 1, 2]
+
+
+def test_update_section_reindexes_source_and_target_when_parent_changes(client, db):
+    user = User(google_id="u-sect-parent", email="sect-parent@example.com", name="Section Parent Move", role="owner")
+    db.add(user)
+    db.flush()
+
+    org = Organization(name="Section Parent Org", slug="section-parent-org", domain="section-parent.example.com")
+    db.add(org)
+    db.flush()
+    db.add(OrgRole(organization_id=org.id, user_id=user.id, role="owner"))
+    db.flush()
+
+    source_parent = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Source Parent",
+        slug="source-parent",
+        section_type="section",
+        display_order=0,
+    )
+    target_parent = Section(
+        organization_id=org.id,
+        parent_id=None,
+        name="Target Parent",
+        slug="target-parent",
+        section_type="section",
+        display_order=1,
+    )
+    db.add_all([source_parent, target_parent])
+    db.flush()
+
+    source_first = Section(
+        organization_id=org.id,
+        parent_id=source_parent.id,
+        name="Source First",
+        slug="source-first",
+        section_type="section",
+        display_order=0,
+    )
+    moving = Section(
+        organization_id=org.id,
+        parent_id=source_parent.id,
+        name="Move Me",
+        slug="move-me",
+        section_type="section",
+        display_order=1,
+    )
+    target_first = Section(
+        organization_id=org.id,
+        parent_id=target_parent.id,
+        name="Target First",
+        slug="target-first",
+        section_type="section",
+        display_order=0,
+    )
+    target_second = Section(
+        organization_id=org.id,
+        parent_id=target_parent.id,
+        name="Target Second",
+        slug="target-second",
+        section_type="section",
+        display_order=1,
+    )
+    db.add_all([source_first, moving, target_first, target_second])
+    db.commit()
+
+    headers = _auth_header(user.id, user.email)
+    resp = client.patch(
+        f"/api/sections/{moving.id}",
+        json={"parent_id": target_parent.id, "display_order": 1},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["parent_id"] == target_parent.id
+
+    db.expire_all()
+    source_children = (
+        db.query(Section)
+        .filter(Section.organization_id == org.id, Section.parent_id == source_parent.id)
+        .order_by(Section.display_order, Section.id)
+        .all()
+    )
+    target_children = (
+        db.query(Section)
+        .filter(Section.organization_id == org.id, Section.parent_id == target_parent.id)
+        .order_by(Section.display_order, Section.id)
+        .all()
+    )
+    assert [section.id for section in source_children] == [source_first.id]
+    assert [section.display_order for section in source_children] == [0]
+    assert [section.id for section in target_children] == [target_first.id, moving.id, target_second.id]
+    assert [section.display_order for section in target_children] == [0, 1, 2]
+
+
 def test_clone_from_version_skips_nested_version_children(client, db, monkeypatch):
     user = User(google_id="u-version-clone", email="version-clone@example.com", name="Version Clone", role="owner")
     db.add(user)
