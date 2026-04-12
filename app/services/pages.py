@@ -57,6 +57,30 @@ def apply_publish(db: Session, page: Page) -> None:
             section.is_published = True
 
 
+def _preserve_external_images(existing_html: str, new_html: str) -> str:
+    """Preserve external image URLs from existing content that aren't in new content."""
+    if not existing_html or not new_html:
+        return new_html
+    
+    import re
+    existing_srcs = set(re.findall(r'src="([^"]+)"', existing_html))
+    new_srcs = set(re.findall(r'src="([^"]+)"', new_html))
+    preserved = existing_srcs - new_srcs
+    
+    if not preserved:
+        return new_html
+    
+    img_tags = "\n".join(f'<img src="{src}" alt="Preserved image" />' for src in preserved)
+    if "<img" in new_html.lower():
+        return new_html
+    
+    h1_match = re.search(r"<h1[^>]*>.*?</h1>", new_html, re.DOTALL | re.IGNORECASE)
+    if h1_match:
+        return new_html.replace(h1_match.group(0), h1_match.group(0) + "\n" + img_tags, 1)
+    
+    return img_tags + "\n" + new_html
+
+
 def apply_sync_result(
     db: Session,
     page: Page,
@@ -67,7 +91,9 @@ def apply_sync_result(
 ) -> None:
     """Apply a Drive export result to a page — normalize HTML, update title/slug/status.
     Does NOT commit."""
-    page.html_content = normalize_synced_html(clean_google_docs_html(html))
+    new_html = normalize_synced_html(clean_google_docs_html(html))
+    new_html = _preserve_external_images(page.html_content or "", new_html)
+    page.html_content = new_html
     page.drive_modified_at = modified_at
     page.last_synced_at = datetime.now(timezone.utc).isoformat()
 
