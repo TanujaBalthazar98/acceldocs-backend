@@ -576,11 +576,7 @@ def _apply_category_hierarchy(flat_tree: list[dict]) -> list[dict]:
             section_title = part if " " in part else _humanize_path_part(part)
             section_slug = _slugify(section_title)
 
-            # Determine section type: top-level tabs should be "tab", subsections are "section"
-            known_tabs = {"documentation", "api", "release", "release-notes"}
-            section_type = "tab" if idx == 0 and section_slug.lower() in known_tabs else "section"
-
-            existing = None
+existing = None
             for n in current:
                 if n.get("title") and _slugify(n["title"]) == section_slug and not n.get("url"):
                     existing = n
@@ -596,8 +592,7 @@ def _apply_category_hierarchy(flat_tree: list[dict]) -> list[dict]:
                     "url": None,
                     "depth": idx,
                     "children": [],
-                    "_section_type": section_type,
-                }
+}
                 current.append(new_section)
                 current = new_section["children"]
 
@@ -4620,25 +4615,26 @@ def main() -> None:
     urls_to_fetch = [u for u in all_page_urls if u not in already_fetched]
     log.info("Pages to fetch: %d (already cached: %d)", len(urls_to_fetch), len(already_fetched))
 
-    # Determine content fetching method:
-    # Priority:
-    # 1. If --crawl4ai specified explicitly: use crawl4ai  
-    # 2. If --playwright used for hierarchy AND crawl4ai available: use crawl4ai (hybrid)
-    # Use playwright for content if --playwright is set (more reliable than crawl4ai)
-    crawl4ai_requested = getattr(args, "crawl4ai", False)
-    
-    # Use Playwright for content if --playwright flag is set (more reliable)
+crawl4ai_requested = getattr(args, "crawl4ai", False)
     use_playwright_for_content = use_playwright and not crawl4ai_requested
     
     mode = "Playwright" if use_playwright_for_content else "HTTP"
     log.info("Content fetching: %s (playwright_for_hierarchy=%s)", 
             mode, use_playwright)
     
+    ctx = None
     if use_playwright_for_content and urls_to_fetch:
-        log.info("Fetching page content using Playwright (JS rendering)...")
+        log.info("Fetching page content using Playwright (JavaScript-rendered Angular SPA)…")
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                )
+            )
             for idx, url in enumerate(urls_to_fetch, 1):
                 log.info("[%d/%d] Fetching: %s", idx, len(urls_to_fetch), url)
                 result = fetch_and_convert_page(url, pw_browser=browser)
@@ -4648,7 +4644,7 @@ def main() -> None:
                     if idx % 10 == 0:
                         save_state(state, product_slug)
             browser.close()
-    elif urls_to_fetch:
+    else:
         log.info("Fetching page content using static HTTP…")
         for idx, url in enumerate(urls_to_fetch, 1):
             log.info("[%d/%d] Fetching: %s", idx, len(urls_to_fetch), url)
