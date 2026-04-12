@@ -183,9 +183,10 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
                 html = html.replace(img_name, src)
             
             if images:
-                html = f'<!-- SYNC DEBUG: {len(images)} images -->\n' + html
+                html = f'<!-- SYNC DEBUG: {len(images)} images: {json.dumps(images)} -->\n' + html
+            else:
+                html = f'<!-- SYNC DEBUG: no images in zip -->\n' + html
         
-        logger.info(f"Sync: {debug}")
         return html, modifiedTime, title
         
     except Exception as e:
