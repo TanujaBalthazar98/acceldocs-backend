@@ -150,6 +150,7 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
     """Return (html_content, modified_at) for a Google Doc."""
     import logging
     import base64
+    import json
     logger = logging.getLogger(__name__)
     
     debug = []
@@ -166,9 +167,12 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
         response = docs_service.documents().export_media(documentId=google_doc_id, mimeType="application/vnd.google-apps.document").execute()
         
         with zipfile.ZipFile(BytesIO(response)) as z:
+            all_files = z.namelist()
+            debug.append(f"ZIP_FILES:{json.dumps(all_files)}")
+            
             html = z.read("index.html").decode("utf-8")
-            images = [n for n in z.namelist() if n.startswith("images/")]
-            debug.append(f"IMAGES:{len(images)}")
+            images = [n for n in all_files if n.startswith("images/")]
+            debug.append(f"IMAGES_IN_ZIP:{len(images)}")
             
             for name in images:
                 img_data = z.read(name)
@@ -179,15 +183,13 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
                 html = html.replace(img_name, src)
             
             if images:
-                html = f'<!-- SYNC DEBUG: {len(images)} images embedded -->\n' + html
+                html = f'<!-- SYNC DEBUG: {len(images)} images -->\n' + html
         
-        debug.append(f"OK:{title}")
-        logger.info(f"Sync OK: {', '.join(debug)}")
+        logger.info(f"Sync: {debug}")
         return html, modifiedTime, title
         
     except Exception as e:
         logger.warning(f"Sync error: {e}")
-        debug.append(f"ERROR:{str(e)}")
     
     try:
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
@@ -195,11 +197,10 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
         raw = service.files().export(fileId=google_doc_id, mimeType="text/html").execute()
         html = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
         html = f'<!-- SYNC DEBUG: fallback -->\n' + html
-        logger.info(f"Sync fallback: {debug}")
         return html, meta.get("modifiedTime"), meta.get("name")
     except Exception as e:
         logger.error(f"Sync failed: {e}")
-        return f"<!-- SYNC ERROR: {str(e)} -->", None, None
+        return "", None, None
 
 
 def _rename_drive_doc(service, file_id: str, title: str) -> str:
