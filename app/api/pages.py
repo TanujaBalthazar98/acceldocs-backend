@@ -184,7 +184,7 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
         
         with zipfile.ZipFile(BytesIO(zip_data)) as z:
             html = z.read("index.html").decode("utf-8")
-            logger.info(f"Native export: {len(z.namelist())} files in zip")
+            logger.info(f"Native export: {len(z.namelist())} files in zip, images: {[n for n in z.namelist() if n.startswith('images/')]}")
             
             # Extract and embed images as base64 data URLs
             for name in z.namelist():
@@ -196,7 +196,7 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
                     img_name = name.replace("images/", "")
                     html = html.replace(f'images/{img_name}', src)
                     html = html.replace(f'"images/{img_name}"', f'"{src}"')
-                    logger.info(f"Extracted image: {name}")
+                    logger.info(f"Extracted image: {name}, size: {len(img_data)}")
         
         logger.info(f"Export complete for {title}")
         return html, modifiedTime, title
