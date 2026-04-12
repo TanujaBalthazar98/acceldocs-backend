@@ -2248,20 +2248,6 @@ def legacy_documentation_redirect(
         all_orgs = db.query(Organization).all()
         page_slug_lower = page_slug.lower()
         for org in all_orgs:
-            page = (
-                db.query(Page)
-                .filter(
-                    Page.organization_id == org.id,
-                    Page.slug == page_slug,
-                    Page.is_published == True,
-                )
-                .first()
-            )
-            if page:
-                return RedirectResponse(
-                    url=f"/docs/{org.slug}/p/{page.id}/{page.slug}",
-                    status_code=301,
-                )
             pages = (
                 db.query(Page)
                 .filter(
@@ -2271,14 +2257,13 @@ def legacy_documentation_redirect(
                 .all()
             )
             for page in pages:
-                if page.slug and (
-                    page_slug_lower in page.slug.lower()
-                    or page.slug.lower() in page_slug_lower
-                ):
-                    return RedirectResponse(
-                        url=f"/docs/{org.slug}/p/{page.id}/{page.slug}",
-                        status_code=301,
-                    )
+                if page.slug:
+                    slug_lower = page.slug.lower()
+                    if page_slug_lower == slug_lower or page_slug_lower in slug_lower or slug_lower in page_slug_lower:
+                        return RedirectResponse(
+                            url=f"/docs/{org.slug}/p/{page.id}/{page.slug}",
+                            status_code=301,
+                        )
         return RedirectResponse(url="/docs", status_code=302)
     finally:
         db.close()
