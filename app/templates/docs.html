@@ -174,13 +174,13 @@
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      height: 34px;
+      height: 32px;
       border: 1px solid var(--border);
-      background: #fff;
-      color: var(--text-2);
-      border-radius: 9px;
-      padding: 0 10px;
-      font-size: 0.78rem;
+      background: var(--bg-sidebar);
+      color: var(--text-3);
+      border-radius: 8px;
+      padding: 0 9px;
+      font-size: 0.74rem;
       font-weight: 600;
       cursor: pointer;
       transition: border-color 0.15s, color 0.15s, background 0.15s;
@@ -189,7 +189,7 @@
     .topbar-action:hover {
       border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
       color: var(--text);
-      background: var(--bg-sidebar);
+      background: #fff;
     }
 
     .topbar-action svg {
@@ -256,6 +256,14 @@
     body.sidebar-collapsed .layout { grid-template-columns: 1fr; }
     body.sidebar-collapsed .layout > .sidebar { display: none; }
     body.sidebar-collapsed .topbar-brand { width: auto; padding-right: 8px; }
+    body.sidebar-collapsed .tabsbar-product { width: auto; min-width: 0; padding-right: 10px; }
+    body.sidebar-collapsed .tabsbar-inner { padding-left: 10px; }
+    body.sidebar-collapsed .doc-layout {
+      grid-template-columns: minmax(0, 1fr) {% if show_toc %}220px{% endif %};
+      padding: 40px 32px 96px;
+    }
+    body.sidebar-collapsed .content-wrap { max-width: none; padding: 40px 32px 96px; }
+    body.sidebar-collapsed .doc-layout .content-wrap { padding: 0; }
 
     body.has-tabs { --content-offset: calc(var(--topbar-h) + var(--tabs-h)); }
 
@@ -1333,7 +1341,7 @@
         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h8m-8 5h8m-8 5h8M15 6l5 6-5 6" />
         </svg>
-        <span id="sidebarToggleLabel">Expand content</span>
+        <span id="sidebarToggleLabel">Expand</span>
       </button>
       <div class="search-box">
         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -1626,7 +1634,7 @@
         toggleBtn.setAttribute('aria-label', collapsed ? 'Restore layout' : 'Expand content');
       }
       if (toggleLabel) {
-        toggleLabel.textContent = collapsed ? 'Restore layout' : 'Expand content';
+        toggleLabel.textContent = collapsed ? 'Restore' : 'Expand';
       }
       if (persist) {
         try {
