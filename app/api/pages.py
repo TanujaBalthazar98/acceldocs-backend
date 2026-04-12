@@ -147,33 +147,49 @@ async def _get_drive_credentials_compat(user: User, db: Session, org_id: int, *,
 
 
 async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str | None, str | None]:
-    """Return (html_content, modified_at) for a Google Doc."""
-    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    """Return (html_content, modified_at) for a Google Doc using Google Docs API."""
+    from googleapiclient.http import MediaIoBaseDownload
+    from io import BytesIO
 
-    # Get metadata (title + modified time)
-    meta = service.files().get(
-        fileId=google_doc_id,
-        fields="name,modifiedTime",
-        supportsAllDrives=True,
-    ).execute()
-
-    # Export as Google Docs native format to preserve embedded images (then extract HTML)
-    raw = service.files().export_media(
-        fileId=google_doc_id,
-        mimeType="application/vnd.google-apps.document"
-    ).execute()
-    if isinstance(raw, bytes):
+    # Use Google Docs API - more reliable for embedded content
+    try:
+        docs_service = build("docs", "v1", credentials=creds)
+        doc = docs_service.documents().get(documentId=google_doc_id).execute()
+        title = doc.get("title", "")
+        modifiedTime = doc.get("lastEditTime", "")
+        
+        # Export using Drive API with alt=media for full content
+        drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        request = drive_service.files().export_media(
+            fileId=google_doc_id,
+            mimeType="application/vnd.google-apps.document"
+        )
+        
+        fh = BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        
+        zip_data = fh.getvalue()
+        
         import zipfile
-        from io import BytesIO
-        try:
-            with zipfile.ZipFile(BytesIO(raw)) as z:
-                html = z.read("index.html").decode("utf-8")
-        except Exception:
-            html = raw.decode("utf-8")
-    else:
-        html = str(raw)
-
-    return html, meta.get("modifiedTime"), meta.get("name")
+        with zipfile.ZipFile(BytesIO(zip_data)) as z:
+            html = z.read("index.html").decode("utf-8")
+        
+        return html, modifiedTime, title
+        
+    except Exception as e:
+        # Fallback to basic HTML export
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        meta = service.files().get(
+            fileId=google_doc_id,
+            fields="name,modifiedTime",
+            supportsAllDrives=True,
+        ).execute()
+        raw = service.files().export(fileId=google_doc_id, mimeType="text/html").execute()
+        html = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+        return html, meta.get("modifiedTime"), meta.get("name")
 
 
 def _rename_drive_doc(service, file_id: str, title: str) -> str:
