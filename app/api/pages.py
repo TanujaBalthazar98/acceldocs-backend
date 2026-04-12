@@ -150,10 +150,8 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
     """Return (html_content, modified_at) for a Google Doc."""
     import logging
     import base64
-    import json
+    import re
     logger = logging.getLogger(__name__)
-    
-    debug = []
     
     try:
         from io import BytesIO
@@ -167,12 +165,8 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
         response = docs_service.documents().export_media(documentId=google_doc_id, mimeType="application/vnd.google-apps.document").execute()
         
         with zipfile.ZipFile(BytesIO(response)) as z:
-            all_files = z.namelist()
-            debug.append(f"ZIP_FILES:{json.dumps(all_files)}")
-            
             html = z.read("index.html").decode("utf-8")
-            images = [n for n in all_files if n.startswith("images/")]
-            debug.append(f"IMAGES_IN_ZIP:{len(images)}")
+            images = [n for n in z.namelist() if n.startswith("images/")]
             
             for name in images:
                 img_data = z.read(name)
@@ -182,22 +176,25 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
                 img_name = name.replace("images/", "")
                 html = html.replace(img_name, src)
             
-            if images:
-                html = f'<div style="background:yellow;padding:10px;color:black;">SYNC DEBUG: Found {len(images)} images in Google Doc: {images}</div>\n' + html
-            else:
-                html = f'<div style="background:red;padding:10px;color:white;">SYNC DEBUG: No images found in Google Doc. Is this correct?</div>\n' + html
-        
-        return html, modifiedTime, title
-        
+            html = f'\n<!-- SYNC: Native export, {len(images)} images -->\n' + html
+            logger.info(f"Sync: native export, {len(images)} images")
+            return html, modifiedTime, title
+            
     except Exception as e:
-        logger.warning(f"Sync error: {e}")
+        logger.warning(f"Native export failed: {e}")
     
     try:
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
         meta = service.files().get(fileId=google_doc_id, fields="name,modifiedTime").execute()
         raw = service.files().export(fileId=google_doc_id, mimeType="text/html").execute()
         html = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-        html = f'<!-- SYNC DEBUG: fallback -->\n' + html
+        
+        # Check for Google-hosted images
+        gdocs_imgs = re.findall(r'src="(https://lh3\.googleusercontent\.com/[^"]+)"', html)
+        
+        html = f'\n<!-- SYNC: Fallback HTML, {len(gdocs_imgs)} googleusercontent images -->\n' + html
+        logger.info(f"Sync: fallback, {len(gdocs_imgs)} googleusercontent images")
+        
         return html, meta.get("modifiedTime"), meta.get("name")
     except Exception as e:
         logger.error(f"Sync failed: {e}")
@@ -1096,12 +1093,12 @@ async def sync_page(
     db.commit()
     db.refresh(page)
     
-    # Check what's in the content
-    has_img_tags = "<img" in (page.html_content or "")
-    has_data_img = "data:image" in (page.html_content or "")
+    # Inject debug info into the content so we can see it
+    img_count_in_content = (page.html_content or "").count("<img")
+    page.html_content = f'<!-- SYNC_DONE: {img_count_in_content} images in html_content -->\n' + (page.html_content or "")
+    db.commit()
     
-    logger.info(f"After sync: page has img tags={has_img_tags}, has data:image={has_data_img}")
-    logger.info(f"Content length: {len(page.html_content or '')}")
+    logger.info(f"Sync complete: page {page_id}, content has {img_count_in_content} img tags")
     
     return {"ok": True, "page": _page_dict(page, include_html=True)}
 
