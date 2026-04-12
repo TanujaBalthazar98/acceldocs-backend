@@ -2237,6 +2237,14 @@ def external_docs_page(
     )
 
 
+# Known migration slug mappings: old DeveloperHub slug -> new page_id
+LEGACY_DOCUMENTATION_REDIRECTS = {
+    "adoc-architecture": 4705,
+    "architecture": 4705,
+    "introduction": 4736,
+}
+
+
 @router.get("/documentation/{page_slug}", response_class=RedirectResponse)
 def legacy_documentation_redirect(
     page_slug: str,
@@ -2245,6 +2253,16 @@ def legacy_documentation_redirect(
     """Legacy /documentation/{slug} route - redirect to proper docs location."""
     db = _get_db()
     try:
+        if page_slug in LEGACY_DOCUMENTATION_REDIRECTS:
+            page = db.query(Page).filter(Page.id == LEGACY_DOCUMENTATION_REDIRECTS[page_slug]).first()
+            if page:
+                org = db.get(Organization, page.organization_id)
+                if org:
+                    return RedirectResponse(
+                        url=f"/docs/{org.slug}/p/{page.id}/{page.slug}",
+                        status_code=301,
+                    )
+
         all_orgs = db.query(Organization).all()
         page_slug_lower = page_slug.lower()
         for org in all_orgs:
