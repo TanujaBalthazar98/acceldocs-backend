@@ -157,9 +157,21 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
         supportsAllDrives=True,
     ).execute()
 
-    # Export as HTML
-    raw = service.files().export(fileId=google_doc_id, mimeType="text/html").execute()
-    html = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+    # Export as Google Docs native format to preserve embedded images (then extract HTML)
+    raw = service.files().export_media(
+        fileId=google_doc_id,
+        mimeType="application/vnd.google-apps.document"
+    ).execute()
+    if isinstance(raw, bytes):
+        import zipfile
+        from io import BytesIO
+        try:
+            with zipfile.ZipFile(BytesIO(raw)) as z:
+                html = z.read("index.html").decode("utf-8")
+        except Exception:
+            html = raw.decode("utf-8")
+    else:
+        html = str(raw)
 
     return html, meta.get("modifiedTime"), meta.get("name")
 

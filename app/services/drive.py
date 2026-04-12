@@ -375,11 +375,20 @@ class GoogleDriveService:
                 supportsAllDrives=True,
             ).execute()
 
-            # Export as HTML
-            content = service.files().export(
+            # Export as HTML - use google-apps-document format to preserve embedded images
+            content = service.files().export_media(
                 fileId=doc_id,
-                mimeType="text/html"
+                mimeType="application/vnd.google-apps.document"
             ).execute()
+            if isinstance(content, bytes):
+                import zipfile
+                from io import BytesIO
+                try:
+                    with zipfile.ZipFile(BytesIO(content)) as z:
+                        html = z.read("index.html").decode("utf-8")
+                        content = html
+                except Exception:
+                    content = content.decode("utf-8")
 
             return {
                 "ok": True,

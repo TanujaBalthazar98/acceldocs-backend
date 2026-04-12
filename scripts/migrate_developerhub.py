@@ -576,7 +576,7 @@ def _apply_category_hierarchy(flat_tree: list[dict]) -> list[dict]:
             section_title = part if " " in part else _humanize_path_part(part)
             section_slug = _slugify(section_title)
 
-existing = None
+            existing = None
             for n in current:
                 if n.get("title") and _slugify(n["title"]) == section_slug and not n.get("url"):
                     existing = n
