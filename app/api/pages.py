@@ -153,6 +153,8 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
     import base64
     logger = logging.getLogger(__name__)
     
+    export_info = []
+    
     try:
         from googleapiclient.http import MediaIoBaseDownload
         from io import BytesIO
@@ -168,29 +170,54 @@ async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str
         with zipfile.ZipFile(BytesIO(response)) as z:
             html = z.read("index.html").decode("utf-8")
             images_in_zip = [n for n in z.namelist() if n.startswith("images/")]
-            logger.info(f"Zip has {len(images_in_zip)} images: {images_in_zip}")
+            export_info.append(f"zip:{len(images_in_zip)}")
             
-            # Embed images as base64 data URLs
+            # Try different replacement patterns
             for name in images_in_zip:
                 img_data = z.read(name)
                 ext = name.rsplit(".", 1)[-1] if "." in name else "png"
                 b64 = base64.b64encode(img_data).decode()
                 src = f"data:image/{ext};base64,{b64}"
                 img_name = name.replace("images/", "")
-                html = html.replace(f'images/{img_name}', src)
-                html = html.replace(f'"images/{img_name}"', f'"{src}"')
+                old = f'images/{img_name}'
+                old_quoted = f'"images/{img_name}"'
+                old_in_src = f'src="{old}"'
+                old_in_src_quoted = f'src="{old_quoted}"'
+                
+                if old in html:
+                    html = html.replace(old, src)
+                elif old_quoted in html:
+                    html = html.replace(old_quoted, src)
+                elif old_in_src in html:
+                    html = html.replace(old_in_src, f'src="{src}"')
+                elif old_in_src_quoted in html:
+                    html = html.replace(old_in_src_quoted, f'src="{src}"')
+                else:
+                    # Try finding any reference to this image
+                    found = False
+                    for pattern in [f'"{old}"', f"'{old}'", old, img_name]:
+                        if pattern in html:
+                            html = html.replace(pattern, src)
+                            found = True
+                            break
+                    if not found:
+                        export_info.append(f"not-found:{name}")
         
-        logger.info(f"Export complete for {title} with {len(images_in_zip)} images")
+        export_info.append(f"done:{title}")
+        logger.info(f"Export: {', '.join(export_info)}")
         return html, modifiedTime, title
         
     except Exception as e:
         logger.warning(f"Docs API export failed: {e}, trying Drive export")
+        export_info.append(f"error:{str(e)}")
     
     try:
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
         meta = service.files().get(fileId=google_doc_id, fields="name,modifiedTime", supportsAllDrives=True).execute()
         raw = service.files().export(fileId=google_doc_id, mimeType="text/html").execute()
-        html = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+        html = raw.decode("utf-8") if isinstance(raw, bytes) else str(html)
+        export_info.append("fallback")
+        logger.info(f"Export fallback: {', '.join(export_info)}")
         return html, meta.get("modifiedTime"), meta.get("name")
     except Exception as e:
         logger.error(f"All exports failed: {e}")
