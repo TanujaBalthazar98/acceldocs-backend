@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.api.drive import _create_drive_doc, _create_drive_doc_with_content, _trash_drive_item, _move_drive_item, get_drive_credentials as _get_drive_creds_drive
 from app.auth.routes import get_current_user
 from app.database import get_db
+from app.lib.drive_export import export_html_with_inlined_images
 from app.models import (
     Approval,
     Organization,
@@ -148,54 +149,46 @@ async def _get_drive_credentials_compat(user: User, db: Session, org_id: int, *,
 
 async def _export_html(google_doc_id: str, creds: Credentials) -> tuple[str, str | None, str | None]:
     """Return (html_content, modified_at) for a Google Doc."""
-    import logging
-    import base64
-    import re
     logger = logging.getLogger(__name__)
-    
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    title: str | None = None
+    modified_time: str | None = None
+
     try:
-        from io import BytesIO
-        import zipfile
-        
-        docs_service = build("docs", "v1", credentials=creds)
-        doc = docs_service.documents().get(documentId=google_doc_id).execute()
-        title = doc.get("title", "")
-        modifiedTime = doc.get("lastEditTime", "")
-        
-        response = docs_service.documents().export_media(documentId=google_doc_id, mimeType="application/vnd.google-apps.document").execute()
-        
-        with zipfile.ZipFile(BytesIO(response)) as z:
-            html = z.read("index.html").decode("utf-8")
-            images = [n for n in z.namelist() if n.startswith("images/")]
-            
-            for name in images:
-                img_data = z.read(name)
-                ext = name.rsplit(".", 1)[-1] if "." in name else "png"
-                b64 = base64.b64encode(img_data).decode()
-                src = f"data:image/{ext};base64,{b64}"
-                img_name = name.replace("images/", "")
-                html = html.replace(img_name, src)
-            
-            html = f'\n<!-- SYNC: Native export, {len(images)} images -->\n' + html
-            logger.info(f"Sync: native export, {len(images)} images")
-            return html, modifiedTime, title
-            
-    except Exception as e:
-        logger.warning(f"Native export failed: {e}")
-    
-    try:
-        service = build("drive", "v3", credentials=creds, cache_discovery=False)
         meta = service.files().get(fileId=google_doc_id, fields="name,modifiedTime").execute()
+        title = meta.get("name")
+        modified_time = meta.get("modifiedTime")
+    except Exception as e:
+        logger.warning("Metadata export failed for doc %s: %s", google_doc_id, e)
+
+    try:
+        html, image_stats = export_html_with_inlined_images(service, google_doc_id)
+        html = (
+            f"\n<!-- SYNC: Native export, {image_stats.embedded_images} images "
+            f"({image_stats.inlined_images} inlined) -->\n"
+            + html
+        )
+        logger.info(
+            "Sync: native export doc=%s, embedded=%d, inlined=%d",
+            google_doc_id,
+            image_stats.embedded_images,
+            image_stats.inlined_images,
+        )
+        return html, modified_time, title
+    except Exception as e:
+        logger.warning("Native zip export failed for doc %s: %s", google_doc_id, e)
+
+    try:
         raw = service.files().export(fileId=google_doc_id, mimeType="text/html").execute()
         html = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
         
         # Check for Google-hosted images
-        gdocs_imgs = re.findall(r'src="(https://lh3\.googleusercontent\.com/[^"]+)"', html)
+        gdocs_imgs = re.findall(r'src="(https://lh[0-9]\.googleusercontent\.com/[^"]+)"', html)
         
         html = f'\n<!-- SYNC: Fallback HTML, {len(gdocs_imgs)} googleusercontent images -->\n' + html
         logger.info(f"Sync: fallback, {len(gdocs_imgs)} googleusercontent images")
         
-        return html, meta.get("modifiedTime"), meta.get("name")
+        return html, modified_time, title
     except Exception as e:
         logger.error(f"Sync failed: {e}")
         return "", None, None
@@ -1092,13 +1085,9 @@ async def sync_page(
 
     db.commit()
     db.refresh(page)
-    
-    # Inject debug info into the content so we can see it
-    img_count_in_content = (page.html_content or "").count("<img")
-    page.html_content = f'<!-- SYNC_DONE: {img_count_in_content} images in html_content -->\n' + (page.html_content or "")
-    db.commit()
-    
-    logger.info(f"Sync complete: page {page_id}, content has {img_count_in_content} img tags")
+
+    img_count_in_content = (page.html_content or "").lower().count("<img")
+    logger.info("Sync complete: page %d, content has %d img tags", page_id, img_count_in_content)
     
     return {"ok": True, "page": _page_dict(page, include_html=True)}
 

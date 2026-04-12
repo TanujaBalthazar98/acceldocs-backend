@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.auth.routes import get_current_user
 from app.config import settings
 from app.database import get_db
+from app.lib.drive_export import export_html_with_inlined_images
 from app.lib import markdown_import as _markdown_import
 from app.lib.slugify import to_slug as slugify, unique_slug as _make_unique
 from app.models import GoogleToken, OrgRole, Organization, Page, Section, User
@@ -1479,14 +1480,35 @@ async def sync_all_pages(
             continue
 
         try:
-            raw = service.files().export(
-                fileId=page.google_doc_id, mimeType="text/html"
-            ).execute()
-            html = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-        except Exception as e:
-            logger.warning("Export failed page %d (%s): %s", page.id, page.google_doc_id, e)
-            errors += 1
-            continue
+            html, image_stats = export_html_with_inlined_images(service, page.google_doc_id)
+            logger.info(
+                "Sync page %d (%s): native zip export embedded=%d inlined=%d",
+                page.id,
+                page.google_doc_id,
+                image_stats.embedded_images,
+                image_stats.inlined_images,
+            )
+        except Exception as native_exc:
+            logger.warning(
+                "Native zip export failed page %d (%s): %s. Falling back to text/html export.",
+                page.id,
+                page.google_doc_id,
+                native_exc,
+            )
+            try:
+                raw = service.files().export(
+                    fileId=page.google_doc_id, mimeType="text/html"
+                ).execute()
+                html = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+            except Exception as fallback_exc:
+                logger.warning(
+                    "Fallback export failed page %d (%s): %s",
+                    page.id,
+                    page.google_doc_id,
+                    fallback_exc,
+                )
+                errors += 1
+                continue
 
         # Strip Google Docs inline styles / wrapper tags, then apply
         # frontmatter/callout normalization.
