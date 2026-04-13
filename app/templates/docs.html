@@ -1598,7 +1598,7 @@
               {% if page.children %}
                 {% for child in page.children %}
                   <a href="{{ docs_root }}/{{ org_slug }}/p/{{ child.id }}/{{ child.slug }}{{ audience_suffix }}"
-                     class="sidebar-page {% if child.slug == current_page_slug %}active{% endif }}"
+                     class="sidebar-page {% if child.slug == current_page_slug %}active{% endif %}"
                      style="padding-left: {{ (depth + 1) * 16 + 24 }}px;">
                     {{ child.title }}
                   </a>
