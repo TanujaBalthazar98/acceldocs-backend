@@ -483,6 +483,7 @@ class Page(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     section_id: Mapped[int | None] = mapped_column(ForeignKey("sections.id", ondelete="SET NULL"))
+    parent_page_id: Mapped[int | None] = mapped_column(ForeignKey("pages.id", ondelete="SET NULL"))
     google_doc_id: Mapped[str] = mapped_column(String(255), nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     slug: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -509,12 +510,15 @@ class Page(Base):
     organization: Mapped["Organization"] = relationship("Organization", foreign_keys=[organization_id])
     section: Mapped["Section | None"] = relationship(back_populates="pages")
     owner: Mapped["User | None"] = relationship("User", foreign_keys=[owner_id])
+    parent: Mapped["Page | None"] = relationship("Page", remote_side=[id], back_populates="children")
+    children: Mapped[list["Page"]] = relationship("Page", back_populates="parent", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("organization_id", "google_doc_id", name="uq_page_google_doc_per_org"),
         UniqueConstraint("organization_id", "slug", name="uq_page_slug_per_org"),
         Index("ix_pages_org_visibility_override", "organization_id", "visibility_override"),
         Index("ix_pages_org_section", "organization_id", "section_id"),
+        Index("ix_pages_parent", "parent_page_id"),
     )
 
 

@@ -53,12 +53,14 @@ _NUM_PREFIX = re.compile(r"^\d+[\.\s]+")
 class PageCreate(BaseModel):
     google_doc_id: str | None = None
     section_id: int | None = None
+    parent_page_id: int | None = None
     title: str | None = None
     display_order: int = 0
 
 
 class PageUpdate(BaseModel):
     section_id: int | None = None
+    parent_page_id: int | None = None
     title: str | None = None
     slug: str | None = None
     html_content: str | None = None  # Update page HTML content (for link rewriting after import)
@@ -85,6 +87,7 @@ def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
         "id": p.id,
         "organization_id": p.organization_id,
         "section_id": p.section_id,
+        "parent_page_id": p.parent_page_id,
         "google_doc_id": p.google_doc_id,
         "title": p.title,
         "slug": p.slug,
@@ -897,6 +900,10 @@ async def update_page(
 
     if "visibility_override" in body.model_fields_set:
         page.visibility_override = body.visibility_override
+    if "parent_page_id" in body.model_fields_set:
+        if body.parent_page_id == page.id:
+            raise HTTPException(status_code=400, detail="Page cannot be its own parent")
+        page.parent_page_id = body.parent_page_id
     if body.hide_toc is not None:
         page.hide_toc = body.hide_toc
     if body.full_width is not None:

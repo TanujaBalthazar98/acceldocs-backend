@@ -173,30 +173,34 @@
     .topbar-action {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-      height: 32px;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
       border: 1px solid var(--border);
-      background: var(--bg-sidebar);
+      background: transparent;
       color: var(--text-3);
-      border-radius: 8px;
-      padding: 0 9px;
-      font-size: 0.74rem;
-      font-weight: 600;
+      border-radius: 7px;
+      padding: 0;
       cursor: pointer;
-      transition: border-color 0.15s, color 0.15s, background 0.15s;
+      transition: border-color 0.15s, color 0.15s, background 0.15s, transform 0.15s;
     }
 
     .topbar-action:hover {
       border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
       color: var(--text);
-      background: #fff;
+      background: var(--bg-sidebar);
     }
 
     .topbar-action svg {
-      width: 14px;
-      height: 14px;
+      width: 15px;
+      height: 15px;
       flex-shrink: 0;
-      opacity: 0.9;
+      opacity: 0.85;
+      transition: transform 0.18s ease;
+    }
+
+    .topbar-action.is-collapsed svg {
+      transform: rotate(180deg);
     }
 
     .search-box {
@@ -1041,6 +1045,66 @@
       color: var(--text-3);
     }
 
+    .prev-next {
+      margin-top: 30px;
+      max-width: 720px;
+      display: flex;
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .prev-next-spacer {
+      flex: 1 1 0;
+      min-width: 0;
+    }
+
+    .prev-next a {
+      flex: 1 1 0;
+      min-width: 0;
+      text-decoration: none;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--bg);
+      color: var(--text);
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      transition: border-color 0.15s, background 0.15s, color 0.15s;
+    }
+
+    .prev-next a:hover {
+      border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+      background: color-mix(in srgb, var(--accent) 3%, var(--bg));
+      color: var(--accent);
+    }
+
+    .prev-next a.next {
+      text-align: right;
+      align-items: flex-end;
+    }
+
+    .prev-next-label {
+      font-size: 0.68rem;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .prev-next-title {
+      font-size: 0.85rem;
+      font-weight: 650;
+      color: var(--text-2);
+      width: 100%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     /* ── Search modal ─────────────────────────────────────────────── */
     .search-overlay {
       position: fixed;
@@ -1338,10 +1402,10 @@
     </a>
     <div class="topbar-right">
       <button id="sidebarToggleBtn" class="topbar-action" type="button" aria-label="Expand content">
-        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h8m-8 5h8m-8 5h8M15 6l5 6-5 6" />
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.9">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15 6l-6 6 6 6" />
+          <path stroke-linecap="round" stroke-linejoin="round" d="M20 6l-6 6 6 6" />
         </svg>
-        <span id="sidebarToggleLabel">Expand</span>
       </button>
       <div class="search-box">
         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -1519,6 +1583,27 @@
               {{ page_html | safe }}
             </article>
 
+            {% if prev_page or next_page %}
+            <nav class="prev-next" aria-label="Page navigation">
+              {% if prev_page %}
+                <a href="{{ docs_root }}/{{ org_slug }}/p/{{ prev_page.id }}/{{ prev_page.slug }}{{ audience_suffix }}" class="prev">
+                  <span class="prev-next-label">‹ Previous</span>
+                  <span class="prev-next-title">{{ prev_page.title }}</span>
+                </a>
+              {% else %}
+                <span class="prev-next-spacer" aria-hidden="true"></span>
+              {% endif %}
+              {% if next_page %}
+                <a href="{{ docs_root }}/{{ org_slug }}/p/{{ next_page.id }}/{{ next_page.slug }}{{ audience_suffix }}" class="next">
+                  <span class="prev-next-label">Next ›</span>
+                  <span class="prev-next-title">{{ next_page.title }}</span>
+                </a>
+              {% else %}
+                <span class="prev-next-spacer" aria-hidden="true"></span>
+              {% endif %}
+            </nav>
+            {% endif %}
+
             <section class="engagement" id="engagementRoot">
               <div class="engagement-card">
                 <div class="feedback-row">
@@ -1629,12 +1714,11 @@
     function applySidebarCollapsed(collapsed, persist = true) {
       document.body.classList.toggle('sidebar-collapsed', !!collapsed);
       const toggleBtn = document.getElementById('sidebarToggleBtn');
-      const toggleLabel = document.getElementById('sidebarToggleLabel');
       if (toggleBtn) {
-        toggleBtn.setAttribute('aria-label', collapsed ? 'Restore layout' : 'Expand content');
-      }
-      if (toggleLabel) {
-        toggleLabel.textContent = collapsed ? 'Restore' : 'Expand';
+        const label = collapsed ? 'Restore layout' : 'Expand content';
+        toggleBtn.setAttribute('aria-label', label);
+        toggleBtn.setAttribute('title', label);
+        toggleBtn.classList.toggle('is-collapsed', !!collapsed);
       }
       if (persist) {
         try {

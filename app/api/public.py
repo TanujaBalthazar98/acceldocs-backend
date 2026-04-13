@@ -545,6 +545,54 @@ def _find_page_path(
     return None
 
 
+def _flatten_nav_pages(nodes: list[dict]) -> list[dict]:
+    """Flatten visible navigation nodes into a deterministic page order."""
+    ordered: list[dict] = []
+    seen: set[int] = set()
+
+    def _walk(node: dict) -> None:
+        for page in node.get("pages", []) or []:
+            page_id = page.get("id")
+            page_slug = page.get("slug")
+            if not page_id or not page_slug:
+                continue
+            if page_id in seen:
+                continue
+            seen.add(page_id)
+            ordered.append(
+                {
+                    "id": page_id,
+                    "slug": page_slug,
+                    "title": page.get("title") or "Untitled",
+                }
+            )
+
+        for child in node.get("children", []) or []:
+            _walk(child)
+
+    for root in nodes or []:
+        _walk(root)
+
+    return ordered
+
+
+def _resolve_prev_next_pages(nav_sections: list[dict], current_page_id: int) -> tuple[dict | None, dict | None]:
+    ordered_pages = _flatten_nav_pages(nav_sections)
+    if not ordered_pages:
+        return None, None
+
+    current_index = next(
+        (idx for idx, page in enumerate(ordered_pages) if page.get("id") == current_page_id),
+        None,
+    )
+    if current_index is None:
+        return None, None
+
+    prev_page = ordered_pages[current_index - 1] if current_index > 0 else None
+    next_page = ordered_pages[current_index + 1] if current_index < len(ordered_pages) - 1 else None
+    return prev_page, next_page
+
+
 def _parse_version_parts(value: str | None) -> tuple[int, int, int] | None:
     text = (value or "").strip().lower()
     if not text:
@@ -1247,6 +1295,8 @@ def _base_ctx(
         "landing_get_started_id": None,
         "landing_search_index": [],
         "hierarchy_mode": hierarchy_mode,
+        "prev_page": None,
+        "next_page": None,
         "audience": template_audience,
         "audience_suffix": audience_suffix,
         "docs_root": normalized_docs_root,
@@ -1779,6 +1829,8 @@ def _render_docs_page(
             if version_slug and any(v.get("slug") == version_slug for v in nav_meta["top_versions"]):
                 nav_meta["current_version_slug"] = version_slug
 
+    prev_page, next_page = _resolve_prev_next_pages(nav_meta["nav_sections"], page.id)
+
     page_html = _clean_gdoc_html(page.published_html or "")
     page_html = _rewrite_page_links(
         page_html,
@@ -1851,6 +1903,8 @@ def _render_docs_page(
         ctx["base_version_label"] = nav_meta["product_header"].get("name") or "Original"
     ctx["page_last_updated"] = page_last_updated
     ctx["feedback_summary"] = feedback_summary
+    ctx["prev_page"] = prev_page
+    ctx["next_page"] = next_page
     ctx["viewer_signed_in"] = bool(request_user)
     ctx["viewer_email"] = request_user.email if request_user and request_user.email else None
     ctx["viewer_name"] = _viewer_display_name(request_user)
