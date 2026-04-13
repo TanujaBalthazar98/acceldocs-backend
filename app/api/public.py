@@ -309,6 +309,38 @@ def _build_section_node(
         .all()
     )
     pages = [p for p in all_pages if _is_page_visible(p, section.visibility, viewer_scope, audience)]
+    
+    def get_page_children(parent_page: Page) -> list[dict]:
+        """Get child pages for a parent page."""
+        children = (
+            db.query(Page)
+            .filter(Page.parent_page_id == parent_page.id, Page.is_published == True)
+            .order_by(Page.display_order, Page.title)
+            .all()
+        )
+        return [
+            {
+                "id": p.id,
+                "title": p.title,
+                "slug": p.slug,
+                "children": get_page_children(p),
+            }
+            for p in children
+            if _is_page_visible(p, section.visibility, viewer_scope, audience)
+        ]
+    
+    pages_with_children = []
+    for p in pages:
+        page_dict = {
+            "id": p.id,
+            "title": p.title,
+            "slug": p.slug,
+        }
+        children = get_page_children(p)
+        if children:
+            page_dict["children"] = children
+        pages_with_children.append(page_dict)
+    
     child_sections = (
         db.query(Section)
         .filter(Section.organization_id == org_id, Section.parent_id == section.id)
@@ -322,14 +354,14 @@ def _build_section_node(
         if n is not None
     ]
 
-    if not pages and not children:
+    if not pages_with_children and not children:
         return None
 
     first_page_slug = None
     first_page_id = None
-    if pages:
-        first_page_id = pages[0].id
-        first_page_slug = pages[0].slug
+    if pages_with_children:
+        first_page_id = pages_with_children[0]["id"]
+        first_page_slug = pages_with_children[0]["slug"]
     else:
         first_page_id = next((child.get("first_page_id") for child in children if child.get("first_page_id")), None)
         first_page_slug = next((child.get("first_page_slug") for child in children if child.get("first_page_slug")), None)
@@ -340,7 +372,7 @@ def _build_section_node(
         "slug": section.slug,
         "section_type": section.section_type or "section",
         "display_order": section.display_order,
-        "pages": [{"id": p.id, "title": p.title, "slug": p.slug} for p in pages],
+        "pages": pages_with_children,
         "children": children,
         "first_page_id": first_page_id,
         "first_page_slug": first_page_slug,

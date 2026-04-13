@@ -1595,6 +1595,24 @@
                  class="sidebar-page {% if page.slug == current_page_slug %}active{% endif %}">
                 {{ page.title }}
               </a>
+              {% if page.children %}
+                {% for child in page.children %}
+                  <a href="{{ docs_root }}/{{ org_slug }}/p/{{ child.id }}/{{ child.slug }}{{ audience_suffix }}"
+                     class="sidebar-page {% if child.slug == current_page_slug %}active{% endif }}"
+                     style="padding-left: {{ (depth + 1) * 16 + 24 }}px;">
+                    {{ child.title }}
+                  </a>
+                  {% if child.children %}
+                    {% for subchild in child.children %}
+                      <a href="{{ docs_root }}/{{ org_slug }}/p/{{ subchild.id }}/{{ subchild.slug }}{{ audience_suffix }}"
+                         class="sidebar-page {% if subchild.slug == current_page_slug %}active{% endif %}"
+                         style="padding-left: {{ (depth + 2) * 16 + 24 }}px;">
+                        {{ subchild.title }}
+                      </a>
+                    {% endfor %}
+                  {% endif %}
+                {% endfor %}
+              {% endif %}
             {% endfor %}
             {% for child in section.children %}
               {{ render_section(child, depth + 1) }}
