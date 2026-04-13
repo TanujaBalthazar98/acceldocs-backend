@@ -77,6 +77,20 @@
   {% if _body_font != _heading_font %}{% set _font_families = [_heading_font, _body_font] %}{% endif %}
   <link href="https://fonts.googleapis.com/css2?{% for f in _font_families %}family={{ f | replace(' ', '+') }}:wght@400;500;600;700{% if not loop.last %}&{% endif %}{% endfor %}&display=swap" rel="stylesheet" />
 
+  <script>
+    (function bootstrapDocsTheme() {
+      try {
+        var key = 'acceldocs_docs_theme';
+        var saved = window.localStorage.getItem(key);
+        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var theme = (saved === 'light' || saved === 'dark') ? saved : (prefersDark ? 'dark' : 'light');
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (_) {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+    })();
+  </script>
+
   <style>
     :root {
       --accent: {{ primary_color }};
@@ -84,15 +98,41 @@
       --topbar-h: 56px;
       --tabs-h: 44px;
       --bg: #FFFFFF;
+      --surface: #FFFFFF;
+      --surface-soft: #F8F7F4;
       --bg-sidebar: #F8F7F4;
       --bg-hover: #F0EEE9;
       --border: #E8E6E0;
+      --border-strong: #D0CEC8;
       --text: #0D0D0C;
       --text-2: #5C5A55;
       --text-3: #9B9890;
+      --topbar-bg: rgba(255,255,255,0.88);
+      --tabs-bg: rgba(255,255,255,0.95);
+      --kbd-bg: #FFFFFF;
+      --row-alt-bg: #FAFAF8;
       --radius: 8px;
       --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
       --shadow-md: 0 4px 16px rgba(0,0,0,0.08), 0 2px 6px rgba(0,0,0,0.04);
+    }
+
+    html[data-theme="dark"] {
+      --bg: #0B1118;
+      --surface: #101923;
+      --surface-soft: #131F2B;
+      --bg-sidebar: #101923;
+      --bg-hover: #1A2736;
+      --border: #263447;
+      --border-strong: #32455E;
+      --text: #E7EDF4;
+      --text-2: #B8C2CF;
+      --text-3: #8696A8;
+      --topbar-bg: rgba(11,17,24,0.9);
+      --tabs-bg: rgba(11,17,24,0.94);
+      --kbd-bg: #131F2B;
+      --row-alt-bg: #0F1722;
+      --shadow-sm: 0 1px 3px rgba(0,0,0,0.32), 0 1px 2px rgba(0,0,0,0.24);
+      --shadow-md: 0 12px 24px rgba(0,0,0,0.35), 0 6px 12px rgba(0,0,0,0.28);
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -120,7 +160,7 @@
       display: flex;
       align-items: center;
       padding: 0 20px;
-      background: rgba(255,255,255,0.88);
+      background: var(--topbar-bg);
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--border);
@@ -203,6 +243,15 @@
       transform: rotate(180deg);
     }
 
+    .theme-toggle .theme-icon {
+      display: none;
+      transform: none;
+      opacity: 0.9;
+    }
+
+    html[data-theme="light"] .theme-toggle .theme-icon-moon { display: block; }
+    html[data-theme="dark"] .theme-toggle .theme-icon-sun { display: block; }
+
     .search-box {
       display: flex;
       align-items: center;
@@ -218,7 +267,7 @@
       transition: border-color 0.15s, background 0.15s;
     }
 
-    .search-box:hover { border-color: #D0CEC8; background: var(--bg); }
+    .search-box:hover { border-color: var(--border-strong); background: var(--bg); }
 
     .search-box svg { width: 13px; height: 13px; flex-shrink: 0; opacity: 0.6; }
 
@@ -240,7 +289,7 @@
       font-size: 10px;
       font-family: inherit;
       color: var(--text-3);
-      background: white;
+      background: var(--kbd-bg);
     }
 
     /* ── Layout ───────────────────────────────────────────────────── */
@@ -280,7 +329,7 @@
       display: flex;
       align-items: center;
       border-bottom: 1px solid var(--border);
-      background: rgba(255,255,255,0.95);
+      background: var(--tabs-bg);
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
       z-index: 180;
@@ -669,7 +718,7 @@
       color: var(--text-2);
     }
 
-    .page-content tr:nth-child(even) td { background: #FAFAF8; }
+    .page-content tr:nth-child(even) td { background: var(--row-alt-bg); }
 
     .page-content img {
       max-width: 100%;
@@ -748,7 +797,7 @@
       border: 1px solid var(--border);
       border-radius: 14px;
       padding: 14px;
-      background: #fff;
+      background: var(--surface);
       display: grid;
       gap: 12px;
     }
@@ -812,7 +861,7 @@
       font-size: 0.84rem;
       color: var(--text);
       padding: 9px 11px;
-      background: #fff;
+      background: var(--surface);
       resize: vertical;
       min-height: 66px;
     }
@@ -835,7 +884,7 @@
     .engagement-submit,
     .comment-submit {
       border: 1px solid var(--border);
-      background: #fff;
+      background: var(--surface);
       color: var(--text-2);
       font-size: 0.77rem;
       font-weight: 700;
@@ -894,7 +943,7 @@
 
     .comment-toggle {
       border: 1px solid var(--border);
-      background: #fff;
+      background: var(--surface);
       color: var(--text-2);
       border-radius: 8px;
       padding: 5px 9px;
@@ -1022,7 +1071,7 @@
       width: 40px;
       height: 40px;
       border-radius: 10px;
-      background: color-mix(in srgb, var(--accent) 12%, #F8F7F4);
+      background: color-mix(in srgb, var(--accent) 12%, var(--surface-soft));
       display: flex;
       align-items: center;
       justify-content: center;
@@ -1133,7 +1182,7 @@
     .search-dialog {
       width: 560px;
       max-width: calc(100vw - 32px);
-      background: #fff;
+      background: var(--surface);
       border-radius: 14px;
       box-shadow: 0 24px 80px rgba(0,0,0,0.18), 0 4px 16px rgba(0,0,0,0.08);
       overflow: hidden;
@@ -1236,7 +1285,7 @@
       width: 36px;
       height: 36px;
       border: 1px solid var(--border);
-      background: #fff;
+      background: var(--surface);
       appearance: none;
       -webkit-appearance: none;
       cursor: pointer;
@@ -1247,7 +1296,7 @@
     }
     .mobile-menu-btn:hover {
       background: var(--bg-hover);
-      border-color: #D0CEC8;
+      border-color: var(--border-strong);
     }
     .mobile-menu-btn svg { width: 20px; height: 20px; }
 
@@ -1331,6 +1380,11 @@
         flex: 0 0 auto;
       }
       .topbar-action { display: none; }
+      .topbar-action.theme-toggle {
+        display: inline-flex;
+        width: 36px;
+        height: 36px;
+      }
       .search-box {
         width: 38px;
         min-width: 38px;
@@ -1421,6 +1475,15 @@
         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.9">
           <path stroke-linecap="round" stroke-linejoin="round" d="M15 6l-6 6 6 6" />
           <path stroke-linecap="round" stroke-linejoin="round" d="M20 6l-6 6 6 6" />
+        </svg>
+      </button>
+      <button id="themeToggleBtn" class="topbar-action theme-toggle" type="button" aria-label="Switch to dark mode">
+        <svg class="theme-icon theme-icon-moon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.9">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />
+        </svg>
+        <svg class="theme-icon theme-icon-sun" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.9">
+          <circle cx="12" cy="12" r="4" />
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 2v2.5M12 19.5V22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M2 12h2.5M19.5 12H22M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" />
         </svg>
       </button>
       <div class="search-box">
@@ -1725,7 +1788,44 @@
       document.getElementById(id).classList.toggle('collapsed');
     }
 
+    const DOCS_THEME_KEY = 'acceldocs_docs_theme';
     const SIDEBAR_COLLAPSE_KEY = 'acceldocs_docs_sidebar_collapsed';
+
+    function currentDocsTheme() {
+      const attrTheme = document.documentElement.getAttribute('data-theme');
+      if (attrTheme === 'dark' || attrTheme === 'light') return attrTheme;
+      const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      return prefersDark ? 'dark' : 'light';
+    }
+
+    function applyDocsTheme(nextTheme, persist = true) {
+      const normalized = nextTheme === 'dark' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', normalized);
+      const toggleBtn = document.getElementById('themeToggleBtn');
+      if (toggleBtn) {
+        const label = normalized === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+        toggleBtn.setAttribute('aria-label', label);
+        toggleBtn.setAttribute('title', label);
+      }
+      if (persist) {
+        try {
+          window.localStorage.setItem(DOCS_THEME_KEY, normalized);
+        } catch (_) {}
+      }
+    }
+
+    function initThemeToggle() {
+      const toggleBtn = document.getElementById('themeToggleBtn');
+      if (!toggleBtn) return;
+
+      const startTheme = currentDocsTheme();
+      applyDocsTheme(startTheme, false);
+
+      toggleBtn.addEventListener('click', () => {
+        const next = currentDocsTheme() === 'dark' ? 'light' : 'dark';
+        applyDocsTheme(next, true);
+      });
+    }
 
     function applySidebarCollapsed(collapsed, persist = true) {
       document.body.classList.toggle('sidebar-collapsed', !!collapsed);
@@ -2188,6 +2288,7 @@
       });
     }
 
+    initThemeToggle();
     initSidebarLayoutToggle();
     buildToc();
     initEngagement();
