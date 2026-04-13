@@ -1277,6 +1277,20 @@
     .page-content [style*="color: #000"] { color: inherit !important; }
     .page-content [style*="color:#000"] { color: inherit !important; }
 
+    /* Dark mode readability hardening for Google-exported inline styles. */
+    html[data-theme="dark"] .page-content :where(p, li, td, th, div, span, blockquote, em, strong):not(pre *):not(code *) {
+      color: var(--text-2) !important;
+    }
+    html[data-theme="dark"] .page-content :where(h1, h2, h3, h4, h5, h6):not(pre *):not(code *) {
+      color: var(--text) !important;
+    }
+    html[data-theme="dark"] .page-content a:not(pre *):not(code *) {
+      color: var(--accent) !important;
+    }
+    html[data-theme="dark"] .page-content [style*="background"]:not(pre *):not(code *) {
+      background: transparent !important;
+    }
+
     /* ── Mobile hamburger ────────────────────────────────────────── */
     .mobile-menu-btn {
       display: none;
