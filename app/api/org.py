@@ -36,6 +36,7 @@ PLACEHOLDER_INVITE_DOMAIN = "pending.acceldocs"
 
 class OrgUpdate(BaseModel):
     name: str | None = None
+    slug: str | None = None
     logo_url: str | None = None
     primary_color: str | None = None
     secondary_color: str | None = None
@@ -44,6 +45,7 @@ class OrgUpdate(BaseModel):
     font_body: str | None = None
     custom_css: str | None = None
     tagline: str | None = None
+    domain: str | None = None
     hierarchy_mode: str | None = None
     custom_docs_domain: str | None = None
     hero_title: str | None = None
@@ -301,6 +303,24 @@ def update_org(
         org.name = next_name
         if not org.slug:
             org.slug = slugify(org.name)
+    if body.slug is not None:
+        raw_slug = body.slug.strip()
+        if not raw_slug:
+            raise HTTPException(status_code=400, detail="Workspace slug cannot be empty")
+        next_slug = slugify(raw_slug)
+        if not next_slug:
+            raise HTTPException(
+                status_code=400,
+                detail="Workspace slug must include letters or numbers",
+            )
+        existing_slug = (
+            db.query(Organization)
+            .filter(func.lower(Organization.slug) == next_slug, Organization.id != org.id)
+            .first()
+        )
+        if existing_slug:
+            raise HTTPException(status_code=409, detail="Workspace slug is already in use")
+        org.slug = next_slug
     if body.logo_url is not None:
         org.logo_url = body.logo_url
     if body.primary_color is not None:
@@ -317,6 +337,25 @@ def update_org(
         org.custom_css = body.custom_css
     if body.tagline is not None:
         org.tagline = body.tagline
+    if body.domain is not None:
+        value = body.domain.strip().lower()
+        if value == "":
+            org.domain = None
+        else:
+            domain_regex = re.compile(r"^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$")
+            if not domain_regex.match(value):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid domain format. Example: company.com",
+                )
+            existing_domain = (
+                db.query(Organization)
+                .filter(func.lower(Organization.domain) == value, Organization.id != org.id)
+                .first()
+            )
+            if existing_domain:
+                raise HTTPException(status_code=409, detail="Domain is already in use")
+            org.domain = value
     if body.hero_title is not None:
         org.hero_title = body.hero_title
     if body.hero_description is not None:
