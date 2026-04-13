@@ -174,8 +174,8 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 30px;
-      height: 30px;
+      width: 28px;
+      height: 28px;
       border: 1px solid var(--border);
       background: transparent;
       color: var(--text-3);
@@ -192,8 +192,8 @@
     }
 
     .topbar-action svg {
-      width: 15px;
-      height: 15px;
+      width: 14px;
+      height: 14px;
       flex-shrink: 0;
       opacity: 0.85;
       transition: transform 0.18s ease;
@@ -1046,10 +1046,11 @@
     }
 
     .prev-next {
-      margin-top: 30px;
-      max-width: 720px;
+      margin-top: 24px;
+      max-width: 680px;
       display: flex;
-      gap: 10px;
+      justify-content: space-between;
+      gap: 12px;
       align-items: stretch;
     }
 
@@ -1059,17 +1060,18 @@
     }
 
     .prev-next a {
-      flex: 1 1 0;
+      flex: 0 1 300px;
+      max-width: 300px;
       min-width: 0;
       text-decoration: none;
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 10px;
       background: var(--bg);
       color: var(--text);
-      padding: 10px 12px;
+      padding: 8px 10px;
       display: flex;
       flex-direction: column;
-      gap: 4px;
+      gap: 2px;
       transition: border-color 0.15s, background 0.15s, color 0.15s;
     }
 
@@ -1082,11 +1084,12 @@
     .prev-next a.next {
       text-align: right;
       align-items: flex-end;
+      margin-left: auto;
     }
 
     .prev-next-label {
-      font-size: 0.68rem;
-      letter-spacing: 0.07em;
+      font-size: 0.64rem;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
       color: var(--text-3);
       font-weight: 700;
@@ -1096,7 +1099,7 @@
     }
 
     .prev-next-title {
-      font-size: 0.85rem;
+      font-size: 0.8rem;
       font-weight: 650;
       color: var(--text-2);
       width: 100%;
@@ -1360,8 +1363,21 @@
       .page-content img { border-radius: 6px; margin: 1.2em 0; }
       .page-content blockquote { padding: 0.7em 1em; margin: 1em 0; }
 
-      .prev-next { flex-direction: column; gap: 8px; }
-      .prev-next a { max-width: 100%; }
+      .prev-next {
+        flex-direction: column;
+        gap: 8px;
+        max-width: 100%;
+      }
+      .prev-next a {
+        flex: 1 1 auto;
+        max-width: 100%;
+        padding: 9px 10px;
+      }
+      .prev-next a.next {
+        margin-left: 0;
+        text-align: left;
+        align-items: flex-start;
+      }
 
       .landing-title { font-size: 1.9rem; }
     }
