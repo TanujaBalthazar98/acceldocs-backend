@@ -294,6 +294,15 @@ def _is_page_visible(
     return _audience_allows_visibility(audience, viewer_scope, visibility)
 
 
+def _effective_page_visibility(
+    page: Page,
+    sections_by_id: dict[int, Section],
+) -> str:
+    section = sections_by_id.get(page.section_id) if page.section_id is not None else None
+    section_visibility = section.visibility if section else None
+    return resolve_effective_visibility(section_visibility, page.visibility_override)
+
+
 def _build_section_node(
     section: Section,
     org_id: int,
@@ -2808,6 +2817,10 @@ async def public_docs_sitemap(org_slug: str, request: Request):
         org = db.query(Organization).filter(Organization.slug == org_slug).first()
         if not org:
             raise HTTPException(status_code=404, detail="Organization not found")
+        sections_by_id = {
+            s.id: s
+            for s in db.query(Section).filter(Section.organization_id == org.id).all()
+        }
 
         pages = (
             db.query(Page)
@@ -2818,6 +2831,11 @@ async def public_docs_sitemap(org_slug: str, request: Request):
             .order_by(Page.updated_at.desc())
             .all()
         )
+        pages = [
+            page
+            for page in pages
+            if _effective_page_visibility(page, sections_by_id) == "public"
+        ]
 
     base = str(request.base_url).rstrip("/")
     docs_base = f"{base}/docs/{org_slug}"
@@ -2837,6 +2855,69 @@ async def public_docs_sitemap(org_slug: str, request: Request):
     xml += "\n".join(urls)
     xml += "\n</urlset>"
 
+    return FastResponse(content=xml, media_type="application/xml")
+
+
+@router.get("/sitemap.xml")
+async def global_sitemap_index(request: Request):
+    """Return a sitemap index that points to per-org public sitemaps."""
+    from fastapi.responses import Response as FastResponse
+    from html import escape as _escape
+    from collections import defaultdict
+
+    with SessionLocal() as db:
+        orgs = [
+            org
+            for org in db.query(Organization).order_by(Organization.id.asc()).all()
+            if org.slug
+        ]
+        if not orgs:
+            xml = (
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                '</sitemapindex>'
+            )
+            return FastResponse(content=xml, media_type="application/xml")
+
+        org_ids = [org.id for org in orgs]
+        sections = (
+            db.query(Section)
+            .filter(Section.organization_id.in_(org_ids))
+            .all()
+        )
+        sections_by_org: dict[int, dict[int, Section]] = defaultdict(dict)
+        for section in sections:
+            sections_by_org[section.organization_id][section.id] = section
+
+        pages = (
+            db.query(Page)
+            .filter(Page.organization_id.in_(org_ids), Page.is_published == True)  # noqa: E712
+            .all()
+        )
+        public_org_ids: set[int] = set()
+        for page in pages:
+            section_lookup = sections_by_org.get(page.organization_id, {})
+            if _effective_page_visibility(page, section_lookup) == "public":
+                public_org_ids.add(page.organization_id)
+
+        sitemap_orgs = [org for org in orgs if org.id in public_org_ids]
+
+    base = str(request.base_url).rstrip("/")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entries = [
+        (
+            "  <sitemap>"
+            f"<loc>{base}/docs/{_escape(org.slug)}/sitemap.xml</loc>"
+            f"<lastmod>{now_iso}</lastmod>"
+            "</sitemap>"
+        )
+        for org in sitemap_orgs
+    ]
+    xml = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    xml += '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+    if entries:
+        xml += "\n".join(entries) + "\n"
+    xml += "</sitemapindex>"
     return FastResponse(content=xml, media_type="application/xml")
 
 
@@ -2861,6 +2942,11 @@ def _org_published_pages_with_sections(org_slug: str, db: Session):
         .order_by(Page.display_order)
         .all()
     )
+    pages = [
+        page
+        for page in pages
+        if _effective_page_visibility(page, sections) == "public"
+    ]
     return org, pages, sections
 
 

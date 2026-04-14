@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import text
 
@@ -106,8 +106,9 @@ async def ready():
 
 
 @router.get("/robots.txt", response_class=PlainTextResponse)
-async def robots_txt():
+async def robots_txt(request: Request):
     """Robots.txt — allow all crawlers on public docs, block dashboard/api."""
+    base = str(request.base_url).rstrip("/")
     return (
         "User-agent: *\n"
         "Allow: /docs/\n"
@@ -116,7 +117,14 @@ async def robots_txt():
         "Disallow: /admin/\n"
         "Disallow: /auth/\n"
         "\n"
-        "Sitemap: https://acceldocs.vercel.app/sitemap.xml\n"
+        "User-agent: Google-Extended\n"
+        "Allow: /docs/\n"
+        "Disallow: /api/\n"
+        "Disallow: /dashboard\n"
+        "Disallow: /admin/\n"
+        "Disallow: /auth/\n"
+        "\n"
+        f"Sitemap: {base}/sitemap.xml\n"
     )
 
 
