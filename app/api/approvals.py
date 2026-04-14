@@ -154,6 +154,25 @@ def _get_scoped_org_ids(db: Session, user_id: int, body: dict | None) -> list[in
     return [selected_org_id] if selected_org_id in user_org_ids else []
 
 
+def _latest_page_submitter(db: Session, page_id: int) -> tuple[int | None, str | None]:
+    """Return (user_id, user_name) for the most recent submit action on a page."""
+    row = (
+        db.query(Approval)
+        .options(joinedload(Approval.user))
+        .filter(
+            Approval.entity_type == "page",
+            Approval.page_id == page_id,
+            Approval.action == "submit",
+        )
+        .order_by(Approval.created_at.desc(), Approval.id.desc())
+        .first()
+    )
+    if not row:
+        return None, None
+    submitter_name = row.user.name if row.user and row.user.name else None
+    return row.user_id, submitter_name
+
+
 def _get_project_ids_for_org_ids(db: Session, org_ids: list[int]) -> list[int]:
     """Return project ids for provided org ids."""
     if not org_ids:
@@ -421,23 +440,30 @@ async def approvals_pending_fn(body: dict, db: Session, user: User | None) -> di
         .order_by(Page.updated_at.desc())
         .all()
     )
-    pending = [
-        {
-            "id": p.id,
-            "entity_type": "page",
-            "title": p.title,
-            "project": p.section.name if p.section else "General",
-            "project_id": p.section_id,
-            "project_name": p.section.name if p.section else None,
-            "version": "default",
-            "slug": p.slug,
-            "owner_id": p.owner_id,
-            "owner_name": p.owner.name if p.owner else None,
-            "updated_at": _iso_utc(p.updated_at),
-            "can_review": role_map.get(p.organization_id, "") in allowed_review_roles,
-        }
-        for p in pages
-    ]
+    pending = []
+    for p in pages:
+        review_submitted_by_id, review_submitted_by_name = _latest_page_submitter(db, p.id)
+        pending.append(
+            {
+                "id": p.id,
+                "entity_type": "page",
+                "title": p.title,
+                "project": p.section.name if p.section else "General",
+                "project_id": p.section_id,
+                "project_name": p.section.name if p.section else None,
+                "version": "default",
+                "slug": p.slug,
+                "owner_id": p.owner_id,
+                "owner_name": p.owner.name if p.owner else None,
+                "updated_at": _iso_utc(p.updated_at),
+                "review_submitted_by_id": review_submitted_by_id,
+                "review_submitted_by_name": review_submitted_by_name,
+                "can_review": (
+                    role_map.get(p.organization_id, "") in allowed_review_roles
+                    and review_submitted_by_id != user.id
+                ),
+            }
+        )
     return {"ok": True, "pending": pending}
 
 
@@ -709,6 +735,12 @@ async def approvals_action_fn(body: dict, db: Session, user: User | None) -> dic
                 return {"ok": False, "error": "Document not found"}
 
     if entity_type == "page":
+        latest_submitter_id, _ = _latest_page_submitter(db, page.id)
+        if latest_submitter_id == actor.id:
+            if action == "approve":
+                return {"ok": False, "error": "You cannot approve your own submission."}
+            return {"ok": False, "error": "You cannot reject your own submission."}
+
         if action == "approve":
             if not page.html_content:
                 return {"ok": False, "error": "Page has no content. Sync first."}

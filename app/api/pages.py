@@ -82,7 +82,35 @@ class PageImport(BaseModel):
     create_drive_doc: bool = False  # If True, also create a Google Doc in the section's Drive folder
 
 
-def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
+def _latest_page_submitter(db: Session, page_id: int) -> tuple[int | None, str | None, str | None]:
+    row = (
+        db.query(Approval)
+        .options()
+        .filter(
+            Approval.entity_type == "page",
+            Approval.page_id == page_id,
+            Approval.action == "submit",
+        )
+        .order_by(Approval.created_at.desc(), Approval.id.desc())
+        .first()
+    )
+    if not row:
+        return None, None, None
+    submitter_name: str | None = None
+    if row.user_id is not None:
+        submitter = db.get(User, row.user_id)
+        submitter_name = submitter.name if submitter and submitter.name else None
+    submitted_at = row.created_at.isoformat() if row.created_at else None
+    return row.user_id, submitter_name, submitted_at
+
+
+def _page_dict(
+    p: Page,
+    include_html: bool = False,
+    *,
+    db: Session | None = None,
+    include_review_meta: bool = False,
+) -> dict[str, Any]:
     d: dict[str, Any] = {
         "id": p.id,
         "organization_id": p.organization_id,
@@ -106,6 +134,17 @@ def _page_dict(p: Page, include_html: bool = False) -> dict[str, Any]:
         "page_custom_css": getattr(p, "page_custom_css", None),
         "featured_image_url": getattr(p, "featured_image_url", None),
     }
+
+    if include_review_meta:
+        review_submitted_by_id: int | None = None
+        review_submitted_by_name: str | None = None
+        review_submitted_at: str | None = None
+        if db is not None and p.status == "review":
+            review_submitted_by_id, review_submitted_by_name, review_submitted_at = _latest_page_submitter(db, p.id)
+        d["review_submitted_by_id"] = review_submitted_by_id
+        d["review_submitted_by_name"] = review_submitted_by_name
+        d["review_submitted_at"] = review_submitted_at
+
     if include_html:
         d["html_content"] = p.html_content
         d["published_html"] = p.published_html
@@ -578,7 +617,12 @@ def list_pages(
     if role.role == "viewer":
         q = q.filter(Page.is_published == True)  # noqa: E712
     pages = q.order_by(Page.section_id.nulls_last(), Page.display_order, Page.title).all()
-    return {"pages": [_page_dict(p) for p in pages]}
+    return {
+        "pages": [
+            _page_dict(p, db=db, include_review_meta=(p.status == "review"))
+            for p in pages
+        ]
+    }
 
 
 @router.post("/import", status_code=201)
@@ -793,10 +837,10 @@ def get_page(
     if role.role == "viewer":
         if not page.is_published:
             raise HTTPException(status_code=403, detail="Page not published")
-        d = _page_dict(page, include_html=True)
+        d = _page_dict(page, include_html=True, db=db, include_review_meta=True)
         d["html_content"] = d.get("published_html") or d.get("html_content")
         return d
-    return _page_dict(page, include_html=True)
+    return _page_dict(page, include_html=True, db=db, include_review_meta=True)
 
 
 @router.patch("/{page_id}")
@@ -1201,6 +1245,9 @@ def approve_page(
         raise HTTPException(status_code=409, detail=f"Page is not in review (status={page.status})")
     if not page.html_content:
         raise HTTPException(status_code=400, detail="Page has no content. Sync first.")
+    latest_submitter_id, _, _ = _latest_page_submitter(db, page.id)
+    if latest_submitter_id == user.id:
+        raise HTTPException(status_code=403, detail="You cannot approve your own submission.")
 
     apply_publish(db, page)
 
@@ -1225,6 +1272,9 @@ def reject_page(
         raise HTTPException(status_code=404, detail="Page not found")
     if page.status != "review":
         raise HTTPException(status_code=409, detail=f"Page is not in review (status={page.status})")
+    latest_submitter_id, _, _ = _latest_page_submitter(db, page.id)
+    if latest_submitter_id == user.id:
+        raise HTTPException(status_code=403, detail="You cannot reject your own submission.")
 
     page.status = "draft"
     db.add(
