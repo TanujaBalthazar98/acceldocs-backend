@@ -162,7 +162,14 @@ app.add_middleware(
     allow_origins=settings.allowed_origins_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Org-Id", "X-Requested-With", "Accept"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Org-Id",
+        "X-Requested-With",
+        "Accept",
+        "X-Google-Token",
+    ],
 )
 
 # Public docs site — no auth prefix, matched first
