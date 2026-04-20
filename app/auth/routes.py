@@ -254,6 +254,8 @@ async def prepare_signup(request: Request, db: Session = Depends(get_db)):
     action = body.get("action")
     if action not in ["join", "create"]:
         raise HTTPException(status_code=400, detail="Action must be 'join' or 'create'")
+    if action == "create" and not settings.allow_workspace_self_create:
+        raise HTTPException(status_code=403, detail="Workspace self-creation is disabled. Request access from an owner/admin.")
 
     # Create signup token with org info
     payload = {
@@ -501,11 +503,20 @@ async def callback(
         raise HTTPException(status_code=500, detail="Token exchange request failed. Please try again.")
 
     if token_resp.status_code != 200:
-        logger.error("Token exchange failed (status %s)", token_resp.status_code)
-        raise HTTPException(
-            status_code=400,
-            detail="Failed to exchange authorization code. Please try signing in again.",
-        )
+        google_error = token_resp.text
+        try:
+            payload = token_resp.json()
+            google_error = payload.get("error_description") or payload.get("error") or token_resp.text
+        except Exception:
+            pass
+
+        logger.error("Token exchange failed (status %s): %s", token_resp.status_code, google_error)
+
+        detail = "Failed to exchange authorization code. Please try signing in again."
+        if (settings.environment or "").lower() != "production" and google_error:
+            detail = f"Failed to exchange authorization code: {google_error}"
+
+        raise HTTPException(status_code=400, detail=detail)
 
     tokens = token_resp.json()
     access_token = tokens.get("access_token")
@@ -561,6 +572,7 @@ async def callback(
     org_role = db.query(OrgRole).filter(OrgRole.user_id == user.id).first()
     organization_id: int | None = None
     pending_join_result: dict | None = None
+    no_account_result: dict | None = None
 
     if signup_info:
         action = signup_info.get("action")
@@ -640,6 +652,9 @@ async def callback(
                 }
 
         elif action == "create":
+            if not settings.allow_workspace_self_create:
+                raise HTTPException(status_code=403, detail="Workspace self-creation is disabled")
+
             org_name = signup_info.get("org_name")
             drive_folder_id = signup_info.get("drive_folder_id")
             inferred_domain = _extract_org_domain(email)
@@ -672,7 +687,8 @@ async def callback(
         organization_id = org_role.organization_id
 
     else:
-        # No signup info — auto-join by email domain, or create default workspace
+        # No explicit signup action.
+        # Keep existing organization memberships only; do not auto-join or auto-create.
         # Self-heal orphan owners from earlier partial signup states.
         owned_org = (
             db.query(Organization)
@@ -702,55 +718,52 @@ async def callback(
             )
             logger.info("Using owned organization %s for user %s", owned_org.name, user.email)
         else:
-            inferred_domain = _extract_org_domain(email)
-            existing_org = None
-            if inferred_domain:
-                existing_org = db.query(Organization).filter(Organization.domain == inferred_domain).first()
-
-            if existing_org:
-                # First member of an ownerless org becomes owner;
-                # otherwise auto-joined teammates get editor role.
-                existing_count = db.query(OrgRole).filter(OrgRole.organization_id == existing_org.id).count()
-                auto_role = "owner" if existing_count == 0 else "editor"
-                org_role = OrgRole(organization_id=existing_org.id, user_id=user.id, role=auto_role)
-                db.add(org_role)
-                db.flush()
-                organization_id = existing_org.id
-                logger.info(
-                    f"Auto-joined {user.email} to organization {existing_org.name} via domain {inferred_domain} as {auto_role}"
+            pending_request = (
+                db.query(JoinRequest)
+                .filter(
+                    JoinRequest.user_id == user.id,
+                    JoinRequest.status == "pending",
                 )
-            else:
-                # Create default workspace — dashboard onboarding will guide setup
-                default_name = f"{user.name}'s Workspace" if user.name else f"{user.email}'s Workspace"
-                claimed_domain = None
-                if inferred_domain:
-                    domain_in_use = db.query(Organization).filter(Organization.domain == inferred_domain).first()
-                    if not domain_in_use:
-                        claimed_domain = inferred_domain
-
-                organization = Organization(
-                    name=default_name,
-                    slug=_unique_org_slug(db, default_name),
-                    domain=claimed_domain,
-                    owner_id=user.id,
-                )
-                db.add(organization)
-                db.flush()
-
-                org_role = OrgRole(organization_id=organization.id, user_id=user.id, role="owner")
-                db.add(org_role)
-                db.flush()
-                organization_id = organization.id
-                logger.info(f"Created default workspace '{default_name}' for user {user.email}")
+                .order_by(JoinRequest.created_at.desc(), JoinRequest.id.desc())
+                .first()
+            )
+            if pending_request:
+                pending_org = db.get(Organization, pending_request.organization_id)
+                if pending_org:
+                    pending_join_result = {
+                        "organization": {
+                            "id": pending_org.id,
+                            "name": pending_org.name,
+                            "slug": pending_org.slug,
+                        },
+                        "request_id": pending_request.id,
+                        "requested_at": pending_request.created_at.isoformat() if pending_request.created_at else None,
+                    }
+            if not pending_join_result:
+                no_account_result = {
+                    "redirect": f"{settings.frontend_url.rstrip('/')}/signup?reason=no_account",
+                    "message": "No workspace membership found. Request access from your workspace owner/admin.",
+                }
 
     # Persist user + org membership atomically before optional token storage.
     # This avoids partial "user-only" records when org assignment fails.
     db.commit()
     db.refresh(user)
 
+    accept_header = (request.headers.get("accept") or "").lower()
+    wants_json = api or ("application/json" in accept_header) or (request.headers.get("x-requested-with") == "XMLHttpRequest")
+
+    if no_account_result:
+        if wants_json:
+            return {
+                "error": "no_account",
+                "message": no_account_result["message"],
+                "detail": no_account_result["message"],
+                "redirect": no_account_result["redirect"],
+            }
+        return RedirectResponse(url=no_account_result["redirect"], status_code=302)
+
     if pending_join_result:
-        accept_header = (request.headers.get("accept") or "").lower()
-        wants_json = api or ("application/json" in accept_header) or (request.headers.get("x-requested-with") == "XMLHttpRequest")
         redirect_target = f"{settings.frontend_url.rstrip('/')}/signup?requested=1&org={pending_join_result['organization']['id']}"
         if wants_json:
             return {

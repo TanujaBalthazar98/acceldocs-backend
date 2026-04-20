@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://localhost:3000,http://localhost:5173,http://localhost:8081,https://localhost:8081,https://acceldocs.vercel.app"
     frontend_url: str = "https://acceldocs.vercel.app"
     auto_create_schema: bool = False
+    allow_workspace_self_create: bool = False
 
     # Security / rate limiting
     rate_limit_enabled: bool = True

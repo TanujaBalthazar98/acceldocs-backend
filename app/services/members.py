@@ -140,16 +140,18 @@ async def remove_project_invitation(body: dict, db: Session, user: User | None) 
 
 
 async def update_member_role(body: dict, db: Session, user: User | None) -> dict:
-    """Change organization member role."""
+    """Change organization member role and keep Drive ACLs in sync."""
     if not user:
         return {"ok": False, "error": "Authentication required"}
 
     try:
         member_id = _int(body.get("memberId"))
-        new_role = body.get("role")
+        new_role = str(body.get("role") or "").strip().lower()
 
         if not member_id or not new_role:
             return {"ok": False, "error": "Member ID and role required"}
+        if new_role not in {"owner", "admin", "editor", "reviewer", "viewer"}:
+            return {"ok": False, "error": "Invalid role"}
 
         # Check if requester is owner/admin
         requester_role = _resolve_org_role(db, user, body)
@@ -177,9 +179,30 @@ async def update_member_role(body: dict, db: Session, user: User | None) -> dict
             return {"ok": False, "error": "Member not found"}
 
         member_role.role = new_role
-        db.commit()
 
-        return {"ok": True}
+        drive_sync = None
+        org = db.get(Organization, requester_role.organization_id)
+        member = db.get(User, member_id)
+        if org and org.drive_folder_id and member:
+            from app.services.drive_acl import sync_member_drive_permission
+
+            drive_sync = await sync_member_drive_permission(
+                db=db,
+                org=org,
+                member_email=member.email,
+                org_role=new_role,
+                preferred_user_ids=[org.owner_id, user.id, member_id],
+            )
+            if not drive_sync.get("ok"):
+                db.rollback()
+                return {
+                    "ok": False,
+                    "error": "Drive permissions could not be updated for this role change",
+                    "drive_sync": drive_sync,
+                }
+
+        db.commit()
+        return {"ok": True, "drive_sync": drive_sync}
 
     except Exception as e:
         db.rollback()
@@ -346,7 +369,7 @@ async def create_join_request(body: dict, db: Session, user: User | None) -> dic
 
 
 async def approve_join_request(body: dict, db: Session, user: User | None) -> dict:
-    """Approve a pending join request — adds the user to the organization."""
+    """Approve a pending join request — adds the user to the organization as viewer."""
     if not user:
         return {"ok": False, "error": "Authentication required"}
 
@@ -368,33 +391,40 @@ async def approve_join_request(body: dict, db: Session, user: User | None) -> di
         if req.status != "pending":
             return {"ok": False, "error": f"Request already {req.status}"}
 
-        # Add user to org as viewer
-        role = str(body.get("role") or "viewer").strip().lower()
-        if role not in {"viewer", "editor", "reviewer", "admin"}:
-            role = "viewer"
+        role = "viewer"
         existing_membership = db.query(OrgRole).filter(
             OrgRole.organization_id == req.organization_id,
             OrgRole.user_id == req.user_id,
         ).first()
+
+        org = db.get(Organization, req.organization_id)
+        member = db.get(User, req.user_id)
+        if not member:
+            return {"ok": False, "error": "User not found for join request"}
+
+        drive_sync = None
+        if org and org.drive_folder_id:
+            from app.services.drive_acl import sync_member_drive_permission
+
+            drive_sync = await sync_member_drive_permission(
+                db=db,
+                org=org,
+                member_email=member.email,
+                org_role=existing_membership.role if existing_membership else role,
+                preferred_user_ids=[org.owner_id, user.id, req.user_id],
+            )
+            if not drive_sync.get("ok"):
+                return {
+                    "ok": False,
+                    "error": "Drive permissions could not be synced. Join request not approved.",
+                    "drive_sync": drive_sync,
+                }
+
         if existing_membership:
             req.status = "approved"
             db.commit()
-            # Still sync Drive access for existing members (may be missing)
-            try:
-                org = db.get(Organization, req.organization_id)
-                member = db.get(User, req.user_id)
-                if org and org.drive_folder_id and member:
-                    from app.services.drive_acl import sync_member_drive_permission
-                    await sync_member_drive_permission(
-                        db=db,
-                        org=org,
-                        member_email=member.email,
-                        org_role=existing_membership.role,
-                        preferred_user_ids=[org.owner_id, user.id, req.user_id],
-                    )
-            except Exception as exc:
-                logger.warning("Drive ACL sync for existing member %s failed: %s", req.user_id, exc)
-            return {"ok": True, "already_member": True}
+            return {"ok": True, "already_member": True, "drive_sync": drive_sync}
+
         org_role = OrgRole(
             organization_id=req.organization_id,
             user_id=req.user_id,
@@ -404,29 +434,7 @@ async def approve_join_request(body: dict, db: Session, user: User | None) -> di
         req.status = "approved"
         db.commit()
 
-        # Grant Drive folder access to the newly approved member
-        drive_sync = None
-        try:
-            org = db.get(Organization, req.organization_id)
-            member = db.get(User, req.user_id)
-            if org and org.drive_folder_id and member:
-                from app.services.drive_acl import sync_member_drive_permission
-                drive_sync = await sync_member_drive_permission(
-                    db=db,
-                    org=org,
-                    member_email=member.email,
-                    org_role=role,
-                    preferred_user_ids=[org.owner_id, user.id, req.user_id],
-                )
-                if not drive_sync.get("ok"):
-                    logger.warning(
-                        "Drive ACL sync after join approval not fully successful for user %s in org %s: %s",
-                        req.user_id, req.organization_id, drive_sync,
-                    )
-        except Exception as exc:
-            logger.warning("Drive ACL sync after join approval failed for user %s: %s", req.user_id, exc)
-
-        return {"ok": True, "drive_sync": drive_sync}
+        return {"ok": True, "role": role, "drive_sync": drive_sync}
 
     except Exception as e:
         db.rollback()
