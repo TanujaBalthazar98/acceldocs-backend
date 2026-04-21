@@ -32,6 +32,7 @@ from app.lib.drive_export import export_html_with_inlined_images
 from app.lib import markdown_import as _markdown_import
 from app.lib.slugify import to_slug as slugify, unique_slug as _make_unique
 from app.models import GoogleToken, OrgRole, Organization, Page, Section, User
+from app.services.drive_acl import sync_org_drive_permissions
 from app.services.encryption import get_encryption_service
 from app.services.drive import google_drive_handler
 
@@ -198,6 +199,10 @@ class EnsureDocAccessRequest(BaseModel):
     doc_id: str
 
 
+class RootFolderUpdateRequest(BaseModel):
+    folder_id: str
+
+
 # ---------------------------------------------------------------------------
 # Internal scan logic
 # ---------------------------------------------------------------------------
@@ -246,6 +251,22 @@ def _infer_target_type(section: Section) -> Literal["product", "version", "tab",
     if (section.section_type or "section") == "version":
         return "version"
     if (section.section_type or "section") == "tab":
+        return "tab"
+    return "section"
+
+
+def _default_child_section_type_for_target(
+    target_type: Literal["product", "version", "tab", "section"] | None,
+    depth: int,
+) -> Literal["tab", "section"]:
+    """Infer default section type for imported folders by destination context.
+
+    Rules:
+    - Import into product/version: first folder level becomes tab
+    - Import into tab/section: folders become section
+    - Deeper levels always become section
+    """
+    if depth == 0 and target_type in ("product", "version"):
         return "tab"
     return "section"
 
@@ -308,6 +329,7 @@ def _upsert_target_import_root_section(
     *,
     org_id: int,
     target_section: Section,
+    target_type: Literal["product", "version", "tab", "section"],
     folder_id: str,
     folder_name: str,
     db: Session,
@@ -320,6 +342,7 @@ def _upsert_target_import_root_section(
     """
     clean_name = _clean_name(folder_name) or "Imported"
     target_name = (target_section.name or "").strip().lower()
+    wrapper_section_type = _default_child_section_type_for_target(target_type, depth=0)
 
     # Importing the same folder already bound to target section -> no wrapper.
     if target_section.drive_folder_id and target_section.drive_folder_id == folder_id:
@@ -336,10 +359,13 @@ def _upsert_target_import_root_section(
     if existing:
         parent_changed = existing.parent_id != target_section.id
         name_changed = existing.name != clean_name
+        type_changed = (existing.section_type or "section") != wrapper_section_type
         if parent_changed:
             existing.parent_id = target_section.id
         if name_changed:
             existing.name = clean_name
+        if type_changed:
+            existing.section_type = wrapper_section_type
         if parent_changed or name_changed:
             existing.slug = _unique_section_slug(
                 clean_name,
@@ -360,7 +386,7 @@ def _upsert_target_import_root_section(
         parent_id=target_section.id,
         name=clean_name,
         slug=_unique_section_slug(clean_name, org_id, target_section.id, db),
-        section_type="section",
+        section_type=wrapper_section_type,
         visibility=target_section.visibility or "public",
         drive_folder_id=folder_id,
         display_order=0,
@@ -847,6 +873,7 @@ def _scan_folder(
     user_id: int,
     db: Session,
     depth: int = 0,
+    target_type: Literal["product", "version", "tab", "section"] | None = None,
     inherited_visibility: str | None = None,
 ) -> dict[str, int]:
     """Recursively scan a Drive folder, creating Sections and Pages.
@@ -874,12 +901,16 @@ def _scan_folder(
             ).first()
 
             section_visibility = inherited_visibility or "public"
+            inferred_type = _default_child_section_type_for_target(target_type, depth=depth)
 
             if existing_section:
                 existing_section.parent_id = parent_section_id
                 existing_section.name = _clean_name(name)
                 existing_section.display_order = i
                 existing_section.is_published = True
+                if (existing_section.section_type or "section") == "section" and inferred_type == "tab":
+                    existing_section.section_type = "tab"
+                    counts["updated"] += 1
                 if inherited_visibility:
                     existing_section.visibility = section_visibility
                 section = existing_section
@@ -890,7 +921,7 @@ def _scan_folder(
                     parent_id=parent_section_id,
                     name=_clean_name(name),
                     slug=slug,
-                    section_type="section",
+                    section_type=inferred_type,
                     visibility=section_visibility,
                     drive_folder_id=item_id,
                     display_order=i,
@@ -908,6 +939,7 @@ def _scan_folder(
                 user_id,
                 db,
                 depth + 1,
+                target_type=target_type,
                 inherited_visibility=section.visibility or section_visibility,
             )
             counts["sections"] += sub["sections"]
@@ -991,6 +1023,80 @@ def drive_status(
     }
 
 
+@router.patch("/root-folder")
+async def update_root_folder(
+    body: RootFolderUpdateRequest,
+    x_org_id: int | None = Header(default=None, alias="X-Org-Id"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Update workspace Drive root folder (owner-only)."""
+    org_role = _resolve_org_role(user, db, x_org_id)
+    if org_role.role != "owner":
+        raise HTTPException(status_code=403, detail="Only workspace owner can change Drive root folder")
+
+    folder_id = (body.folder_id or "").strip()
+    if not folder_id:
+        raise HTTPException(status_code=400, detail="Drive folder ID is required")
+
+    org = db.get(Organization, org_role.organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    creds = await get_drive_credentials(user, org.id, db)
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    try:
+        folder_meta = service.files().get(
+            fileId=folder_id,
+            fields="id,name,mimeType",
+            supportsAllDrives=True,
+        ).execute()
+    except HttpError as e:
+        status = e.resp.status
+        if status == 404:
+            raise HTTPException(status_code=404, detail="drive_file_not_found")
+        elif status == 403:
+            raise HTTPException(status_code=403, detail="drive_permission_denied")
+        elif status == 429:
+            raise HTTPException(status_code=429, detail="drive_quota_exceeded")
+        else:
+            raise HTTPException(status_code=502, detail=f"drive_api_error:{status}")
+    except TransportError:
+        raise HTTPException(status_code=503, detail="drive_network_error")
+
+    if folder_meta.get("mimeType") != DRIVE_FOLDER_MIME:
+        raise HTTPException(status_code=400, detail="Provided ID is not a Drive folder")
+
+    previous_root = org.drive_folder_id
+    if previous_root == folder_id:
+        return {
+            "ok": True,
+            "drive_folder_id": org.drive_folder_id,
+            "previous_drive_folder_id": previous_root,
+            "folder_name": folder_meta.get("name"),
+            "acl_sync": {"ok": True, "status": "unchanged"},
+        }
+
+    org.drive_folder_id = folder_id
+    db.commit()
+    db.refresh(org)
+
+    acl_sync = await sync_org_drive_permissions(
+        db=db,
+        org=org,
+        preferred_user_ids=[user.id],
+    )
+
+    return {
+        "ok": True,
+        "drive_folder_id": org.drive_folder_id,
+        "previous_drive_folder_id": previous_root,
+        "folder_name": folder_meta.get("name"),
+        "acl_sync": acl_sync,
+    }
+
+
 @router.post("/ensure-doc-access")
 async def ensure_doc_access(
     body: EnsureDocAccessRequest,
@@ -1042,6 +1148,7 @@ async def scan_folder(
         section_id=body.parent_section_id,
         expected_type=body.target_type,
     )
+    effective_target_type = _infer_target_type(target_section) if target_section is not None else None
 
     # Root folder is workspace-level configuration and must stay owner/admin only.
     if body.parent_section_id is None and (not org or not org.drive_folder_id):
@@ -1121,6 +1228,7 @@ async def scan_folder(
         import_root = _upsert_target_import_root_section(
             org_id=org_id,
             target_section=target_section,
+            target_type=effective_target_type or "section",
             folder_id=body.folder_id,
             folder_name=folder_meta.get("name") or "Imported",
             db=db,
@@ -1137,6 +1245,7 @@ async def scan_folder(
         org_id=org_id,
         user_id=user.id,
         db=db,
+        target_type=effective_target_type,
         inherited_visibility=inherited_visibility,
     )
 
@@ -1337,6 +1446,7 @@ async def import_local(
         org_id=org_id,
         user_id=user.id,
         db=db,
+        target_type=effective_target_type,
     )
 
     # Backfill html_content on Pages created from markdown imports.

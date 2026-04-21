@@ -66,6 +66,60 @@ def test_create_update_list_section_type_tab(client, db):
     assert sections[0]["visibility"] == "internal"
 
 
+def test_create_product_requires_workspace_root_folder(client, db):
+    user = User(google_id="u-root-required-1", email="root-required@example.com", name="Owner", role="owner")
+    db.add(user)
+    db.flush()
+
+    org = Organization(
+        name="Root Required Org",
+        slug="root-required-org",
+        domain="root-required.example.com",
+        hierarchy_mode="product",
+        drive_folder_id=None,
+    )
+    db.add(org)
+    db.flush()
+    db.add(OrgRole(organization_id=org.id, user_id=user.id, role="owner"))
+    db.commit()
+
+    response = client.post(
+        "/api/sections",
+        json={"name": "ADOC", "section_type": "section"},
+        headers=_auth_header(user.id, user.email),
+    )
+    assert response.status_code == 400
+    assert "Workspace Drive root folder must be configured before creating a product" in response.json().get("detail", "")
+
+
+def test_create_top_level_section_allowed_in_flat_mode_without_root_folder(client, db):
+    user = User(google_id="u-flat-no-root", email="flat-no-root@example.com", name="Owner", role="owner")
+    db.add(user)
+    db.flush()
+
+    org = Organization(
+        name="Flat Org",
+        slug="flat-org",
+        domain="flat.example.com",
+        hierarchy_mode="flat",
+        drive_folder_id=None,
+    )
+    db.add(org)
+    db.flush()
+    db.add(OrgRole(organization_id=org.id, user_id=user.id, role="owner"))
+    db.commit()
+
+    response = client.post(
+        "/api/sections",
+        json={"name": "General", "section_type": "section"},
+        headers=_auth_header(user.id, user.email),
+    )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["name"] == "General"
+    assert payload["parent_id"] is None
+
+
 def test_create_version_clones_product_content(client, db, monkeypatch):
     user = User(google_id="u-version-1", email="version-owner@example.com", name="Version Owner", role="owner")
     db.add(user)

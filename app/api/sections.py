@@ -356,6 +356,24 @@ async def create_section(
     db: Session = Depends(get_db),
 ) -> dict:
     org_id = _require_editor(user, db, x_org_id)
+    org = db.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Product hierarchy requires a configured Drive root before creating
+    # a top-level product (section with no parent).
+    hierarchy_mode = (org.hierarchy_mode or "product").strip().lower()
+    if (
+        body.parent_id is None
+        and body.section_type == "section"
+        and hierarchy_mode != "flat"
+        and not (org.drive_folder_id or "").strip()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Workspace Drive root folder must be configured before creating a product",
+        )
+
     if body.section_type == "version":
         _validate_version_parent(org_id=org_id, parent_id=body.parent_id, db=db)
 
@@ -395,8 +413,7 @@ async def create_section(
                 parent_sec = db.get(Section, body.parent_id)
                 parent_drive_id = parent_sec.drive_folder_id if parent_sec else None
             if not parent_drive_id:
-                org = db.get(Organization, org_id)
-                parent_drive_id = org.drive_folder_id if org else None
+                parent_drive_id = org.drive_folder_id
             if strict_clone_mode and not parent_drive_id:
                 raise HTTPException(status_code=400, detail="Drive root folder is required to create a version")
 
@@ -472,8 +489,7 @@ async def create_section(
                 parent_sec = db.get(Section, body.parent_id)
                 parent_drive_id = parent_sec.drive_folder_id if parent_sec else None
             if not parent_drive_id:
-                org = db.get(Organization, org_id)
-                parent_drive_id = org.drive_folder_id if org else None
+                parent_drive_id = org.drive_folder_id
 
             folder_id = _create_drive_folder(service, section.name, parent_drive_id)
             section.drive_folder_id = folder_id
