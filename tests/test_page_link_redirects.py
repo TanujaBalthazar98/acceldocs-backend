@@ -263,3 +263,123 @@ def test_canonical_page_route_redirects_deleted_page_to_landing(client, db, monk
     resp = client.get("/docs/deleted-org/p/9991/old-deleted-page", follow_redirects=False)
     assert resp.status_code == 307
     assert resp.headers["location"] == "/docs/deleted-org"
+
+
+def test_page_id_route_redirects_to_hierarchical_route(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+
+    org = Organization(name="Hierarchy Org", slug="hier-org", domain="hier.example.com")
+    db.add(org)
+    db.flush()
+
+    product = Section(
+        organization_id=org.id,
+        name="ADOC",
+        slug="adoc",
+        section_type="product",
+        visibility="public",
+        is_published=True,
+    )
+    db.add(product)
+    db.flush()
+
+    tab = Section(
+        organization_id=org.id,
+        parent_id=product.id,
+        name="Documentation",
+        slug="documentation",
+        section_type="tab",
+        visibility="public",
+        is_published=True,
+    )
+    db.add(tab)
+    db.flush()
+
+    section = Section(
+        organization_id=org.id,
+        parent_id=tab.id,
+        name="Getting Started",
+        slug="getting-started",
+        section_type="section",
+        visibility="public",
+        is_published=True,
+    )
+    db.add(section)
+    db.flush()
+
+    page = Page(
+        organization_id=org.id,
+        section_id=section.id,
+        google_doc_id="doc-hier",
+        title="Architecture",
+        slug="architecture-2",
+        published_html="<h1>Architecture</h1>",
+        is_published=True,
+        status="published",
+    )
+    db.add(page)
+    db.commit()
+
+    resp = client.get(f"/docs/hier-org/p/{page.id}/{page.slug}", follow_redirects=False)
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "/docs/hier-org/adoc/documentation/architecture-2"
+
+
+def test_hierarchical_route_renders_page(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+
+    org = Organization(name="Hierarchy Render Org", slug="hier-render-org", domain="render.example.com")
+    db.add(org)
+    db.flush()
+
+    product = Section(
+        organization_id=org.id,
+        name="ADOC",
+        slug="adoc",
+        section_type="product",
+        visibility="public",
+        is_published=True,
+    )
+    db.add(product)
+    db.flush()
+
+    tab = Section(
+        organization_id=org.id,
+        parent_id=product.id,
+        name="Documentation",
+        slug="documentation",
+        section_type="tab",
+        visibility="public",
+        is_published=True,
+    )
+    db.add(tab)
+    db.flush()
+
+    section = Section(
+        organization_id=org.id,
+        parent_id=tab.id,
+        name="Intro",
+        slug="intro",
+        section_type="section",
+        visibility="public",
+        is_published=True,
+    )
+    db.add(section)
+    db.flush()
+
+    page = Page(
+        organization_id=org.id,
+        section_id=section.id,
+        google_doc_id="doc-hier-render",
+        title="Introduction",
+        slug="introduction",
+        published_html="<h1>Introduction</h1><p>Body</p>",
+        is_published=True,
+        status="published",
+    )
+    db.add(page)
+    db.commit()
+
+    resp = client.get("/docs/hier-render-org/adoc/documentation/introduction")
+    assert resp.status_code == 200
+    assert "Introduction" in resp.text
