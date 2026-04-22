@@ -52,7 +52,7 @@ def test_public_page_rewrites_google_doc_and_legacy_links(client, db, monkeypatc
     resp = client.get("/docs/link-org/source-page")
     assert resp.status_code == 200
     html = resp.text
-    canonical = f"/docs/link-org/{target.slug}"
+    canonical = f"/docs/link-org/{section.slug}/documentation/{target.slug}"
     assert canonical in html
 
 
@@ -130,8 +130,8 @@ def test_public_page_rewrites_cross_visibility_links_to_correct_docs_root(client
     resp = client.get("/docs/cross-vis-org/public-source")
     assert resp.status_code == 200
     html = resp.text
-    assert f"/internal-docs/cross-vis-org/{internal_target.slug}" in html
-    assert f"/external-docs/cross-vis-org/{external_target.slug}" in html
+    assert f"/internal-docs/cross-vis-org/{internal_section.slug}/documentation/{internal_target.slug}" in html
+    assert f"/external-docs/cross-vis-org/{external_section.slug}/documentation/{external_target.slug}" in html
 
 
 def test_internal_link_target_shows_access_gate_instead_of_raw_error(client, db, monkeypatch):
@@ -185,7 +185,7 @@ def test_internal_link_target_shows_access_gate_instead_of_raw_error(client, db,
 
     source_resp = client.get("/docs/gate-org/source")
     assert source_resp.status_code == 200
-    expected_internal_link = f"/internal-docs/gate-org/{internal_target.slug}"
+    expected_internal_link = f"/internal-docs/gate-org/{internal_section.slug}/documentation/{internal_target.slug}"
     assert expected_internal_link in source_resp.text
 
     target_resp = client.get(expected_internal_link)
@@ -238,7 +238,7 @@ def test_legacy_slug_route_redirects_via_page_redirect(client, db, monkeypatch):
 
     resp = client.get("/docs/redirect-org/old-slug", follow_redirects=False)
     assert resp.status_code == 307
-    assert resp.headers["location"] == f"/docs/redirect-org/{page.slug}"
+    assert resp.headers["location"] == f"/docs/redirect-org/{section.slug}/documentation/{page.slug}"
 
 
 def test_canonical_page_route_redirects_deleted_page_to_landing(client, db, monkeypatch):

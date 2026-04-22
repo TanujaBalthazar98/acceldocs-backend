@@ -4,8 +4,8 @@ Routes:
   GET /docs/{org_slug}                  — landing page (section cards)
   GET /external-docs/{org_slug}         — invite-only external docs landing
   GET /internal-docs/{org_slug}         — org-only internal docs landing
-  GET /docs/{org_slug}/{page_slug}      — single page view
-  GET /docs/{org_slug}/{section_slug}/{page_slug}  — page inside explicit section
+  GET /docs/{org_slug}/{page_slug}      — legacy single page view (redirects)
+  GET /docs/{org_slug}/{product_slug}/{tab_slug}/{page_slug}  — hierarchical page view
 """
 
 import logging
@@ -987,6 +987,79 @@ def _page_fallback_href(
     return f"{docs_root}/{org_slug}/p/{page.id}/{page.slug}{suffix}"
 
 
+def _normalize_tab_slug_for_url(tab_slug: str | None) -> str:
+    normalized = (tab_slug or "").strip().lower()
+    if normalized in {"", "__docs", "docs", "documentation"}:
+        return "documentation"
+    return normalized
+
+
+def _section_chain(section_id: int | None, sections_by_id: dict[int, Section]) -> list[Section]:
+    chain: list[Section] = []
+    current_id = section_id
+    seen: set[int] = set()
+
+    while current_id and current_id not in seen:
+        seen.add(current_id)
+        section = sections_by_id.get(current_id)
+        if not section:
+            break
+        chain.append(section)
+        current_id = section.parent_id
+
+    chain.reverse()
+    return chain
+
+
+def _page_route_location(page: Page, sections_by_id: dict[int, Section]) -> dict[str, str | None]:
+    chain = _section_chain(page.section_id, sections_by_id)
+    product_slug: str | None = None
+    tab_slug: str | None = None
+    version_slug: str | None = None
+
+    if chain:
+        product_slug = chain[0].slug
+        for section in chain:
+            section_type = (section.section_type or "section").strip().lower()
+            if section_type == "version" and not version_slug:
+                version_slug = section.slug
+            if section_type == "tab" and not tab_slug:
+                tab_slug = section.slug
+
+    return {
+        "product_slug": (product_slug or "").strip().lower() or None,
+        "tab_slug": _normalize_tab_slug_for_url(tab_slug),
+        "version_slug": (version_slug or "").strip().lower() or None,
+    }
+
+
+def _hierarchical_page_href(
+    page: Page,
+    *,
+    org_slug: str,
+    docs_root: str,
+    sections_by_id: dict[int, Section],
+    audience_for_links: str | None = None,
+) -> str:
+    suffix = _audience_suffix_for_links(docs_root, audience_for_links)
+    route_meta = _page_route_location(page, sections_by_id)
+    product_slug = route_meta.get("product_slug")
+    tab_slug = route_meta.get("tab_slug") or "documentation"
+
+    if not product_slug:
+        return _page_fallback_href(
+            page,
+            org_slug=org_slug,
+            docs_root=docs_root,
+            audience_for_links=audience_for_links,
+        )
+
+    return (
+        f"{docs_root}/{quote(org_slug)}/{quote(product_slug)}/{quote(tab_slug)}"
+        f"/{quote(page.slug)}{suffix}"
+    )
+
+
 def _landing_href(*, org_slug: str, docs_root: str, audience_for_links: str | None = None) -> str:
     suffix = _audience_suffix_for_links(docs_root, audience_for_links)
     return f"{docs_root}/{org_slug}{suffix}"
@@ -1025,10 +1098,10 @@ def _rewrite_page_links(
         .order_by(Page.id.asc())
         .all()
     )
-    section_ids = {p.section_id for p in pages if p.section_id is not None}
     sections_by_id = {
-        s.id: s for s in db.query(Section).filter(Section.id.in_(section_ids)).all()
-    } if section_ids else {}
+        section.id: section
+        for section in db.query(Section).filter(Section.organization_id == org.id).all()
+    }
     page_visibility: dict[int, str] = {}
     for p in pages:
         section = sections_by_id.get(p.section_id) if p.section_id else None
@@ -1106,10 +1179,11 @@ def _rewrite_page_links(
 
         target_visibility = page_visibility.get(target_page.id, "public")
         target_docs_root = _docs_root_for_visibility(target_visibility)
-        rewritten = _canonical_page_href(
+        rewritten = _hierarchical_page_href(
             target_page,
             org_slug=org_slug,
             docs_root=target_docs_root,
+            sections_by_id=sections_by_id,
             audience_for_links=audience_for_links if target_docs_root == docs_root else None,
         )
         if fragment:
@@ -1189,10 +1263,15 @@ def _resolve_redirect_target_url(
                 viewer_scope,
                 audience,
             ):
-                return _canonical_page_href(
+                sections_by_id = {
+                    section.id: section
+                    for section in db.query(Section).filter(Section.organization_id == org.id).all()
+                }
+                return _hierarchical_page_href(
                     target_page,
                     org_slug=org_slug,
                     docs_root=docs_root,
+                    sections_by_id=sections_by_id,
                     audience_for_links=audience_for_links,
                 )
 
@@ -1841,6 +1920,7 @@ def _render_docs_page(
     audience_for_links: str | None = None,
     docs_root: str = "/docs",
     version_slug: str | None = None,
+    sections_by_id: dict[int, Section] | None = None,
     *,
     request: Request | None = None,
 ) -> HTMLResponse:
@@ -1911,7 +1991,19 @@ def _render_docs_page(
     )
     # SEO context
     _org_s = org.slug or str(org.id)
-    ctx["canonical_url"] = f"{_base}{docs_root}/{_org_s}/p/{page.id}/{page.slug}"
+    if sections_by_id is None:
+        sections_by_id = {
+            section.id: section
+            for section in db.query(Section).filter(Section.organization_id == org.id).all()
+        }
+    canonical_path = _hierarchical_page_href(
+        page,
+        org_slug=_org_s,
+        docs_root=docs_root,
+        sections_by_id=sections_by_id,
+        audience_for_links=audience_for_links,
+    )
+    ctx["canonical_url"] = f"{_base}{canonical_path}"
     ctx["meta_description"] = _html_to_text_snippet(page.published_html or page.html_content or "", 160) or f"{page.title} documentation"
     ctx["og_image"] = getattr(page, "featured_image_url", None) or org.logo_url or ""
     ctx["page_published_at"] = page.created_at.isoformat() if page.created_at else ""
@@ -1937,10 +2029,15 @@ def _render_docs_page(
             product_node = next((node for node in all_top_nodes if node.get("id") == product_id), None)
             base_page_id, base_page_slug = _find_first_page_excluding_versions(product_node)
     if base_page_id and base_page_slug:
-        ctx["base_version_href"] = (
-            f"{docs_root}/{org.slug or org.id}/{base_page_slug}"
-            f"{_audience_suffix_for_links(docs_root, audience_for_links)}"
-        )
+        base_page = db.get(Page, base_page_id)
+        if base_page:
+            ctx["base_version_href"] = _hierarchical_page_href(
+                base_page,
+                org_slug=org.slug or str(org.id),
+                docs_root=docs_root,
+                sections_by_id=sections_by_id,
+                audience_for_links=audience_for_links,
+            )
         ctx["base_version_label"] = nav_meta["product_header"].get("name") or "Original"
     ctx["page_last_updated"] = page_last_updated
     ctx["feedback_summary"] = feedback_summary
@@ -2077,26 +2174,40 @@ def _docs_page_by_id_impl(
             section.id: section
             for section in db.query(Section).filter(Section.id.in_(section_ids)).all()
         } if section_ids else {}
-        visible_same_slug_count = 0
+        all_sections_by_id = {
+            section.id: section
+            for section in db.query(Section).filter(Section.organization_id == org.id).all()
+        }
+        page_route_meta = _page_route_location(page, all_sections_by_id)
+        visible_same_route_count = 0
         for candidate in visible_with_same_slug:
             candidate_section = candidate_sections_by_id.get(candidate.section_id) if candidate.section_id else None
-            if _is_page_visible(
+            if not _is_page_visible(
                 candidate,
                 candidate_section.visibility if candidate_section else "public",
                 viewer_scope,
                 effective_audience,
             ):
-                visible_same_slug_count += 1
-                if visible_same_slug_count > 1:
+                continue
+            candidate_route_meta = _page_route_location(candidate, all_sections_by_id)
+            if (
+                candidate_route_meta.get("product_slug") == page_route_meta.get("product_slug")
+                and candidate_route_meta.get("tab_slug") == page_route_meta.get("tab_slug")
+            ):
+                visible_same_route_count += 1
+                if visible_same_route_count > 1:
                     break
-        if visible_same_slug_count <= 1:
+
+        if visible_same_route_count <= 1:
+            canonical_href = _hierarchical_page_href(
+                page,
+                org_slug=org_slug,
+                docs_root=docs_root,
+                sections_by_id=all_sections_by_id,
+                audience_for_links=template_audience,
+            )
             return RedirectResponse(
-                url=_canonical_page_href(
-                    page,
-                    org_slug=org_slug,
-                    docs_root=docs_root,
-                    audience_for_links=template_audience,
-                ),
+                url=canonical_href,
                 status_code=307,
             )
         return _render_docs_page(
@@ -2109,6 +2220,7 @@ def _docs_page_by_id_impl(
             audience_for_links=template_audience,
             docs_root=docs_root,
             version_slug=version,
+            sections_by_id=all_sections_by_id,
             request=request,
         )
     finally:
@@ -2255,6 +2367,10 @@ def _docs_page_impl(
         sections_by_id = {
             s.id: s for s in db.query(Section).filter(Section.id.in_(section_ids)).all()
         } if section_ids else {}
+        all_sections_by_id = {
+            section.id: section
+            for section in db.query(Section).filter(Section.organization_id == org.id).all()
+        }
         visible_pages = [
             p
             for p in pages
@@ -2279,6 +2395,122 @@ def _docs_page_impl(
                 ),
                 status_code=307,
             )
+        canonical_href = _hierarchical_page_href(
+            page,
+            org_slug=org_slug,
+            docs_root=docs_root,
+            sections_by_id=all_sections_by_id,
+            audience_for_links=template_audience,
+        )
+        return RedirectResponse(url=canonical_href, status_code=307)
+    finally:
+        _close_db(db)
+
+
+def _docs_page_hierarchy_impl(
+    org_slug: str,
+    product_slug: str,
+    tab_slug: str,
+    page_slug: str,
+    request: Request,
+    version: str | None,
+    audience: str | None,
+    docs_root: str,
+    access_scope: str | None,
+) -> HTMLResponse:
+    db = _get_db()
+    try:
+        org = _lookup_org(org_slug, db)
+        request_user = _resolve_request_user_with_optional_query_token(
+            request,
+            db,
+            allow_query_token=access_scope is not None,
+        )
+        viewer_scope = build_viewer_scope(
+            db,
+            org.id,
+            request_user,
+        )
+        if access_scope == "internal":
+            if not viewer_scope.is_org_member:
+                return _access_required_html(
+                    org=org,
+                    docs_root=docs_root,
+                    required_scope="internal",
+                    request=request,
+                )
+            cookie_redirect = _bootstrap_docs_cookie_redirect_if_needed(request)
+            if cookie_redirect is not None:
+                return cookie_redirect
+        elif access_scope == "external":
+            if not (viewer_scope.is_org_member or viewer_scope.is_external_allowed):
+                return _access_required_html(
+                    org=org,
+                    docs_root=docs_root,
+                    required_scope="external",
+                    request=request,
+                )
+            cookie_redirect = _bootstrap_docs_cookie_redirect_if_needed(request)
+            if cookie_redirect is not None:
+                return cookie_redirect
+
+        effective_audience, template_audience = _resolve_route_audience(audience, docs_root)
+        normalized_product_slug = (product_slug or "").strip().lower()
+        normalized_tab_slug = _normalize_tab_slug_for_url(tab_slug)
+        normalized_version_slug = (version or "").strip().lower() or None
+
+        pages = (
+            db.query(Page)
+            .filter(
+                Page.organization_id == org.id,
+                Page.slug == page_slug,
+                Page.is_published == True,
+            )
+            .order_by(Page.id.asc())
+            .all()
+        )
+        if not pages:
+            raise HTTPException(status_code=404, detail="Page not found or not published")
+
+        sections_by_id = {
+            section.id: section
+            for section in db.query(Section).filter(Section.organization_id == org.id).all()
+        }
+
+        matched_pages: list[Page] = []
+        for page in pages:
+            section = sections_by_id.get(page.section_id) if page.section_id else None
+            if not _is_page_visible(
+                page,
+                section.visibility if section else "public",
+                viewer_scope,
+                effective_audience,
+            ):
+                continue
+            route_meta = _page_route_location(page, sections_by_id)
+            if route_meta.get("product_slug") != normalized_product_slug:
+                continue
+            if route_meta.get("tab_slug") != normalized_tab_slug:
+                continue
+            if normalized_version_slug and route_meta.get("version_slug") != normalized_version_slug:
+                continue
+            matched_pages.append(page)
+
+        if not matched_pages:
+            raise HTTPException(status_code=404, detail="Page not found or not published")
+
+        if len(matched_pages) > 1:
+            return RedirectResponse(
+                url=_page_fallback_href(
+                    matched_pages[0],
+                    org_slug=org_slug,
+                    docs_root=docs_root,
+                    audience_for_links=template_audience,
+                ),
+                status_code=307,
+            )
+
+        page = matched_pages[0]
         return _render_docs_page(
             org,
             page,
@@ -2289,10 +2521,78 @@ def _docs_page_impl(
             audience_for_links=template_audience,
             docs_root=docs_root,
             version_slug=version,
+            sections_by_id=sections_by_id,
             request=request,
         )
     finally:
         _close_db(db)
+
+
+@router.get("/docs/{org_slug}/{product_slug}/{tab_slug}/{page_slug}", response_class=HTMLResponse)
+def docs_page_hierarchy(
+    org_slug: str,
+    product_slug: str,
+    tab_slug: str,
+    page_slug: str,
+    request: Request,
+    version: str | None = Query(default=None),
+    audience: str | None = Query(default=None),
+) -> HTMLResponse:
+    return _docs_page_hierarchy_impl(
+        org_slug=org_slug,
+        product_slug=product_slug,
+        tab_slug=tab_slug,
+        page_slug=page_slug,
+        request=request,
+        version=version,
+        audience=audience,
+        docs_root="/docs",
+        access_scope=None,
+    )
+
+
+@router.get("/external-docs/{org_slug}/{product_slug}/{tab_slug}/{page_slug}", response_class=HTMLResponse)
+def external_docs_page_hierarchy(
+    org_slug: str,
+    product_slug: str,
+    tab_slug: str,
+    page_slug: str,
+    request: Request,
+    version: str | None = Query(default=None),
+) -> HTMLResponse:
+    return _docs_page_hierarchy_impl(
+        org_slug=org_slug,
+        product_slug=product_slug,
+        tab_slug=tab_slug,
+        page_slug=page_slug,
+        request=request,
+        version=version,
+        audience="external",
+        docs_root="/external-docs",
+        access_scope="external",
+    )
+
+
+@router.get("/internal-docs/{org_slug}/{product_slug}/{tab_slug}/{page_slug}", response_class=HTMLResponse)
+def internal_docs_page_hierarchy(
+    org_slug: str,
+    product_slug: str,
+    tab_slug: str,
+    page_slug: str,
+    request: Request,
+    version: str | None = Query(default=None),
+) -> HTMLResponse:
+    return _docs_page_hierarchy_impl(
+        org_slug=org_slug,
+        product_slug=product_slug,
+        tab_slug=tab_slug,
+        page_slug=page_slug,
+        request=request,
+        version=version,
+        audience="internal",
+        docs_root="/internal-docs",
+        access_scope="internal",
+    )
 
 
 @router.get("/docs/{org_slug}/{page_slug}", response_class=HTMLResponse)

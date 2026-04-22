@@ -37,8 +37,8 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  {% set _heading_font = font_heading or "Space Grotesk" %}
-  {% set _body_font = font_body or "Space Grotesk" %}
+  {% set _heading_font = font_heading or "Plus Jakarta Sans" %}
+  {% set _body_font = font_body or "Plus Jakarta Sans" %}
   {% set _font_families = [_heading_font] %}
   {% if _body_font != _heading_font %}{% set _font_families = [_heading_font, _body_font] %}{% endif %}
   <link href="https://fonts.googleapis.com/css2?{% for f in _font_families %}family={{ f | replace(' ', '+') }}:wght@400;500;600;700{% if not loop.last %}&{% endif %}{% endfor %}&display=swap" rel="stylesheet" />
