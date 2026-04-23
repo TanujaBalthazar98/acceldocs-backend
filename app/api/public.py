@@ -9,10 +9,12 @@ Routes:
 """
 
 import logging
+import json
 import re
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote, urlencode, urlparse
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -50,6 +52,12 @@ _GOOGLE_DOC_URL_RE = re.compile(r"docs\.google\.com/document/d/([a-zA-Z0-9_-]+)"
 _CANONICAL_DOCS_PATH_RE = re.compile(r"^/(docs|internal-docs|external-docs)/([^/]+)/p/(\d+)/([^/?#]+)$")
 _LEGACY_DOCS_PATH_RE = re.compile(r"^/(docs|internal-docs|external-docs)/([^/]+)/([^/?#]+)$")
 _HREF_ATTR_RE = re.compile(r'href=(["\'])(.*?)\1', re.IGNORECASE)
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+_MCP_PROTOCOL_VERSION = "2025-03-26"
+_MCP_SERVER_VERSION = "1.0.0"
+_MCP_TOOL_SEARCH = "search_published_docs"
+_MCP_TOOL_GET = "get_published_doc"
 
 # Template engine — load from app/templates/
 _TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
@@ -3250,6 +3258,379 @@ def _org_published_pages_with_sections(org_slug: str, db: Session):
     return org, pages, sections
 
 
+def _mcp_text_from_html(html: str | None, *, max_chars: int = 120_000) -> str:
+    return _html_to_text_snippet(html or "", max_chars=max_chars).strip()
+
+
+def _mcp_org_guard(org: Organization) -> None:
+    if org.mcp_enabled is False:
+        raise HTTPException(
+            status_code=403,
+            detail="MCP is disabled for this workspace. Enable it in Workspace Settings > Dev.",
+        )
+
+
+def _mcp_page_record(
+    *,
+    page: Page,
+    org_slug: str,
+    base_url: str,
+    sections_by_id: dict[int, Section],
+) -> dict[str, Any]:
+    route_meta = _page_route_location(page, sections_by_id)
+    url_path = _hierarchical_page_href(
+        page,
+        org_slug=org_slug,
+        docs_root="/docs",
+        sections_by_id=sections_by_id,
+    )
+    section_chain = _section_chain(page.section_id, sections_by_id)
+    section_path = " / ".join(node.name for node in section_chain)
+    snippet = _mcp_text_from_html(page.published_html or page.html_content, max_chars=300)
+
+    return {
+        "id": page.id,
+        "title": page.title,
+        "slug": page.slug,
+        "url": f"{base_url}{url_path}",
+        "url_path": url_path,
+        "snippet": snippet,
+        "section_path": section_path or None,
+        "product_slug": route_meta.get("product_slug"),
+        "tab_slug": route_meta.get("tab_slug"),
+        "updated_at": page.updated_at.isoformat() if page.updated_at else None,
+    }
+
+
+def _mcp_search_pages(
+    *,
+    pages: list[Page],
+    org_slug: str,
+    base_url: str,
+    sections_by_id: dict[int, Section],
+    query: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    q = (query or "").strip().lower()
+    if len(q) < 2:
+        return []
+    tokens = [t for t in _TOKEN_RE.findall(q) if t]
+    scored: list[tuple[int, dict[str, Any]]] = []
+
+    for page in pages:
+        text = _mcp_text_from_html(page.published_html or page.html_content, max_chars=30_000).lower()
+        title = (page.title or "").lower()
+        score = 0
+        if q in title:
+            score += 80
+        if q in text:
+            score += 35
+        for token in tokens:
+            if token in title:
+                score += 12
+            if token in text:
+                score += 4
+        if score <= 0:
+            continue
+        scored.append(
+            (
+                score,
+                _mcp_page_record(
+                    page=page,
+                    org_slug=org_slug,
+                    base_url=base_url,
+                    sections_by_id=sections_by_id,
+                ),
+            )
+        )
+
+    scored.sort(key=lambda item: (-item[0], item[1]["title"].lower(), item[1]["id"]))
+    return [item[1] for item in scored[: max(1, min(limit, 25))]]
+
+
+def _mcp_get_page_by_reference(
+    *,
+    pages: list[Page],
+    org_slug: str,
+    sections_by_id: dict[int, Section],
+    page_id: int | None = None,
+    slug: str | None = None,
+    url_path: str | None = None,
+) -> Page | None:
+    if page_id is not None:
+        return next((p for p in pages if p.id == page_id), None)
+
+    slug_norm = (slug or "").strip().lower()
+    if slug_norm:
+        return next((p for p in pages if (p.slug or "").strip().lower() == slug_norm), None)
+
+    path = (url_path or "").strip()
+    if not path:
+        return None
+    parsed = urlparse(path)
+    candidate = (parsed.path or path).strip().strip("/")
+    org_prefix = f"docs/{org_slug}/"
+    if candidate.lower().startswith(org_prefix.lower()):
+        candidate = candidate[len(org_prefix):]
+    candidate = candidate.strip("/")
+    if not candidate:
+        return None
+
+    by_path: dict[str, Page] = {}
+    for page in pages:
+        full_path = _hierarchical_page_href(
+            page,
+            org_slug=org_slug,
+            docs_root="/docs",
+            sections_by_id=sections_by_id,
+        ).strip("/")
+        short_path = full_path.split("/", 2)[2] if full_path.startswith(f"docs/{org_slug}/") else full_path
+        by_path[short_path.lower()] = page
+        by_path[full_path.lower()] = page
+    return by_path.get(candidate.lower())
+
+
+def _mcp_tools() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": _MCP_TOOL_SEARCH,
+            "description": "Search published documentation pages and return ranked matches with URLs and snippets.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query text."},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of matches to return (1-25).",
+                        "minimum": 1,
+                        "maximum": 25,
+                        "default": 8,
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": _MCP_TOOL_GET,
+            "description": "Fetch one published page by page_id, slug, or URL path.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "integer", "description": "Published page ID (preferred)."},
+                    "slug": {"type": "string", "description": "Page slug, e.g. architecture-2."},
+                    "url_path": {
+                        "type": "string",
+                        "description": "Path or URL, e.g. adoc/documentation/architecture-2.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
+def _mcp_result(request_id: Any, result: dict[str, Any]) -> JSONResponse:
+    return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+def _mcp_error(
+    request_id: Any,
+    *,
+    code: int,
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> JSONResponse:
+    payload: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {"code": code, "message": message},
+    }
+    if data:
+        payload["error"]["data"] = data
+    return JSONResponse(payload)
+
+
+@router.get("/docs/{org_slug}/mcp/info")
+def org_mcp_info(org_slug: str, request: Request) -> Response:
+    """MCP discovery metadata for published docs."""
+    db = _get_db()
+    try:
+        org, pages, _ = _org_published_pages_with_sections(org_slug, db)
+        base = str(request.base_url).rstrip("/")
+        return JSONResponse(
+            {
+                "name": f"{org.slug or org.id}-published-docs",
+                "organization": {"id": org.id, "name": org.name, "slug": org.slug},
+                "enabled": bool(org.mcp_enabled),
+                "protocol_version": _MCP_PROTOCOL_VERSION,
+                "transport": {
+                    "type": "streamable-http",
+                    "rpc_url": f"{base}/docs/{org_slug}/mcp/rpc",
+                },
+                "tools": _mcp_tools(),
+                "published_page_count": len(pages),
+            }
+        )
+    finally:
+        _close_db(db)
+
+
+@router.post("/docs/{org_slug}/mcp/rpc")
+async def org_mcp_rpc(org_slug: str, request: Request) -> Response:
+    """Minimal MCP JSON-RPC transport for published docs retrieval."""
+    request_id: Any = None
+    try:
+        payload = json.loads((await request.body()).decode("utf-8"))
+    except Exception:
+        return _mcp_error(None, code=-32700, message="Parse error")
+
+    if not isinstance(payload, dict):
+        return _mcp_error(None, code=-32600, message="Invalid Request")
+
+    request_id = payload.get("id")
+    method = payload.get("method")
+    params = payload.get("params") or {}
+    if payload.get("jsonrpc") != "2.0" or not isinstance(method, str):
+        return _mcp_error(request_id, code=-32600, message="Invalid Request")
+
+    db = _get_db()
+    try:
+        try:
+            org, pages, sections = _org_published_pages_with_sections(org_slug, db)
+            _mcp_org_guard(org)
+        except HTTPException as exc:
+            return _mcp_error(request_id, code=-32004, message=str(exc.detail))
+
+        base = str(request.base_url).rstrip("/")
+
+        if method == "initialize":
+            return _mcp_result(
+                request_id,
+                {
+                    "protocolVersion": _MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": {
+                        "name": f"{org.slug or org.id}-published-docs",
+                        "version": _MCP_SERVER_VERSION,
+                    },
+                    "instructions": (
+                        "Use search_published_docs first, then get_published_doc for full page content."
+                    ),
+                },
+            )
+
+        if method == "notifications/initialized":
+            # Notification ack
+            if request_id is None:
+                return Response(status_code=202)
+            return _mcp_result(request_id, {})
+
+        if method == "ping":
+            return _mcp_result(request_id, {"ok": True})
+
+        if method == "tools/list":
+            return _mcp_result(request_id, {"tools": _mcp_tools()})
+
+        if method == "tools/call":
+            if not isinstance(params, dict):
+                return _mcp_error(request_id, code=-32602, message="Invalid params")
+
+            tool_name = (params.get("name") or "").strip()
+            arguments = params.get("arguments") or {}
+            if not isinstance(arguments, dict):
+                return _mcp_error(request_id, code=-32602, message="Invalid params: arguments must be an object")
+
+            if tool_name == _MCP_TOOL_SEARCH:
+                query = (arguments.get("query") or "").strip()
+                limit = arguments.get("limit", 8)
+                try:
+                    limit = int(limit)
+                except Exception:
+                    return _mcp_error(request_id, code=-32602, message="Invalid params: limit must be an integer")
+                if len(query) < 2:
+                    return _mcp_error(request_id, code=-32602, message="Invalid params: query must be at least 2 characters")
+
+                rows = _mcp_search_pages(
+                    pages=pages,
+                    org_slug=org_slug,
+                    base_url=base,
+                    sections_by_id=sections,
+                    query=query,
+                    limit=limit,
+                )
+                text_lines = [f"Found {len(rows)} matching published pages for '{query}':", ""]
+                for item in rows:
+                    line = f"- {item['title']} ({item['url']})"
+                    if item.get("section_path"):
+                        line += f" — {item['section_path']}"
+                    text_lines.append(line)
+                    if item.get("snippet"):
+                        text_lines.append(f"  {item['snippet']}")
+                return _mcp_result(
+                    request_id,
+                    {
+                        "content": [{"type": "text", "text": "\n".join(text_lines).strip()}],
+                        "structuredContent": {"query": query, "count": len(rows), "results": rows},
+                    },
+                )
+
+            if tool_name == _MCP_TOOL_GET:
+                page_id = arguments.get("page_id")
+                slug = arguments.get("slug")
+                url_path = arguments.get("url_path")
+                if page_id is not None:
+                    try:
+                        page_id = int(page_id)
+                    except Exception:
+                        return _mcp_error(request_id, code=-32602, message="Invalid params: page_id must be an integer")
+
+                page = _mcp_get_page_by_reference(
+                    pages=pages,
+                    org_slug=org_slug,
+                    sections_by_id=sections,
+                    page_id=page_id,
+                    slug=slug,
+                    url_path=url_path,
+                )
+                if not page:
+                    return _mcp_result(
+                        request_id,
+                        {
+                            "content": [{"type": "text", "text": "Published page not found."}],
+                            "isError": True,
+                        },
+                    )
+
+                record = _mcp_page_record(
+                    page=page,
+                    org_slug=org_slug,
+                    base_url=base,
+                    sections_by_id=sections,
+                )
+                full_text = _mcp_text_from_html(page.published_html or page.html_content, max_chars=120_000)
+                section_text = f"\nSection: {record['section_path']}" if record.get("section_path") else ""
+                body = f"# {page.title}\nURL: {record['url']}{section_text}\n\n{full_text}"
+                return _mcp_result(
+                    request_id,
+                    {
+                        "content": [{"type": "text", "text": body.strip()}],
+                        "structuredContent": {
+                            "page": {
+                                **record,
+                                "content_text": full_text,
+                            }
+                        },
+                    },
+                )
+
+            return _mcp_error(request_id, code=-32602, message=f"Unknown tool: {tool_name}")
+
+        return _mcp_error(request_id, code=-32601, message=f"Method not found: {method}")
+    finally:
+        _close_db(db)
+
+
 @router.get("/docs/{org_slug}/llms.txt")
 def org_llms_txt(org_slug: str, request: Request) -> Response:
     """Per-org llms.txt — page index for AI crawlers (llmstxt.org spec)."""
@@ -3261,6 +3642,11 @@ def org_llms_txt(org_slug: str, request: Request) -> Response:
             f"# {org.name}",
             "",
             f"> {org.tagline or (org.name + ' documentation')}",
+            "",
+            "## MCP",
+            "",
+            f"- Streamable HTTP endpoint: {base}/docs/{org_slug}/mcp/rpc",
+            f"- Server metadata: {base}/docs/{org_slug}/mcp/info",
             "",
             "## Pages",
             "",
@@ -3292,6 +3678,9 @@ def org_llms_full_txt(org_slug: str, request: Request) -> Response:
         parts = [
             f"# {org.name}",
             f"> {org.tagline or (org.name + ' documentation')}",
+            "",
+            "## MCP",
+            f"- Streamable HTTP endpoint: {base}/docs/{org_slug}/mcp/rpc",
             "",
         ]
         for page in pages[:100]:  # cap at 100 pages
