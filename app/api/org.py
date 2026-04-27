@@ -60,6 +60,7 @@ class OrgUpdate(BaseModel):
     header_html: str | None = None
     footer_html: str | None = None
     landing_blocks: str | None = None
+    mcp_enabled: bool | None = None
 
 
 class InviteCreate(BaseModel):
@@ -356,6 +357,8 @@ def update_org(
         org.footer_html = body.footer_html
     if body.landing_blocks is not None:
         org.landing_blocks = body.landing_blocks
+    if body.mcp_enabled is not None:
+        org.mcp_enabled = bool(body.mcp_enabled)
     if body.custom_docs_domain is not None:
         value = body.custom_docs_domain.strip().lower()
         if value == "":
