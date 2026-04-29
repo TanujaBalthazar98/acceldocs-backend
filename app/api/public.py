@@ -3631,6 +3631,114 @@ async def org_mcp_rpc(org_slug: str, request: Request) -> Response:
         _close_db(db)
 
 
+@router.get("/docs/{org_slug}/llm/info")
+def org_llm_info(org_slug: str, request: Request) -> Response:
+    """LLM-friendly REST bridge metadata for non-MCP clients."""
+    db = _get_db()
+    try:
+        org, pages, _ = _org_published_pages_with_sections(org_slug, db)
+        _mcp_org_guard(org)
+        base = str(request.base_url).rstrip("/")
+        return JSONResponse(
+            {
+                "name": f"{org.slug or org.id}-published-docs-llm-bridge",
+                "organization": {"id": org.id, "name": org.name, "slug": org.slug},
+                "enabled": bool(org.mcp_enabled),
+                "published_page_count": len(pages),
+                "endpoints": {
+                    "search": f"{base}/docs/{org_slug}/llm/search",
+                    "page": f"{base}/docs/{org_slug}/llm/page",
+                    "mcp_info": f"{base}/docs/{org_slug}/mcp/info",
+                    "mcp_rpc": f"{base}/docs/{org_slug}/mcp/rpc",
+                },
+                "tools": _mcp_tools(),
+            }
+        )
+    finally:
+        _close_db(db)
+
+
+@router.get("/docs/{org_slug}/llm/search")
+def org_llm_search(
+    org_slug: str,
+    request: Request,
+    q: str = Query(..., min_length=2, description="Search query text."),
+    limit: int = Query(8, ge=1, le=25, description="Maximum number of matches to return."),
+) -> Response:
+    """REST wrapper around search_published_docs for clients without MCP support."""
+    db = _get_db()
+    try:
+        org, pages, sections = _org_published_pages_with_sections(org_slug, db)
+        _mcp_org_guard(org)
+        base = str(request.base_url).rstrip("/")
+        rows = _mcp_search_pages(
+            pages=pages,
+            org_slug=org_slug,
+            base_url=base,
+            sections_by_id=sections,
+            query=q.strip(),
+            limit=limit,
+        )
+        return JSONResponse(
+            {
+                "organization": {"id": org.id, "name": org.name, "slug": org.slug},
+                "query": q.strip(),
+                "count": len(rows),
+                "results": rows,
+            }
+        )
+    finally:
+        _close_db(db)
+
+
+@router.get("/docs/{org_slug}/llm/page")
+def org_llm_page(
+    org_slug: str,
+    request: Request,
+    page_id: int | None = Query(None, description="Published page ID."),
+    slug: str | None = Query(None, description="Page slug, e.g. architecture-2."),
+    url_path: str | None = Query(None, description="Path or URL, e.g. adoc/documentation/architecture-2."),
+) -> Response:
+    """REST wrapper around get_published_doc for clients without MCP support."""
+    if page_id is None and not (slug or "").strip() and not (url_path or "").strip():
+        raise HTTPException(status_code=400, detail="Provide at least one of: page_id, slug, url_path")
+
+    db = _get_db()
+    try:
+        org, pages, sections = _org_published_pages_with_sections(org_slug, db)
+        _mcp_org_guard(org)
+        base = str(request.base_url).rstrip("/")
+        page = _mcp_get_page_by_reference(
+            pages=pages,
+            org_slug=org_slug,
+            sections_by_id=sections,
+            page_id=page_id,
+            slug=slug,
+            url_path=url_path,
+        )
+        if not page:
+            raise HTTPException(status_code=404, detail="Published page not found")
+
+        record = _mcp_page_record(
+            page=page,
+            org_slug=org_slug,
+            base_url=base,
+            sections_by_id=sections,
+        )
+        full_text = _mcp_text_from_html(page.published_html or page.html_content, max_chars=120_000)
+        return JSONResponse(
+            {
+                "organization": {"id": org.id, "name": org.name, "slug": org.slug},
+                "page": {
+                    **record,
+                    "content_text": full_text,
+                },
+            }
+        )
+    finally:
+        _close_db(db)
+
+
 @router.get("/docs/{org_slug}/llms.txt")
 def org_llms_txt(org_slug: str, request: Request) -> Response:
     """Per-org llms.txt — page index for AI crawlers (llmstxt.org spec)."""

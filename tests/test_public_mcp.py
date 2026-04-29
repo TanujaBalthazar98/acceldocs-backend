@@ -149,3 +149,44 @@ def test_org_mcp_rpc_respects_workspace_toggle(client, db, monkeypatch):
     error = resp.json()["error"]
     assert error["code"] == -32004
     assert "disabled" in error["message"].lower()
+
+
+def test_org_llm_bridge_info_and_search(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+    org, page_public, page_internal = _seed_org(db, mcp_enabled=True)
+
+    info_resp = client.get(f"/docs/{org.slug}/llm/info")
+    assert info_resp.status_code == 200
+    info_payload = info_resp.json()
+    assert info_payload["enabled"] is True
+    assert info_payload["published_page_count"] == 1
+    assert info_payload["endpoints"]["search"].endswith(f"/docs/{org.slug}/llm/search")
+    assert info_payload["endpoints"]["mcp_rpc"].endswith(f"/docs/{org.slug}/mcp/rpc")
+
+    search_resp = client.get(f"/docs/{org.slug}/llm/search?q=architecture&limit=10")
+    assert search_resp.status_code == 200
+    search_payload = search_resp.json()
+    assert search_payload["count"] == 1
+    assert search_payload["results"][0]["id"] == page_public.id
+    assert all(r["id"] != page_internal.id for r in search_payload["results"])
+
+
+def test_org_llm_bridge_page_by_slug(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+    org, page_public, _ = _seed_org(db, mcp_enabled=True)
+
+    page_resp = client.get(f"/docs/{org.slug}/llm/page?slug={page_public.slug}")
+    assert page_resp.status_code == 200
+    payload = page_resp.json()["page"]
+    assert payload["id"] == page_public.id
+    assert payload["slug"] == page_public.slug
+    assert "observability platform docs" in payload["content_text"].lower()
+
+
+def test_org_llm_bridge_respects_workspace_toggle(client, db, monkeypatch):
+    monkeypatch.setattr(public_api, "_get_db", lambda: db)
+    org, *_ = _seed_org(db, mcp_enabled=False)
+
+    info_resp = client.get(f"/docs/{org.slug}/llm/info")
+    assert info_resp.status_code == 403
+    assert "disabled" in info_resp.json()["detail"].lower()
