@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.lib.slugify import to_slug as slugify
-from app.models import GoogleToken, JoinRequest, Organization, OrgRole, User
+from app.models import GoogleToken, Invitation, JoinRequest, Organization, OrgRole, User
 from app.services.drive_acl import sync_member_drive_permission
 from app.services.encryption import get_encryption_service
 from app.middleware.security import limiter
@@ -95,6 +95,46 @@ def _extract_docs_next_from_state(state: str | None) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _resolve_pending_invitation_for_callback(
+    db: Session,
+    *,
+    user_email: str | None,
+    invite_token: str | None,
+) -> tuple[Invitation | None, str | None]:
+    """Resolve an invitation that permits auth without existing org membership.
+
+    Returns (invitation, error_message). When invite_token is provided, it must
+    map to a valid, pending invitation for the same email.
+    """
+    normalized_email = (user_email or "").strip().lower()
+    normalized_token = (invite_token or "").strip()
+
+    if not normalized_token:
+        return None, None
+
+    invitation = db.query(Invitation).filter(Invitation.token == normalized_token).first()
+    if not invitation:
+        return None, "Invitation not found."
+
+    invite_email = (invitation.email or "").strip().lower()
+    if invite_email and normalized_email and invite_email != normalized_email:
+        return None, "Invitation email does not match the signed-in account."
+
+    if invitation.accepted_at is not None:
+        return None, "Invitation has already been accepted."
+
+    expires_at = invitation.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        return None, "Invitation has expired."
+
+    if not invitation.organization_id:
+        return None, "Invitation is not tied to a workspace."
+
+    return invitation, None
 
 
 def _resolve_default_redirect_from_request(request: Request | None) -> str:
@@ -459,6 +499,7 @@ async def callback(
     state: str | None = None,
     api: bool = False,
     redirect_uri: str | None = None,
+    invite_token: str | None = None,
     db: Session = Depends(get_db),
 ):
     """Handle OAuth callback — exchange code for tokens, upsert user, store refresh token, return HTML popup.
@@ -740,10 +781,25 @@ async def callback(
                         "requested_at": pending_request.created_at.isoformat() if pending_request.created_at else None,
                     }
             if not pending_join_result:
-                no_account_result = {
-                    "redirect": f"{settings.frontend_url.rstrip('/')}/signup?reason=no_account",
-                    "message": "No workspace membership found. Request access from your workspace owner/admin.",
-                }
+                invitation, invitation_error = _resolve_pending_invitation_for_callback(
+                    db,
+                    user_email=email,
+                    invite_token=invite_token,
+                )
+                if invitation:
+                    logger.info(
+                        "Allowing invite-auth callback for %s using invitation %s",
+                        email,
+                        invitation.id,
+                    )
+                else:
+                    no_account_message = "No workspace membership found. Request access from your workspace owner/admin."
+                    if invite_token and invitation_error:
+                        no_account_message = invitation_error
+                    no_account_result = {
+                        "redirect": f"{settings.frontend_url.rstrip('/')}/signup?reason=no_account",
+                        "message": no_account_message,
+                    }
 
     # Persist user + org membership atomically before optional token storage.
     # This avoids partial "user-only" records when org assignment fails.
